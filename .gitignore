@@ -1,0 +1,6 @@
+docs/private/
+results/
+.env
+.DS_Store
+__pycache__/
+*.pyc
