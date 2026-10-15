@@ -130,6 +130,8 @@ the matrix and fix check are done; write code locally between runs, not on paid 
 
 ## Stage 2 handoff (EP2 crash and TP2), not in scope here
 
+Stage 2 spec and results: `stage2.md`. The notes below are the original handoff.
+
 - TP2 `block_n = 128` error likely comes from the FP8 block-scaled MTP experts (cookbook: the NVIDIA export is
   "NVFP4 experts, FP8 N-gram table, FP8 block-scaled MTP experts"). Test TP2 without NEXTN first. PR #36787 claims
   NVFP4 TP2/EP1 serves on its branch.
