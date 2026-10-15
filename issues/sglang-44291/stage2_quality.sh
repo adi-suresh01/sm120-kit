@@ -20,9 +20,9 @@ mkdir -p "$out"
 python3 -m sglang.test.run_eval --host 127.0.0.1 --port "$port" --eval-name gsm8k --num-examples "$n" \
     --max-tokens 16384 --num-threads 64 >"$out/gsm8k.txt" 2>&1
 grep -E '^Score:' "$out/gsm8k.txt"
-# run_eval scores a request that failed every retry as an empty answer and still exits 0, so a server that broke
-# mid-eval would pass as a low score.
-if grep -q 'All retry attempts exhausted' "$out/gsm8k.txt"; then
+# run_eval scores a request that failed every retry, or that the server aborted with a 400, as an empty answer
+# and still exits 0, so a server that broke mid-eval would pass as a low score.
+if grep -qE 'All retry attempts exhausted|Bad Request Error' "$out/gsm8k.txt"; then
     echo "gsm8k: requests failed against the server" >&2
     exit 1
 fi

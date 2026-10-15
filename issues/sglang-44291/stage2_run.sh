@@ -133,8 +133,9 @@ if [[ -z $fault ]]; then
     fault=$(grep -oE 'ValueError: [^.]*|RuntimeError: [^.]*|AssertionError[^.]*|OutOfMemoryError[^.]*' "$log" | head -n 1 || true)
 fi
 fault=${fault:0:200}
-# Under CUDA_LAUNCH_BLOCKING=1 the deepest Python frame before the first error names the kernel's launcher.
-where=$(awk '/File "/ { f = $0 } /illegal memory access|cudaErrorIllegalAddress|Error: / { if (f != "") { sub(/.*\//, "", f); print f; exit } }' "$log" || true)
+# Under CUDA_LAUNCH_BLOCKING=1 the deepest Python frame before the first CUDA fault names the kernel's launcher;
+# the frame before the first other error is the fallback, matching the order of the fault column.
+where=$(awk '/File "/ { f = $0 } /illegal memory access|cudaErrorIllegalAddress|CUDA error: / && f != "" { c = f; exit } /Error: / && g == "" && f != "" { g = f } END { w = (c != "" ? c : g); sub(/.*\//, "", w); print w }' "$log" || true)
 # The per-request mean over GSM8K only; the server log's last value would come from whatever bench ran last.
 accept=$(grep -oE 'from meta_info\): n=[0-9]+ mean=[0-9.]+' "$run_dir/gsm8k.txt" 2>/dev/null | sed 's/.*mean=//' || true)
 score=$(grep -m1 -oE '^Score: [0-9.]+' "$run_dir/gsm8k.txt" 2>/dev/null | awk '{print $2}' || true)

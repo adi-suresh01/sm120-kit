@@ -156,3 +156,11 @@ four configs ~60 min: ~3 h, ~$15 at $4.98/hr. Hard cap 4 h (~$20).
 | `stage2_run.sh` | Runs A0-A5, B0-B3, C with their patch sets through `serve_and_smoke.sh`, one log dir per run |
 | `stage2_quality.sh` | GSM8K 200, accept length, bench_serving at 1 / 16 / 64 against a running server |
 | `patches/pr<N>.diff` | PR diffs pinned to the heads above |
+
+## Results (stage 2)
+
+### Pod log
+
+| Date | Pod id | GPU | Start | Stop | Cost |
+|---|---|---|---|---|---|
+| 2026-10-15 | kfyqcddi6nefdp | 2x RTX PRO 6000 Server, secure, US-PA-1, host CUDA 13.2, 377 GB RAM, 96 vCPU, $4.98/hr (no community or WK stock) | 09:45:22Z | | |
