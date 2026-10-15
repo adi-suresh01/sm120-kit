@@ -91,11 +91,13 @@ command.
   `ar_repro.py` shows staged v1 slower than NCCL at <= 1 MB: disable v1 on a VMM-backed allocator with a warning.
   PCIe-IPC as a default stays out of the code (#34528 made it opt-in on purpose).
 - **H2:** make the eligibility check exercise the real IPC path (`cudaIpcGetMemHandle` / `cudaIpcOpenMemHandle`
-  across ranks), not only P2P. Same warning and fallback.
+  across ranks), not only P2P. If it fails, disable v1 with a warning and fall through to NCCL.
 - **H3:** sm_12x PCIe guard like vLLM #47751, backed by our repro and latency numbers.
 
-Tests and evidence for the PR: a GPU test that a VMM-backed allocator leaves v1 disabled and the all-reduce still
-matches NCCL; server S2 with the fix boots and serves coherently; the `ar_repro.py` latency table in the PR body.
+Tests and evidence for the PR: a GPU test that, with a VMM-backed allocator, v1 stays enabled, stages graph
+inputs (`tms_cudagraph` is set), and its captured all-reduce matches NCCL exactly (for the fallback, the test
+asserts v1 is disabled instead); server S2 with the fix boots and serves coherently; the `ar_repro.py` latency
+table in the PR body.
 The patch is dry-run checked against sglang main before the pod. PR goes from `adi-suresh01/sglang`; Aditya
 approves the PR body and the #44291 comment before anything is opened or posted.
 
