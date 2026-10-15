@@ -18,27 +18,4 @@ case ${2:-pr60069} in
     *) echo "unknown patch: $2" >&2; exit 2 ;;
 esac
 
-# find_spec locates the package without importing it, which for vllm and flashinfer takes seconds.
-site_root=$(python3 -c "import importlib.util, os; print(os.path.dirname(os.path.dirname(importlib.util.find_spec('$pkg').origin)))")
-
-is_applied() {
-    patch -p1 -R --dry-run --silent -d "$site_root" <"$patch_file" >/dev/null 2>&1
-}
-
-case ${1:-status} in
-    apply)
-        if is_applied; then echo "already applied"; exit 0; fi
-        patch -p1 -d "$site_root" <"$patch_file"
-        ;;
-    revert)
-        if ! is_applied; then echo "not applied"; exit 0; fi
-        patch -p1 -R -d "$site_root" <"$patch_file"
-        ;;
-    status)
-        if is_applied; then echo "applied"; else echo "not applied"; fi
-        ;;
-    *)
-        echo "usage: $0 apply|revert|status [pr60069|fi4827|pr57946]" >&2
-        exit 2
-        ;;
-esac
+exec bash "$here/../../scripts/patch_pkg.sh" "${1:-status}" "$patch_file" "$pkg" 1
