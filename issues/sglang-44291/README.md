@@ -65,9 +65,11 @@ Record which all-reduce backend each run selected (the `[AR] Using ...` line is 
 | S3 | S2 + `SGLANG_ENABLE_PCIE_IPC_ALLREDUCE=1` | serves (PCIe-IPC copies inputs into its own workspace) |
 | S4 | `--disable-custom-all-reduce` | serves on NCCL |
 
-`ar_repro.py` (no server) toggles the same knobs: backend v1 / NCCL / PCIe-IPC, allocator VMM on/off, eager vs
-graph capture. It also times all-reduce latency at decode sizes (16 KB to 8 MB, bf16) so the fix choice and the
-PR rest on numbers.
+`ar_repro.py` (no server, torchrun with 2 ranks) captures 8 all-reduces in one CUDA graph and toggles: v1 as
+shipped (graph inputs IPC-registered after capture), v1 staged (graph inputs copied into v1's pre-registered
+IPC buffer, the path `SGLANG_MEMORY_SAVER_CUDA_GRAPH` already uses), and NCCL; each with the allocator VMM-backed
+or not. It checks the result against eager NCCL and times us per all-reduce at 16 KB to 8 MB (bf16). PCIe-IPC
+(#34528) is tied into sglang's group setup and tuning, so it is covered by server run S3 only.
 
 If S1 does not select v1 (sglang's P2P check fails on the rented host), this pod cannot reproduce the bug:
 record `nvidia-smi topo -p2p r` and the P2P check log, stop, and terminate.
@@ -80,12 +82,14 @@ command.
 
 ## Fix paths
 
-- **H1:** v1 `CustomAllreduce` checks for a VMM-backed allocator at eligibility time (reuse
-  `_is_vmm_backed_allocator` / `is_vmm_pointer`). If VMM-backed, v1 disables itself with a warning naming
-  `expandable_segments`, and sglang falls through to the next backend (NCCL). The warning mentions
-  `SGLANG_ENABLE_PCIE_IPC_ALLREDUCE=1` only if S3 serves and `ar_repro.py` shows PCIe-IPC beating NCCL at decode
-  sizes. Flipping PCIe-IPC to default stays out of the code (#34528 made it opt-in on purpose); propose it in the
-  PR text with numbers.
+- **H1:** v1 `CustomAllreduce` already has a staging path for VMM graph memory: under
+  `SGLANG_MEMORY_SAVER_CUDA_GRAPH` it calls `_all_reduce_impl(..., registered=False)` during capture, which
+  copies each input into the pre-registered `cudaMalloc` buffer, so only that buffer reaches
+  `cudaIpcGetMemHandle`. The fix turns staging on when the caching allocator is VMM-backed (probe with
+  `is_vmm_pointer`, new helper `is_caching_allocator_vmm_backed` in `cuda_vmm_utils.py`). Custom all-reduce keeps
+  working under `expandable_segments` at the cost of one device-to-device copy per call. Fallback, only if
+  `ar_repro.py` shows staged v1 slower than NCCL at <= 1 MB: disable v1 on a VMM-backed allocator with a warning.
+  PCIe-IPC as a default stays out of the code (#34528 made it opt-in on purpose).
 - **H2:** make the eligibility check exercise the real IPC path (`cudaIpcGetMemHandle` / `cudaIpcOpenMemHandle`
   across ranks), not only P2P. Same warning and fallback.
 - **H3:** sm_12x PCIe guard like vLLM #47751, backed by our repro and latency numbers.
