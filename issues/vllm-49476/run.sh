@@ -40,18 +40,6 @@ gpu_util() {
     fi
 }
 
-# A crashed server can leave an EngineCore child holding memory, which would make the next variant OOM falsely.
-wait_gpu_idle() {
-    local used
-    for _ in $(seq 60); do
-        used=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits -i 0)
-        if (( used < 2048 )); then return 0; fi
-        sleep 2
-    done
-    echo "GPU 0 still has ${used} MiB in use; kill leftover vllm processes first" >&2
-    exit 1
-}
-
 ballast_pid=""
 trap 'if [[ -n $ballast_pid ]]; then kill "$ballast_pid" 2>/dev/null || true; fi' EXIT
 
@@ -120,7 +108,7 @@ run_variant() {
 
     echo ">>> $label (pr60069: $(bash "$here/patch.sh" status pr60069), fi4827: $(bash "$here/patch.sh" status fi4827)," \
         "pr57946: $(bash "$here/patch.sh" status pr57946), env: ${env_prefix[*]:-none}, gpu util: $util)"
-    wait_gpu_idle
+    bash "$repo_root/scripts/wait_gpu_idle.sh"
     mkdir -p "$(dirname "$log")"
     if [[ -n ${MEM_BUDGET_GIB:-} ]]; then start_ballast "${log%.log}.ballast.log"; fi
 
