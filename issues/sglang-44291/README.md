@@ -49,7 +49,7 @@ not divisible by weight quantization block_n = 128`. TP1 on one GPU works.
 
 | # | Hypothesis | Confirmed by | Killed by |
 |---|---|---|---|
-| H1 | VMM-backed memory (`expandable_segments`) breaks v1's IPC handshake on graph buffers | S2 fails with `invalid argument` in `get_graph_buffer_ipc_meta`, S1 serves | S2 serves |
+| H1 | VMM-backed memory (`expandable_segments`) breaks v1's IPC handshake on graph buffers | S2 fails in `get_graph_buffer_ipc_meta` (`invalid argument`, or `failed to get pointer attr` one step earlier), S1 serves | S2 serves |
 | H2 | Legacy CUDA IPC does not work between these two GPUs at all (IOMMU/ACS, container, driver) | `ar_repro.py` fails on plain `cudaMalloc` memory | plain memory works |
 | H3 | Handshake succeeds but the v1 kernel faults on sm_120 (vLLM #47751's assumption) | S1 passes the handshake and fails at replay with a different error | S1 serves coherently |
 
@@ -85,18 +85,19 @@ command.
 - **H1:** v1 `CustomAllreduce` already has a staging path for VMM graph memory: under
   `SGLANG_MEMORY_SAVER_CUDA_GRAPH` it calls `_all_reduce_impl(..., registered=False)` during capture, which
   copies each input into the pre-registered `cudaMalloc` buffer, so only that buffer reaches
-  `cudaIpcGetMemHandle`. The fix turns staging on when the caching allocator is VMM-backed (probe with
-  `is_vmm_pointer`, new helper `is_caching_allocator_vmm_backed` in `cuda_vmm_utils.py`). Custom all-reduce keeps
-  working under `expandable_segments` at the cost of one device-to-device copy per call. Fallback, only if
-  `ar_repro.py` shows staged v1 slower than NCCL at <= 1 MB: disable v1 on a VMM-backed allocator with a warning.
+  `cudaIpcGetMemHandle`. The fix stages any graph input that is VMM memory, checked per input with the existing
+  `is_vmm_pointer` at capture time, so it also covers the memory saver and symmetric-memory pools, and costs
+  nothing at replay beyond one device-to-device copy per staged call. Fallback, only if `ar_repro.py` shows
+  staged v1 more than 5% slower than pynccl at 2-16 KB in both runs: `should_custom_ar` declines VMM graph
+  inputs so pynccl takes them.
   PCIe-IPC as a default stays out of the code (#34528 made it opt-in on purpose).
 - **H2:** make the eligibility check exercise the real IPC path (`cudaIpcGetMemHandle` / `cudaIpcOpenMemHandle`
   across ranks), not only P2P. If it fails, disable v1 with a warning and fall through to NCCL.
 - **H3:** sm_12x PCIe guard like vLLM #47751, backed by our repro and latency numbers.
 
-Tests and evidence for the PR: a GPU test that, with a VMM-backed allocator, v1 stays enabled, stages graph
-inputs (`tms_cudagraph` is set), and its captured all-reduce matches NCCL exactly (for the fallback, the test
-asserts v1 is disabled instead); server S2 with the fix boots and serves coherently; the `ar_repro.py` latency
+Tests and evidence for the PR: a GPU test that, with a VMM-backed allocator, v1 stays enabled, stages VMM
+graph inputs, and its captured all-reduce matches NCCL exactly (for the fallback, the test asserts the input
+is declined instead); server S2 with the fix boots and serves coherently; the `ar_repro.py` latency
 table in the PR body.
 The patch is dry-run checked against sglang main before the pod. PR goes from `adi-suresh01/sglang`; Aditya
 approves the PR body and the #44291 comment before anything is opened or posted.
@@ -119,6 +120,7 @@ approves the PR body and the #44291 comment before anything is opened or posted.
 | `setup.sh` | Version check (sglang, torch, flashinfer, driver) and model download |
 | `run.sh` | Server variants S1-S4, reusing `scripts/serve_and_smoke.sh` (sglang serves `/health` and `/v1/chat/completions`) |
 | `ar_repro.py` | Minimal `CustomAllreduce` + graph-capture repro and latency table; becomes the PR's regression test |
+| `ar_matrix.sh` | Runs `ar_repro.py` over modes x allocators x repeats with timeouts, keeping the full log |
 
 ## Cost estimate and stop rules
 
