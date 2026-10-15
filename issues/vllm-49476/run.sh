@@ -16,6 +16,7 @@
 #   patched-noskip-graphs  PR #60069 + VLLM_MOE_SKIP_PADDING=0: workaround with one patch and an env var
 #
 # CONCURRENCY=N sends N parallel smoke requests so decode batches are padded up to a captured graph size.
+# TAG=x appends -x to the result label, for runs on a changed environment (e.g. TAG=fi071 after a FlashInfer bump).
 #
 # MEM_BUDGET_GIB=31.45 emulates the 5090 on a 96 GB PRO 6000: a ballast process leaves only that much free and
 # --gpu-memory-utilization is scaled to the same KV budget. It reproduces the memory ceiling, not the 5090's
@@ -104,7 +105,7 @@ run_variant() {
 
     local util label log
     util=$(gpu_util)
-    label="${variant}${MEM_BUDGET_GIB:+-${MEM_BUDGET_GIB}g}${CONCURRENCY:+-c${CONCURRENCY}}"
+    label="${variant}${MEM_BUDGET_GIB:+-${MEM_BUDGET_GIB}g}${CONCURRENCY:+-c${CONCURRENCY}}${TAG:+-${TAG}}"
     log="$results_dir/$label/server.log"
 
     local -a cmd=("${env_prefix[@]}" vllm serve "$model"
