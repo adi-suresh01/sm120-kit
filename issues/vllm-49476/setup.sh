@@ -7,8 +7,15 @@ set -euo pipefail
 : "${HF_HOME:?set HF_HOME to a path on the persistent volume}"
 model=nvidia/Qwen3.6-35B-A3B-NVFP4
 
-python3 -m pip install --upgrade pip
-python3 -m pip install "vllm==0.31.0" "huggingface_hub[cli]"
+# patch.sh needs patch(1); slim images such as vllm/vllm-openai do not ship it.
+command -v patch >/dev/null || { apt-get update && apt-get install -y patch; }
+
+# Skip when already pinned: on the vllm/vllm-openai:v0.31.0 image a reinstall swaps NCCL 2.30.7 for 2.29.7,
+# which moves the environment away from the reporter's.
+installed=$(python3 -c 'from importlib.metadata import version; print(version("vllm"))' 2>/dev/null || true)
+if [[ $installed != 0.31.0 ]]; then
+    python3 -m pip install "vllm==0.31.0"
+fi
 
 python3 - <<'EOF'
 from importlib.metadata import version
@@ -19,5 +26,6 @@ for pkg, want in expected.items():
     print(f"{pkg}=={got}{flag}")
 EOF
 
-huggingface-cli download "$model"
+# Python API instead of the CLI: huggingface_hub 1.x renamed huggingface-cli to hf.
+python3 -c "from huggingface_hub import snapshot_download; snapshot_download('$model')"
 echo "setup done"
