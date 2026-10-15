@@ -142,12 +142,82 @@ the matrix and fix check are done; write code locally between runs, not on paid 
 
 | Date | Pod id | GPU | Start | Stop | Cost |
 |---|---|---|---|---|---|
+| 2026-10-15 | wrbkikt79p44es | 2x RTX PRO 6000 Server, secure, EUR-IS-2, host CUDA 13.2, $4.98/hr (no community or WK stock) | 08:15:43Z | 08:42:38Z (terminated) | ~$2.23 (26.9 min x $4.98/hr) |
 
-## Results
+## Environment (pod wrbkikt79p44es)
+
+```
+GPUs     : 2x RTX PRO 6000 Blackwell Server Edition, 97887 MiB, cc 12.0, driver 595.91.07, host CUDA 13.2
+Topology : GPU0-GPU1 SYS (PCIe across the CPU interconnect, no NVLink); nvidia-smi topo -p2p r: OK both ways
+Image    : lmsysorg/sglang:dev-cu13, sglang 0.0.0.dev1+ga6a8c5601 (editable, /sgl-workspace/sglang),
+           torch 2.14.1+cu130, flashinfer-python 0.7.1, triton 3.8.0, transformers 5.19.0
+Allocator: no PYTORCH_*ALLOC_CONF preset in the image
+```
+
+The image runs Python from a venv (`/opt/sglang`) set through the image's ENV. With the entrypoint overridden for
+sshd, SSH sessions do not inherit it, so every command sourced `/proc/1/environ` exported to
+`/workspace/container_env.sh`.
+
+## Results (2026-10-15)
+
+Server runs, `Qwen/Qwen3-0.6B`, TP2, CUDA graphs on:
 
 | Run | Backend | Verdict | Fault | Notes |
 |---|---|---|---|---|
+| s1 | v1 (registers 2850 + 2052 graph addresses) | OK, boot 81 s | - | default allocator |
+| s2 | v1 | BOOT_FAIL, 35 s | `RuntimeError: invalid argument` in `get_graph_buffer_ipc_meta` | `expandable_segments`; reporter's attempt 1 |
+| s3 | v1 + PCIe-IPC | BOOT_FAIL, 40 s | same | PCIe-IPC all-reduce enabled and tuned, v1 still captures and fails: not a workaround |
+| s4 | NCCL | OK, 41 s | - | `--disable-custom-all-reduce` |
+| s2-fix | v1 (2850 + 2052, staged) | OK, 41 s | - | `expandable_segments` + fix; same text as s1-fix at temperature 0 |
+| s1-fix | v1 (2850 + 2052) | OK, 41 s | - | default allocator + fix |
+
+`ar_repro.py`, 8 captured all-reduces per graph, median of 2 runs, rank 0. The dispatcher picked v1
+`CustomAllreduce` in every run.
+
+| KB | registered, default | staged, default | staged, VMM | pynccl, default | nccl, default |
+|---|---|---|---|---|---|
+| 2 | 4.58 us | 5.38 us | 5.38 us | 12.39 us | 12.37 us |
+| 16 | 5.25 us | 6.17 us | 6.13 us | 14.39 us | 14.34 us |
+| 256 | 14.07 us | 14.95 us | 15.01 us | 22.63 us | 22.66 us |
+| 1024 | 42.01 us | 43.08 us | 43.08 us | 47.67 us | 47.66 us |
+| 8192 | 309.28 us | 318.30 us | 321.34 us | 335.47 us | 334.73 us |
+
+- registered + VMM: fails at the first size, `RuntimeError: invalid argument` at `custom_all_reduce.cuh:614`
+  (`cudaIpcGetMemHandle`). Registered + default and staged under both allocators: zero error at every size.
+- Staging costs about 0.8-0.9 us at decode sizes and about 1-4% from 1 MB up; it stays 2.3-2.7x faster than
+  pynccl at 2-16 KB, so the staging fix was kept (Task 12 gate).
+- pynccl under VMM returned wrong sums (max abs error 3329) at most sizes in both runs. A server-level check
+  (`--disable-custom-all-reduce`, default vs `expandable_segments`, 8 concurrent requests) gave 8/8 identical
+  responses, so this is an artifact of how `ar_repro.py` drives pynccl, not a server bug. Not reported.
+
+Regression test (`test_custom_all_reduce_v1_vmm.py`, fork commit 7706bbf):
+- without the fix: `1 failed, 1 passed`; `test_allocator_is_vmm` passes, `test_graph_all_reduce_matches_nccl[16-False]`
+  fails with `RuntimeError: invalid argument`.
+- with the fix: `9 passed`.
+- default-path check with the fix (registered mode, default allocator): zero error at every size, 4.54 us at 2 KB
+  (4.58 us before the fix), so the new in-capture `is_vmm_pointer` call is harmless for default users.
+
+Decode A/B, `sglang.benchmark.one_batch_server`, input 256 / output 128, steady-state generation tok/s, one run each:
+
+| Batch | before fix, default | after fix, default | after fix, `expandable_segments` |
+|---|---|---|---|
+| 1 | 704 | 705 | 681 |
+| 8 | 3988 | 3995 | 3883 |
+| 32 | 12261 | 12310 | 12030 |
+
+Default users see no change; `expandable_segments` now boots and decodes 2-3% slower than the default allocator.
 
 ## Outcome
 
-Not started.
+H1 confirmed. On 2x PCIe RTX PRO 6000, sglang falls back to v1 `CustomAllreduce`, and with
+`expandable_segments` (which the Qwen3.8 cookbook recommends) v1's CUDA-graph registration calls
+`cudaIpcGetMemHandle` on VMM memory and fails with `invalid argument`. The fix (fork branch
+`fix/custom-ar-vmm-graph-buffers`, commit ad19c6a) stages VMM graph inputs through v1's pre-registered IPC
+buffer. It is verified red/green on the pod, leaves default users unchanged, and costs 2-3% decode for
+`expandable_segments` users, who could not boot before.
+
+Workarounds today: drop `expandable_segments`, or `--disable-custom-all-reduce`. `SGLANG_ENABLE_PCIE_IPC_ALLREDUCE=1`
+does not help (s3).
+
+Cost: ~$2.23 of the ~$10-15 estimate. Next: PR from the fork and a comment on #44291.
+Stage 2 (EP2 crash, TP2 alignment) stays open per the handoff above.

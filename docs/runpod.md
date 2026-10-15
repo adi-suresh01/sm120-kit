@@ -30,6 +30,8 @@ Re-read the catalog before quoting a launch.
 Template: a PyTorch / CUDA 13 image, then `pip install` the exact vLLM / SGLang version from the issue. When the
 reporter used an official image (e.g. `vllm/vllm-openai:vX`), use that image instead and override the entrypoint
 to start sshd; such images do not read `PUBLIC_KEY`. See `issues/vllm-49476/README.md` for the command.
+If the image runs Python from a venv set through its ENV (lmsysorg/sglang does), SSH sessions do not inherit
+it; export `/proc/1/environ` to a file and source it in every command (see `issues/sglang-44291/README.md`).
 Attach a network volume for `HF_HOME` so model weights download once.
 
 ## Rules
