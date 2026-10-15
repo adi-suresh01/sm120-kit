@@ -16,7 +16,8 @@ for rep in $(seq "$repeats"); do
         for mode in registered staged pynccl nccl; do
             echo ">>> rep=$rep conf=${conf:-default} mode=$mode" >>"$log"
             # A rank stuck in a faulted kernel would otherwise hold the pod until gloo's two-hour timeout.
-            if PYTORCH_CUDA_ALLOC_CONF="$conf" timeout -k 15 300 \
+            if [[ -n $conf ]]; then alloc_env=(PYTORCH_CUDA_ALLOC_CONF="$conf"); else alloc_env=(-u PYTORCH_CUDA_ALLOC_CONF); fi
+            if timeout -k 15 300 env "${alloc_env[@]}" \
                 torchrun --nproc_per_node 2 "$here/ar_repro.py" --mode "$mode" >>"$log" 2>&1; then
                 echo "<<< exit=0" >>"$log"
             else

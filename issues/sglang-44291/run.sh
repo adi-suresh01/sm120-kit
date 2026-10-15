@@ -36,18 +36,29 @@ label=${variant}${TAG:+-${TAG}}
 log="$results_dir/$label/server.log"
 mkdir -p "$(dirname "$log")"
 
-cmd=(env PYTORCH_CUDA_ALLOC_CONF="$alloc_conf" "${extra_env[@]}"
+# An empty PYTORCH_CUDA_ALLOC_CONF still counts as set to anything that checks for it, so default runs unset it.
+if [[ -n $alloc_conf ]]; then
+    alloc_env=(PYTORCH_CUDA_ALLOC_CONF="$alloc_conf")
+else
+    alloc_env=(-u PYTORCH_CUDA_ALLOC_CONF)
+fi
+cmd=(env "${alloc_env[@]}" "${extra_env[@]}"
     python3 -m sglang.launch_server --model-path "$model" --tp-size 2
     --host 127.0.0.1 --port "$port" --log-level debug "${extra[@]}")
 
 bash "$repo_root/scripts/wait_gpu_idle.sh"
 echo ">>> $label: ${cmd[*]}"
-verdict=$(bash "$repo_root/scripts/serve_and_smoke.sh" "$log" "$port" "$model" -- "${cmd[@]}" || true)
+# A server wedged in a faulted kernel can block serve_and_smoke's shutdown wait; timeout kills the whole group.
+verdict=$(BOOT_TIMEOUT=${BOOT_TIMEOUT:-600} timeout -k 15 900 \
+    bash "$repo_root/scripts/serve_and_smoke.sh" "$log" "$port" "$model" -- "${cmd[@]}" || true)
+verdict=${verdict:-RESULT=TIMEOUT outer=900s}
 echo "$verdict"
 
 # v2 logs its choice at debug level; v1 logs how many graph addresses it registered once capture succeeds.
 backend=$(grep -m1 -oE '\[AR\] Using [A-Za-z0-9]+|Registering [0-9]+ cuda graph addresses' "$log" || true)
-fault=$(grep -m1 -oE 'get_graph_buffer_ipc_meta|failed to get pointer attr|RuntimeError: [^.]*invalid argument[^.]*|illegal memory access[^.]*|CUDA error[^.]*|OutOfMemoryError[^.]*' "$log" || true)
+fault=$(grep -m1 -oE 'failed to get pointer attr|RuntimeError: [^.]*|illegal memory access[^.]*|CUDA error[^.]*|OutOfMemoryError[^.]*' "$log" || true)
+# The frame name only says where it failed, so it is the fallback when no error text reached the log.
+if [[ -z $fault ]]; then fault=$(grep -m1 -oE 'get_graph_buffer_ipc_meta' "$log" || true); fi
 
 printf '%s\t%s\t%s\t%s\t%s\n' "$(date -u +%FT%TZ)" "$label" "${backend:--}" "$verdict" "${fault:--}" \
     >>"$results_dir/summary.tsv"

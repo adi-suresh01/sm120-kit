@@ -6,7 +6,7 @@ set -euo pipefail
 : "${HF_HOME:?set HF_HOME to a path on the volume disk}"
 
 # v1 is only selected when the GPUs can reach each other; "OK" in every off-diagonal cell is required.
-nvidia-smi topo -p2p r
+nvidia-smi topo -p2p r || echo "nvidia-smi topo -p2p r is not supported on this host"
 
 # VMM detection in ar_repro.py and in the fix goes through cuda.bindings.
 python3 -c "import cuda.bindings.driver; print('cuda.bindings ok')"
