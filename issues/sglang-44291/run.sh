@@ -36,11 +36,12 @@ label=${variant}${TAG:+-${TAG}}
 log="$results_dir/$label/server.log"
 mkdir -p "$(dirname "$log")"
 
-# An empty PYTORCH_CUDA_ALLOC_CONF still counts as set to anything that checks for it, so default runs unset it.
+# An empty value still counts as set to anything that checks for it, so default runs unset both names; newer
+# torch reads PYTORCH_ALLOC_CONF before PYTORCH_CUDA_ALLOC_CONF.
 if [[ -n $alloc_conf ]]; then
-    alloc_env=(PYTORCH_CUDA_ALLOC_CONF="$alloc_conf")
+    alloc_env=(PYTORCH_ALLOC_CONF="$alloc_conf" PYTORCH_CUDA_ALLOC_CONF="$alloc_conf")
 else
-    alloc_env=(-u PYTORCH_CUDA_ALLOC_CONF)
+    alloc_env=(-u PYTORCH_ALLOC_CONF -u PYTORCH_CUDA_ALLOC_CONF)
 fi
 cmd=(env "${alloc_env[@]}" "${extra_env[@]}"
     python3 -m sglang.launch_server --model-path "$model" --tp-size 2

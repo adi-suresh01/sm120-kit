@@ -8,6 +8,9 @@ set -euo pipefail
 # v1 is only selected when the GPUs can reach each other; "OK" in every off-diagonal cell is required.
 nvidia-smi topo -p2p r || echo "nvidia-smi topo -p2p r is not supported on this host"
 
+# An allocator setting baked into the image would change every variant; run.sh and ar_matrix.sh override it.
+env | grep -E '^PYTORCH(_CUDA)?_ALLOC_CONF=' || echo "no allocator conf preset in the image"
+
 # VMM detection in ar_repro.py and in the fix goes through cuda.bindings.
 python3 -c "import cuda.bindings.driver; print('cuda.bindings ok')"
 
