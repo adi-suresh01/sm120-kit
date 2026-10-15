@@ -3,6 +3,7 @@
 # sglang#44291 stage 2 matrix, so paid time after this goes to server runs.
 # Usage: stage2_setup.sh [--full-radixark]
 #   --full-radixark  fetch the whole RadixArk export (fallback if the draft does not load from its MTP shards)
+# The draft is served from /workspace/radixark-mtp, built here from the RadixArk snapshot.
 set -euo pipefail
 
 : "${HF_HOME:?set HF_HOME to a path on the volume disk}"
@@ -24,6 +25,8 @@ fi
 echo "pristine copy: $pristine (from $pkg_root)"
 
 python3 - "$here/mtp_shards.py" "${1:-}" <<'EOF'
+import json
+import os
 import subprocess
 import sys
 import time
@@ -48,5 +51,29 @@ else:
 start = time.time()
 path = snapshot_download(RA, revision=RA_REV, allow_patterns=allow, ignore_patterns=ignore)
 print("radixark:", path, f"{time.time() - start:.0f}s", flush=True)
+
+# sglang refuses a local checkpoint whose index names shards that are not on disk, so the draft gets its own
+# directory with an index trimmed to the downloaded shards.
+draft_dir = "/workspace/radixark-mtp"
+os.makedirs(draft_dir, exist_ok=True)
+for name in os.listdir(path):
+    dst = os.path.join(draft_dir, name)
+    if name != "model.safetensors.index.json" and not os.path.lexists(dst):
+        os.symlink(os.path.realpath(os.path.join(path, name)), dst)
+with open(os.path.join(path, "model.safetensors.index.json")) as f:
+    index = json.load(f)
+if allow is not None:
+    index["weight_map"] = {k: v for k, v in index["weight_map"].items() if v in shards}
+with open(os.path.join(draft_dir, "model.safetensors.index.json"), "w") as f:
+    json.dump(index, f)
+print("draft dir:", draft_dir, len(set(index["weight_map"].values())), "shards", flush=True)
+
+# The server runs with HF_HUB_OFFLINE=1 and an explicit --revision; a refs/main entry covers any code path that
+# resolves the default revision instead.
+ref = os.path.join(os.environ["HF_HOME"], "hub", "models--" + NV.replace("/", "--"), "refs", "main")
+if not os.path.exists(ref):
+    os.makedirs(os.path.dirname(ref), exist_ok=True)
+    with open(ref, "w") as f:
+        f.write(NV_REV)
 EOF
 echo "setup done"

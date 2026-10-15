@@ -153,6 +153,6 @@ four configs ~60 min: ~3 h, ~$15 at $4.98/hr. Hard cap 4 h (~$20).
 |---|---|
 | `stage2.md` | This spec, then results |
 | `stage2_setup.sh` | Pod checks (topology, memlock, RAM, NUMA), checkpoint and RadixArk MTP shard download |
-| `stage2_run.sh` | Runs A0-A4, B0-B3, C with their patch sets through `serve_and_smoke.sh`, one log dir per run |
+| `stage2_run.sh` | Runs A0-A5, B0-B3, C with their patch sets through `serve_and_smoke.sh`, one log dir per run |
 | `stage2_quality.sh` | GSM8K 200, accept length, bench_serving at 1 / 16 / 64 against a running server |
-| `patches/pr<N>.patch` | PR diffs pinned to the heads above |
+| `patches/pr<N>.diff` | PR diffs pinned to the heads above |

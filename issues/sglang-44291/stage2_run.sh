@@ -25,7 +25,8 @@ port=${PORT:-30000}
 
 model=nvidia/Qwen3.8-Flash-Next-NVFP4
 model_rev=fc694b54fb0174e0913e6adf86691ef85a4ead47
-radixark_dir="$HF_HOME/hub/models--RadixArk--Qwen3.8-Flash-Next-NVFP4/snapshots/7b719225242aacd3dbd3f9407468c2ee9a9d2594"
+# Built by stage2_setup.sh: the RadixArk MTP shards with an index trimmed to them.
+radixark_dir=/workspace/radixark-mtp
 pristine=/workspace/sglang.pristine
 
 nextn=(--speculative-algorithm NEXTN --speculative-num-steps 3 --speculative-eagle-topk 1
@@ -37,6 +38,11 @@ ep2=(--tp-size 2 --ep-size 2)
 tp2=(--tp-size 2)
 
 variant=${1:?usage: stage2_run.sh <variant>}
+# A bad mode would otherwise surface only after a full boot.
+case ${QUALITY:-} in
+    ""|full|accept) ;;
+    *) echo "QUALITY must be full or accept, got $QUALITY" >&2; exit 2 ;;
+esac
 base=${variant#c-}
 patches=() spec=() extra=() launch_env=()
 case $base in
@@ -93,6 +99,8 @@ if [[ -n ${DRY_RUN:-} ]]; then
     exit 0
 fi
 
+# A rerun under the same label must not inherit the last attempt's scores or bench rows.
+rm -rf "${run_dir:?}"
 mkdir -p "$run_dir"
 pkg_root=$(python3 -c 'import importlib.util, os; print(os.path.dirname(importlib.util.find_spec("sglang").origin))')
 # #40172 and #43330 both edit standard.py, so reverting one run's set before applying the next can fail; every
@@ -104,11 +112,11 @@ done
 
 bash "$repo_root/scripts/wait_gpu_idle.sh" 300
 echo ">>> $label patches=[${patches[*]}]: ${cmd[*]}"
-# CONCURRENCY=4 pads decode batches up to a captured graph size, where padding-row bugs live. FAIL_PATTERN stops
-# the boot wait at the first fatal line instead of waiting on a surviving rank. A server wedged in a faulted
-# kernel can block serve_and_smoke's shutdown, so timeout kills the whole group.
-fail_pattern='illegal memory access|cudaErrorIllegalAddress|CUDA error: |Received sigquit|Scheduler hit an exception'
-verdict=$(POST_SMOKE=$post FAIL_PATTERN=$fail_pattern CONCURRENCY=4 BOOT_TIMEOUT=${BOOT_TIMEOUT:-1500} \
+# 9 is not a captured graph size, so decode batches pad up to the next one, where padding-row bugs live.
+# FAIL_PATTERN stops the wait at the first fatal line instead of waiting on a surviving rank. A server wedged in a
+# faulted kernel can block serve_and_smoke's shutdown, so timeout kills the whole group.
+fail_pattern='illegal memory access|cudaErrorIllegalAddress|CUDA error: |Received sigquit|SIGQUIT received|Scheduler hit an exception'
+verdict=$(POST_SMOKE=$post FAIL_PATTERN=$fail_pattern CONCURRENCY=9 BOOT_TIMEOUT=${BOOT_TIMEOUT:-1800} \
     timeout -k 30 "${RUN_TIMEOUT:-5400}" \
     bash "$repo_root/scripts/serve_and_smoke.sh" "$run_dir/server.log" "$port" "$model" -- "${cmd[@]}" || true)
 verdict=${verdict:-RESULT=TIMEOUT outer=${RUN_TIMEOUT:-5400}s}
@@ -118,11 +126,17 @@ echo "$verdict"
 pkill -9 -f 'sglang\.launch_server|sglang::' || true
 
 log="$run_dir/server.log"
-fault=$(grep -m1 -oE 'illegal memory access[^.]*|cudaErrorIllegalAddress|ValueError: [^.]*|RuntimeError: [^.]*|AssertionError[^.]*|CUDA error[^.]*|OutOfMemoryError[^.]*|Xid [0-9]+' "$log" || true)
+# CUDA faults first: a benign early ValueError or RuntimeError line must not mask the real fault. head keeps a line
+# with several matches from adding newlines to the TSV row.
+fault=$(grep -oE 'illegal memory access|cudaErrorIllegalAddress|CUDA error: [^.]*|Xid [0-9]+' "$log" | head -n 1 || true)
+if [[ -z $fault ]]; then
+    fault=$(grep -oE 'ValueError: [^.]*|RuntimeError: [^.]*|AssertionError[^.]*|OutOfMemoryError[^.]*' "$log" | head -n 1 || true)
+fi
+fault=${fault:0:200}
 # Under CUDA_LAUNCH_BLOCKING=1 the deepest Python frame before the first error names the kernel's launcher.
 where=$(awk '/File "/ { f = $0 } /illegal memory access|cudaErrorIllegalAddress|Error: / { if (f != "") { sub(/.*\//, "", f); print f; exit } }' "$log" || true)
-# Accept length settles under load, so the last logged value is the one that counts.
-accept=$(grep -oE 'accept len: [0-9.]+' "$log" | tail -n 1 | awk '{print $3}' || true)
+# The per-request mean over GSM8K only; the server log's last value would come from whatever bench ran last.
+accept=$(grep -oE 'from meta_info\): n=[0-9]+ mean=[0-9.]+' "$run_dir/gsm8k.txt" 2>/dev/null | sed 's/.*mean=//' || true)
 score=$(grep -m1 -oE '^Score: [0-9.]+' "$run_dir/gsm8k.txt" 2>/dev/null | awk '{print $2}' || true)
 
 printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(date -u +%FT%TZ)" "$label" "${patches[*]:--}" "$verdict" \

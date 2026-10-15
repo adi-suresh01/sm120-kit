@@ -20,6 +20,12 @@ mkdir -p "$out"
 python3 -m sglang.test.run_eval --host 127.0.0.1 --port "$port" --eval-name gsm8k --num-examples "$n" \
     --max-tokens 16384 --num-threads 64 >"$out/gsm8k.txt" 2>&1
 grep -E '^Score:' "$out/gsm8k.txt"
+# run_eval scores a request that failed every retry as an empty answer and still exits 0, so a server that broke
+# mid-eval would pass as a low score.
+if grep -q 'All retry attempts exhausted' "$out/gsm8k.txt"; then
+    echo "gsm8k: requests failed against the server" >&2
+    exit 1
+fi
 
 if [[ $mode == accept ]]; then exit 0; fi
 
@@ -30,4 +36,16 @@ for pair in 1:8 16:64 64:256; do
         --random-input-len 1024 --random-output-len 512 --random-range-ratio 1 \
         --max-concurrency "$c" --num-prompts "$prompts" --seed 1 \
         --output-file "$out/bench.jsonl" >"$out/bench_c$c.txt" 2>&1
+    # bench_serving exits 0 and reports throughput over the requests that finished, so a server that dropped
+    # requests would only look slow.
+    python3 -I - "$out/bench.jsonl" "$prompts" "$c" <<'EOF'
+import json
+import sys
+
+path, want, c = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+with open(path) as f:
+    done = json.loads(f.readlines()[-1])["completed"]
+if done != want:
+    sys.exit(f"bench c={c}: {done}/{want} requests completed")
+EOF
 done
