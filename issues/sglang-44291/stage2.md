@@ -31,8 +31,11 @@ Code facts on main that shape the hypotheses:
 - `StandardDispatcher` skips `local_expert_mapping` for `flashinfer_cutlass`, but the cookbook says the FP8
   block-scaled MTP experts run on Triton under the `flashinfer_cutlass` pin (#38121). Triton does go through
   the mapping, where `-1` wraps to the table's last entry, a real expert.
-- Cookbook TP2 workaround: read the MTP draft from `RadixArk/Qwen3.8-Flash-Next-NVFP4`, the same trained head
-  kept in BF16, which needs no 128-wide block split.
+- Cookbook: the NVIDIA export's FP8 block-scaled MTP experts "cannot be TP-sharded (640/2 = 320 is not a
+  multiple of the 128 block) and fault on the triton fp8 path under EP". Its two-node cell reads the MTP draft
+  from `RadixArk/Qwen3.8-Flash-Next-NVFP4` @ 7b719225 (the same trained head kept in BF16) with
+  `--speculative-draft-model-path <RadixArk> --speculative-draft-model-quantization modelopt_fp4`. Only three
+  RadixArk shards hold `mtp.*` tensors (`model-bf16-00010/00011/00012`, ~14.7 GB of 135 GB).
 
 ## Hypotheses (EP2 crash)
 
@@ -62,13 +65,14 @@ of memory, and the run records which.
 | A2 | A1 + `--disable-cuda-graph`, `CUDA_LAUNCH_BLOCKING=1` | Triton illegal memory access, faulting kernel named (attempt 3) |
 | A3 | A1 + #43330 | no crash, accept length near 1 (draft MoE gets no experts) |
 | A4 | A1 + #40172 | serves, accept length near 3 |
+| A5 | A1 with the RadixArk BF16 draft, no patches | if the draft MoE also goes through the Triton mapping: same fault as A2; if it serves, accept length shows whether the count-0 bug silently empties the draft |
 | B0 | `--tp-size 2`, no spec, graphs on | serves (NVFP4 experts use 16-wide groups, so 320 splits) |
 | B1 | B0 + NEXTN | `ValueError: ... = 320 is not divisible by weight quantization block_n = 128` |
 | B2 | B1 + #42566 | serves, accept length near 3 |
 | B3 | B1 with `--speculative-draft-model-path` on the RadixArk BF16 MTP head, no patches | serves (cookbook workaround) |
-| C | the A4 / B2 / B3 config that passes quality with the highest c=16 tok/s, its patches + #44448, `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`, custom all-reduce on | serves; the stack the reporter would run |
+| C | the A4 / A5 / B2 / B3 config that passes quality with the highest c=16 tok/s, its patches + #44448, `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`, custom all-reduce on | serves; the stack the reporter would run |
 
-Run order: A0, A1, A2, A4, A3, B0, B1, B3, B2, C. A0 first so that an H3 failure surfaces before any spec run.
+Run order: A0, A1, A2, A4, A3, A5, B0, B1, B3, B2, C. A0 first so that an H3 failure surfaces before any spec run.
 
 Branches:
 - A0 crashes (H3): one `compute-sanitizer --tool memcheck` run on the smallest case (`--max-running-requests 1`,
@@ -77,7 +81,7 @@ Branches:
   session needs a new approval.
 - Load faults (H4): record `ulimit -l`, `free -g`, `numactl -H` next to the error and stop.
 
-## Quality and speed (runs A4, B2, B3; A3 gets accept length only)
+## Quality and speed (every NEXTN run that serves: A4, A5, B2, B3; A3 gets accept length only)
 
 - GSM8K: `python -m sglang.test.run_eval --eval-name gsm8k --num-examples 200 --max-tokens 16384` (the
   cookbook's protocol: 5-shot, greedy, thinking on). Reference: cookbook NVIDIA export at TP1, 97.41% on 1319.
@@ -91,17 +95,24 @@ Branches:
   lands below 64.
 - A config counts as "sorenmat unblocked" when it boots with CUDA graphs and NEXTN, passes GSM8K and accept
   length, and has a speed row.
+- Base flags also carry `--reasoning-parser qwen3` (the cookbook's cells use it) so GSM8K scores the answer, not
+  the thinking text. bench_serving uses `--random-range-ratio 1` (fixed lengths); #36787 does not state its ratio.
 
 ## Pod
 
 - 2x RTX PRO 6000, PCIe, secure tier (stage 1: $4.98/hr at EUR-IS-2, no community stock). Re-read live stock
   and price before asking for approval. Host RAM >= 128 GB: the pinned PLE table is 47.7 GiB (23.8 per rank)
   plus page cache for the checkpoint load.
-- 250 GB volume disk at `/workspace`, `HF_HOME=/workspace/hf`: the 133 GB checkpoint plus only the RadixArk
-  safetensors shards that hold the MTP weights (picked from its index). No network volume; a second session
-  re-downloads.
-- Image `lmsysorg/sglang:dev-cu13`, digest recorded; entrypoint overridden for sshd; every SSH command sources
-  `/proc/1/environ` (venv image, as in stage 1). `ssh-add --apple-use-keychain ~/.ssh/id_rsa` first.
+- 320 GB volume disk at `/workspace`, `HF_HOME=/workspace/hf`: the 133 GB checkpoint plus the three RadixArk MTP
+  shards, with room to fetch the full 135 GB RadixArk export if the draft does not load from the partial
+  directory. No network volume; a second session re-downloads.
+- Image `lmsysorg/sglang:dev-cu13@sha256:0a1ba33aa4e032b8c5bcebdc69c45664074c032074add4f7db01629ec1fcc381`
+  (pushed 2026-10-15 00:53Z, the stage 1 image, sglang 0.0.0.dev1+ga6a8c5601). Entrypoint overridden for sshd;
+  it also writes `export -p` to `/root/container_env.sh`, which every SSH command sources (venv image).
+  `ssh-add --apple-use-keychain ~/.ssh/id_rsa` first.
+- PR patches are vendored with only their `python/sglang/` hunks and checked against a6a8c5601 alone and in the
+  combinations C needs (#40172 and #43330 conflict and are never combined). Every run restores a pristine copy
+  of the package before applying its set.
 - First five minutes: `nvidia-smi topo -m` shows SYS/PHB/NODE (not NV#), `scripts/env_report.sh`, then
   `ulimit -l`, `free -g`, `numactl -H`. The cookbook says the pinned table needs `--ulimit memlock=-1` under
   Docker; if memlock is limited, record it and try, since the first pinned load shows whether it matters.
@@ -116,8 +127,8 @@ Branches:
 
 ## Time, cost, stop rules
 
-Setup and download ~25 min, ten boots at ~6-8 min each (133 GB load, 47.7 GiB pin, graph capture) ~70 min,
-quality and speed on three configs ~45 min: ~2.5 h, ~$12.50 at $4.98/hr. Hard cap 4 h (~$20).
+Setup and download ~25 min, eleven boots at ~6-8 min each ~80 min, quality and speed in the same boots on up to
+four configs ~60 min: ~3 h, ~$15 at $4.98/hr. Hard cap 4 h (~$20).
 
 - Neither A1 nor A2 reproduces within the first hour: stop; the fallback is the reporter's exact images
   (`dev-cu13` 10-02 digest, `dev-qwen38-next-local` 4ccff141), which needs a new approval.
