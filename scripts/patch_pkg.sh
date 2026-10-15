@@ -12,7 +12,14 @@ pkg=${3:?$usage}
 strip=${4:-1}
 
 # find_spec locates the package without importing it; importing vllm or sglang takes seconds.
-site_root=$(python3 -c "import importlib.util, os; print(os.path.dirname(os.path.dirname(importlib.util.find_spec('$pkg').origin)))")
+site_root=$(python3 - "$pkg" <<'EOF'
+import importlib.util, os, sys
+spec = importlib.util.find_spec(sys.argv[1])
+if spec is None or spec.origin is None:
+    sys.exit(f"package not installed: {sys.argv[1]}")
+print(os.path.dirname(os.path.dirname(spec.origin)))
+EOF
+)
 
 # -f answers patch's "reversed patch detected" prompt with "not reversed", so an unapplied patch fails the
 # reverse dry run on both GNU and BSD patch instead of being half-applied forward and reported as applied.
@@ -20,15 +27,41 @@ is_applied() {
     patch -p"$strip" -R -f --dry-run --silent -d "$site_root" <"$patch_file" >/dev/null 2>&1
 }
 
+# A forward dry run first keeps apply all-or-nothing, so a package that drifted is never left half-patched.
+applies_cleanly() {
+    patch -p"$strip" -N --dry-run --silent -d "$site_root" <"$patch_file" >/dev/null 2>&1
+}
+
 case $action in
     apply)
-        if is_applied; then echo "already applied"; else patch -p"$strip" -N -d "$site_root" <"$patch_file"; fi
+        if is_applied; then
+            echo "already applied"
+        elif applies_cleanly; then
+            patch -p"$strip" -N -d "$site_root" <"$patch_file"
+        else
+            echo "patch does not apply cleanly (partly applied, or the package changed); reinstall the package" >&2
+            exit 1
+        fi
         ;;
     revert)
-        if is_applied; then patch -p"$strip" -R -d "$site_root" <"$patch_file"; else echo "not applied"; fi
+        if is_applied; then
+            patch -p"$strip" -R -d "$site_root" <"$patch_file"
+        elif applies_cleanly; then
+            echo "not applied"
+        else
+            echo "patch is partly applied, or the package changed; reinstall the package" >&2
+            exit 1
+        fi
         ;;
     status)
-        if is_applied; then echo "applied"; else echo "not applied"; fi
+        if is_applied; then
+            echo "applied"
+        elif applies_cleanly; then
+            echo "not applied"
+        else
+            echo "partial"
+            exit 1
+        fi
         ;;
     *)
         echo "$usage" >&2
