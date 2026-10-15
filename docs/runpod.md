@@ -17,14 +17,19 @@ instead of trusting flags written here from memory.
 
 ## Pod choices
 
-| Use | GPU | Approx $/hr (Sep 2026) |
+| Use | GPU | $/hr per GPU, community / secure (catalog read 2026-10-14) |
 |---|---|---|
-| Installs, single-GPU repros | 1x RTX PRO 6000 or 1x RTX 5090 | ~$1.1 / ~$0.7 |
-| TP=2 / EP=2 repros | 2x RTX PRO 6000 | ~$2.2 |
-| DeepSeek-V4 class repros | 4x RTX PRO 6000 | ~$4.4-9 |
-| TP=8 repros | 8x RTX PRO 6000 | ~$9-18 |
+| Installs, single-GPU repros | 1x RTX PRO 6000 or 1x RTX 5090 | $1.69 / $2.49 (PRO 6000), $0.69 / $1.19 (5090) |
+| TP=2 / EP=2 repros | 2x RTX PRO 6000 | $3.38 / $4.98 |
+| DeepSeek-V4 class repros | 4x RTX PRO 6000 | $6.76 / $9.96 |
+| TP=8 repros | 8x RTX PRO 6000 | $13.52 / $19.92 |
 
-Template: a PyTorch / CUDA 13 image, then `pip install` the exact vLLM / SGLang version from the issue.
+Community stock is often LOW or empty on hosts with CUDA >= 13.0; secure had stock in 12 data centers.
+Re-read the catalog before quoting a launch.
+
+Template: a PyTorch / CUDA 13 image, then `pip install` the exact vLLM / SGLang version from the issue. When the
+reporter used an official image (e.g. `vllm/vllm-openai:vX`), use that image instead and override the entrypoint
+to start sshd; such images do not read `PUBLIC_KEY`. See `issues/vllm-49476/README.md` for the command.
 Attach a network volume for `HF_HOME` so model weights download once.
 
 ## Rules
