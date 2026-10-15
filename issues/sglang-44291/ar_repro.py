@@ -17,6 +17,7 @@ line per size with rank, mode, vmm, kb, ok, max_abs_err, us, error.
 import argparse
 import contextlib
 import datetime
+import faulthandler
 import json
 import os
 
@@ -113,6 +114,8 @@ def run_size(mode, comm, device, nccl_group, kb):
 
 
 def main():
+    # monitored_barrier enforces its timeout on rank 0 only; this bounds every rank and prints where it hung.
+    faulthandler.dump_traceback_later(240, exit=True)
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=["registered", "staged", "pynccl", "nccl"], required=True)
     # Decode with a small model reduces a few KB per layer; that is where a staging copy costs the most.
@@ -138,6 +141,10 @@ def main():
         from sglang.srt.distributed.device_communicators.pynccl import PyNcclCommunicator
 
         comm = PyNcclCommunicator(group=cpu_group, device=device)
+        if not comm.available:
+            # A missing NCCL library leaves the communicator disabled without raising.
+            emit(mode=args.mode, vmm=vmm, ok=False, error="PyNcclCommunicator unavailable")
+            return
     elif args.mode in ("registered", "staged"):
         try:
             comm = car.CustomAllreduce(cpu_group, device)
@@ -158,23 +165,19 @@ def main():
             )
             return
 
-    try:
-        for kb in sizes:
-            try:
-                err, us = run_size(args.mode, comm, device, nccl_group, kb)
-                emit(mode=args.mode, vmm=vmm, kb=kb, ok=err == 0, max_abs_err=err, us=round(us, 2))
-            except Exception as e:
-                emit(mode=args.mode, vmm=vmm, kb=kb, ok=False, error=f"{type(e).__name__}: {e}")
-                # A failed registration leaves v1's graph-buffer state half-built and the CUDA error flag set.
-                break
-        # A rank stuck in a faulted kernel never arrives; the timeout makes the other rank exit so torchrun
-        # tears both down instead of waiting out gloo's two-hour default.
-        dist.monitored_barrier(group=cpu_group, timeout=datetime.timedelta(seconds=120), wait_all_ranks=True)
-    finally:
-        # Close before destroying the groups: v1's destructor still queries its process group.
-        if comm is not None and hasattr(comm, "close"):
-            comm.close()
-        dist.destroy_process_group()
+    for kb in sizes:
+        try:
+            err, us = run_size(args.mode, comm, device, nccl_group, kb)
+            emit(mode=args.mode, vmm=vmm, kb=kb, ok=err == 0, max_abs_err=err, us=round(us, 2))
+        except Exception as e:
+            emit(mode=args.mode, vmm=vmm, kb=kb, ok=False, error=f"{type(e).__name__}: {e}")
+            # A failed registration leaves v1's graph-buffer state half-built and the CUDA error flag set.
+            break
+    dist.monitored_barrier(group=cpu_group, timeout=datetime.timedelta(seconds=120), wait_all_ranks=True)
+    # Close before destroying the groups: v1's close still uses the default process group.
+    if comm is not None and hasattr(comm, "close"):
+        comm.close()
+    dist.destroy_process_group()
 
 
 if __name__ == "__main__":
