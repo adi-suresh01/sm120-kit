@@ -12,9 +12,10 @@
 #   a2  a1 + --disable-cuda-graph, CUDA_LAUNCH_BLOCKING=1
 #   a3  a1 + #43330                       a4  a1 + #40172
 #   a5  a1 with the RadixArk BF16 draft, no patches
+#   a6  a1 + our dispatcher fix           a7  a1 + #40172 + our dispatcher fix
 #   b0  TP2, no speculation               b1  TP2 + NEXTN
 #   b2  b1 + #42566                       b3  b1 with the RadixArk BF16 draft, no patches
-#   c-<a4|a5|b2|b3>  that variant + #44448, expandable_segments, custom all-reduce on
+#   c-<a4|a5|a6|a7|b2|b3>  that variant + #44448, expandable_segments, custom all-reduce on
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -52,6 +53,8 @@ case $base in
     a3) parallel=("${ep2[@]}"); spec=("${nextn[@]}"); patches=(pr43330) ;;
     a4) parallel=("${ep2[@]}"); spec=("${nextn[@]}"); patches=(pr40172) ;;
     a5) parallel=("${ep2[@]}"); spec=("${nextn[@]}" "${radixark[@]}") ;;
+    a6) parallel=("${ep2[@]}"); spec=("${nextn[@]}"); patches=(ep-dispatcher-runner) ;;
+    a7) parallel=("${ep2[@]}"); spec=("${nextn[@]}"); patches=(pr40172 ep-dispatcher-runner) ;;
     b0) parallel=("${tp2[@]}") ;;
     b1) parallel=("${tp2[@]}"); spec=("${nextn[@]}") ;;
     b2) parallel=("${tp2[@]}"); spec=("${nextn[@]}"); patches=(pr42566) ;;
@@ -61,8 +64,8 @@ esac
 
 if [[ $variant == c-* ]]; then
     case $base in
-        a4|a5|b2|b3) ;;
-        *) echo "c- takes a serving NEXTN variant (a4, a5, b2, b3), got $base" >&2; exit 2 ;;
+        a4|a5|a6|a7|b2|b3) ;;
+        *) echo "c- takes a serving NEXTN variant (a4, a5, a6, a7, b2, b3), got $base" >&2; exit 2 ;;
     esac
     patches+=(v1-vmm-staging)
     alloc_env=(PYTORCH_ALLOC_CONF=expandable_segments:True PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True)

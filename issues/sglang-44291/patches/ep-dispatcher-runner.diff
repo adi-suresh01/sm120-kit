@@ -1,0 +1,65 @@
+diff --git a/python/sglang/srt/layers/moe/fused_moe_triton/layer.py b/python/sglang/srt/layers/moe/fused_moe_triton/layer.py
+index 1c09781..637aae2 100644
+--- a/python/sglang/srt/layers/moe/fused_moe_triton/layer.py
++++ b/python/sglang/srt/layers/moe/fused_moe_triton/layer.py
+@@ -159,6 +159,14 @@ def _get_deepep_comm_group(a2a_backend):
+     return group
+ 
+ 
++def _built_runner_backend(quant_method: FusedMoEMethodBase):
++    # The layer calls create_moe_runner before building its dispatcher, so the
++    # runner the quant method actually picked is known here. Methods that do
++    # not build a MoeRunner keep the global --moe-runner-backend.
++    runner = getattr(quant_method, "runner", None)
++    return getattr(runner, "runner_backend", None)
++
++
+ def create_moe_dispatcher(
+     moe_runner_config: MoeRunnerConfig,
+     quant_method: FusedMoEMethodBase,
+@@ -177,7 +185,9 @@ def create_moe_dispatcher(
+         # StandardDispatcher is created but never invoked.
+         # flashinfer_megamoe does its EP all-to-all inside the kernel, so the
+         # dispatcher stays a pure noop passthrough.
+-        return StandardDispatcher(moe_runner_config)
++        return StandardDispatcher(
++            moe_runner_config, runner_backend=_built_runner_backend(quant_method)
++        )
+     elif (
+         a2a_backend.is_deepep()
+         or a2a_backend.is_mooncake()
+diff --git a/python/sglang/srt/layers/moe/token_dispatcher/standard.py b/python/sglang/srt/layers/moe/token_dispatcher/standard.py
+index e2bf176..b1b75bb 100644
+--- a/python/sglang/srt/layers/moe/token_dispatcher/standard.py
++++ b/python/sglang/srt/layers/moe/token_dispatcher/standard.py
+@@ -44,6 +44,7 @@ _MASK_DP_PAD_MOE = _envs.SGLANG_OPT_MASK_DP_PAD_MOE.get()
+ 
+ if TYPE_CHECKING:
+     from sglang.srt.layers.moe.topk import TopKOutput
++    from sglang.srt.layers.moe.utils import MoeRunnerBackendLike
+ 
+ 
+ try:
+@@ -92,10 +93,20 @@ assert isinstance(StandardCombineInput, CombineInput)
+ 
+ 
+ class StandardDispatcher(BaseDispatcher):
+-    def __init__(self, moe_runner_config: MoeRunnerConfig):
++    def __init__(
++        self,
++        moe_runner_config: MoeRunnerConfig,
++        runner_backend: Optional[MoeRunnerBackendLike] = None,
++    ):
+         super().__init__()
+         self.moe_ep_size = get_parallel().moe_ep_size
+-        backend = get_moe_runner_backend()
++        # A quant method can run its experts on a different runner than
++        # --moe-runner-backend (Fp8MoEMethod runs fp8 experts on triton under a
++        # flashinfer_cutlass pin). The expert-id layout has to match the runner
++        # that consumes it, or EP ranks index experts they do not hold.
++        backend = (
++            runner_backend if runner_backend is not None else get_moe_runner_backend()
++        )
+         self.enable_flashinfer_cutlass_moe = backend.is_flashinfer_cutlass()
+         self.enable_flashinfer_mxfp4_moe = backend.is_flashinfer_mxfp4()
+         self.enable_flashinfer_trtllm_routed_moe = backend.is_flashinfer_trtllm_routed()
