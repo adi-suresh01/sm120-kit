@@ -16,6 +16,7 @@
 #   b0  TP2, no speculation               b1  TP2 + NEXTN
 #   b2  b1 + #42566                       b3  b1 with the RadixArk BF16 draft, no patches
 #   c-<a4|a5|a6|a7|b2|b3>  that variant + #44448, expandable_segments, custom all-reduce on
+#   d-<a4|a5|a6|a7|b2|b3>  that variant with custom all-reduce on, default allocator, no #44448
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -44,7 +45,7 @@ case ${QUALITY:-} in
     ""|full|accept) ;;
     *) echo "QUALITY must be full or accept, got $QUALITY" >&2; exit 2 ;;
 esac
-base=${variant#c-}
+base=${variant#[cd]-}
 patches=() spec=() extra=() launch_env=()
 case $base in
     a0) parallel=("${ep2[@]}") ;;
@@ -62,14 +63,18 @@ case $base in
     *) echo "unknown variant: $variant" >&2; exit 2 ;;
 esac
 
-if [[ $variant == c-* ]]; then
+if [[ $variant == [cd]-* ]]; then
     case $base in
         a4|a5|a6|a7|b2|b3) ;;
-        *) echo "c- takes a serving NEXTN variant (a4, a5, a6, a7, b2, b3), got $base" >&2; exit 2 ;;
+        *) echo "${variant%%-*}- takes a serving NEXTN variant (a4, a5, a6, a7, b2, b3), got $base" >&2; exit 2 ;;
     esac
-    patches+=(v1-vmm-staging)
-    alloc_env=(PYTORCH_ALLOC_CONF=expandable_segments:True PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True)
     custom_ar=()
+    if [[ $variant == c-* ]]; then
+        patches+=(v1-vmm-staging)
+        alloc_env=(PYTORCH_ALLOC_CONF=expandable_segments:True PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True)
+    else
+        alloc_env=(-u PYTORCH_ALLOC_CONF -u PYTORCH_CUDA_ALLOC_CONF)
+    fi
 else
     # An empty value still counts as set, and newer torch reads PYTORCH_ALLOC_CONF first, so both names go.
     alloc_env=(-u PYTORCH_ALLOC_CONF -u PYTORCH_CUDA_ALLOC_CONF)

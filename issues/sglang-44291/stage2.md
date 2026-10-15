@@ -163,4 +163,107 @@ four configs ~60 min: ~3 h, ~$15 at $4.98/hr. Hard cap 4 h (~$20).
 
 | Date | Pod id | GPU | Start | Stop | Cost |
 |---|---|---|---|---|---|
-| 2026-10-15 | kfyqcddi6nefdp | 2x RTX PRO 6000 Server, secure, US-PA-1, host CUDA 13.2, 377 GB RAM, 96 vCPU, $4.98/hr (no community or WK stock) | 09:45:22Z | | |
+| 2026-10-15 | kfyqcddi6nefdp | 2x RTX PRO 6000 Server, secure, US-PA-1, host CUDA 13.2, 377 GB RAM, 96 vCPU, $4.98/hr (no community or WK stock) | 09:45:22Z | ~12:37Z (terminated) | ~$14.3 (2.87 h x $4.98/hr); billing read at teardown $9.34, lagging |
+
+### Environment (pod kfyqcddi6nefdp)
+
+```
+GPUs     : 2x RTX PRO 6000 Blackwell Server Edition, 97887 MiB, cc 12.0, driver 595.91.07, host CUDA 13.2
+Topology : GPU0-GPU1 SYS (PCIe across sockets, no NVLink); GPU0 on NUMA node 0, GPU1 on node 3 (6 nodes)
+Host     : 1.5 TB RAM, memlock 8192 KB, no SYS_NICE (sglang: "NUMA memory policy not permitted")
+Image    : lmsysorg/sglang:dev-cu13@sha256:0a1ba33a..., sglang 0.0.0.dev1+ga6a8c5601, torch 2.14.1+cu130,
+           flashinfer-python 0.7.1, triton 3.8.0, transformers 5.19.0
+Model    : nvidia/Qwen3.8-Flash-Next-NVFP4 @ fc694b54 (161 s download); RadixArk MTP shards @ 7b719225 (17 s)
+```
+
+Pinning the 47.7 GiB PLE table worked with memlock at 8 MB, so H4 did not show up on this host.
+
+### Matrix
+
+Base flags: `--moe-runner-backend flashinfer_cutlass --ple-offload-embedding --json-model-override-args
+'{"language_model_only":true}' --reasoning-parser qwen3 --disable-custom-all-reduce`, default allocator, CUDA
+graphs on unless noted, NEXTN 3/1/4, smoke test with 9 concurrent requests.
+
+| Run | Config | Verdict | Fault |
+|---|---|---|---|
+| A0 | EP2, no spec | OK, boot 282 s | - |
+| A1 | EP2 + NEXTN | BOOT_FAIL, 221 s | `CUDA error: an illegal memory access` in draft prefill graph capture |
+| A2 | A1, `--disable-cuda-graph`, `CUDA_LAUNCH_BLOCKING=1` | BOOT_FAIL, 157 s | `Triton Error [CUDA]: an illegal memory access` in `fused_moe_kernel` <- `Fp8MoEMethod.apply` <- `_draft_extend_for_prefill` (reporter's attempt 3 text) |
+| A4 | A1 + #40172 | BOOT_FAIL, 216 s | same as A1 |
+| A3 | A1 + #43330 | BOOT_FAIL, 206 s | same as A1 |
+| A6 | A1 + our fix | OK, boot 247 s | - |
+| A7 | A1 + #40172 + our fix | OK, boot 227 s | - |
+| A5 | A1 with the RadixArk BF16 draft, no patches | OK, boot 197 s | - |
+| B0 | TP2, no spec | OK, boot 177 s | - |
+| B1 | TP2 + NEXTN | BOOT_FAIL, 146 s | `ValueError: The output_size of gate's and up's weight = 320 is not divisible by weight quantization block_n = 128` (fp8.py:1479) |
+| B3 | B1 with the RadixArk BF16 draft, no patches | OK, boot 187 s | - |
+| B2 | B1 + #42566 | OK, boot 242 s | - (log: block-FP8 scales refined from [128, 128] to [64, 128] w13 / [128, 64] w2 for the 320 shard) |
+
+Our A1 dies earlier than the reporter's attempt 2 (draft *prefill* graph capture, which #41729 added on 10-03, after
+his 10-02 image); the faulting layer is the same.
+
+### Root cause (bug 2)
+
+`Fp8MoEMethod.create_moe_runner` switches fp8 experts (the NVIDIA export's FP8 block-scaled MTP experts) from
+`flashinfer_cutlass` to triton, but `StandardDispatcher` read only the global backend, set
+`skip_local_expert_mapping=True`, and handed triton global expert ids. Under EP2 each rank holds 256 of 512 experts,
+so ids 256-511 index past the local weights. TP1 and TP2/EP1 never translate ids, which is why only EP fails. It is
+not the #40156 draft-count chain: draft prefill capture sets `num_token_non_padded` to the full token count, and
+#40172 / #43330 change a branch this layer skips. sglang already guards the same hazard for `hpc_ops` in
+`MoeRunner.__init__`.
+
+Our fix (sglang branch `fix/ep-dispatcher-follow-layer-runner`, pod patch `patches/ep-dispatcher-runner.diff`): the
+dispatcher keeps every flag on the global backend, and the runner the quant method built can only turn local-id
+mapping on. LoRA + EP on such a layer raises at startup. A pre-PR review found that the first revision (all flags
+from the runner) would have broken ROCm AITER BF16 MoE under EP; the narrowed revision leaves auto/AITER/trtllm
+unchanged. Unit test red/green: 6 failed, 1 passed -> 7 passed; 80 related tests pass.
+
+### Quality and speed
+
+GSM8K 200 (`run_eval`, 5-shot, thinking on, 16k budget); accept length is the per-request mean over GSM8K;
+`bench_serving` random 1024/512, ratio 1. `max_running_requests` is capped at 39 by the mamba state cache, so c=64
+TTFT is queueing.
+
+| Run | GSM8K | Accept | c=1 tok/s, TPOT | c=16 tok/s | c=64 tok/s |
+|---|---|---|---|---|---|
+| A6 EP2 + our fix | 0.975 | 2.94 | 181.0, 5.21 ms | 950.1 | 1362.6 |
+| A7 EP2 + #40172 + our fix | 0.975 | 2.93 | 183.0, 5.25 ms | 947.8 | 1362.6 |
+| A5 EP2, RadixArk draft | 0.970 | 2.94 | 182.7, 5.11 ms | 960.1 | 1358.5 |
+| B3 TP2, RadixArk draft | 0.985 | 2.93 | 187.4, 4.83 ms | 935.2 | 1285.5 |
+| B2 TP2 + #42566 | 0.975 | 2.94 | 182.0, 5.36 ms | 953.3 | 1280.7 |
+| #36787 NVFP4 TP2/EP1 NEXTN (reference, its own sm120 kernels) | - | 2.94-3.02 | 216.0 | 1069.2 | 1703.1 |
+
+#40172 changes nothing measurable at these loads: under CUDA graphs the draft decode path never applies the
+count-0 mask.
+
+### Run C and custom all-reduce on this host
+
+Run C (A6 + #44448, `expandable_segments`, custom all-reduce on) hung in FlashInfer autotune for 24 minutes with
+both GPUs at 100% and was killed. Splitting it:
+
+| Run | Config | Result |
+|---|---|---|
+| c-a6 | EP2 + NEXTN + our fix + #44448, `expandable_segments`, custom AR on | hung in autotune, killed after 24 min |
+| d-a6 | EP2 + NEXTN + our fix, default allocator, custom AR on | TIMEOUT 600 s in autotune |
+| d-a5 | EP2 + NEXTN + RadixArk draft, no patches, custom AR on | hung in autotune; faulthandler (SIGABRT) shows both ranks blocked launching work in `qwen4_exp._prepare_ple_batch` inside the autotune dummy forward |
+| s1 (stage 1 run) | `Qwen/Qwen3-0.6B` TP2, custom AR v1, default allocator | TIMEOUT 300 s: graph capture registered 2850 + 2052 addresses, warmup forward never finished (`/health` 503) |
+
+`ar_repro.py` on the same host: NCCL mode passes at every size; v1 mode disables itself because sglang's
+`gpu_p2p_access_check` returns `0->1 False, 1->0 False`. Re-run 3 times with the cache cleared: False, False, False.
+`torch.cuda.can_device_access_peer` and `nvidia-smi topo -p2p r/w` both report OK. The runs above enabled v1 anyway
+(no "P2P test failed" warning in their logs), so the check passed for them once and was cached; how it passed is
+not established. Conclusion: GPU P2P between these two cards (GPU0 on NUMA node 0, GPU1 on node 3, `SYS`) does not
+work reliably on this host, and custom all-reduce v1 hangs on it for any model. This is a host issue, not this
+model and not our patches: stage 1's host (EUR-IS-2) ran v1 and #44448 fine. Run C could not be evaluated here, so
+there is no real-model evidence for #44448 from this session.
+
+## Outcome (stage 2)
+
+| Bug | Root cause | Our code | PR | Merged | sorenmat unblocked |
+|---|---|---|---|---|---|
+| 1 custom AR + `expandable_segments` | yes (stage 1) | yes | #44448 | no | yes with `--disable-custom-all-reduce`; still waiting on his `expandable_segments` answer |
+| 2 EP2 illegal memory access | yes: dispatcher keeps global ids for `Fp8MoEMethod`'s triton fallback | yes | #44480 (opened 2026-10-15) | no | yes today: RadixArk BF16 draft (no patches) or #44480 |
+| 3 TP2 `320 % 128` | yes (#42566 names it; reproduced) | no | #42566 (not ours) | no | yes today: RadixArk BF16 draft (no patches) or #42566 |
+
+All four serving configs (A6, A5, B3, B2) pass GSM8K (0.970-0.985) with accept length 2.93-2.94 and run 181-187
+tok/s at c=1, 935-960 at c=16, 1281-1363 at c=64.
