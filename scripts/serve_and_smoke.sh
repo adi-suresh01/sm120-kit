@@ -30,16 +30,32 @@ until curl -sf "http://127.0.0.1:${port}/health" >/dev/null; do
 done
 boot_seconds=$(( $(date +%s) - started ))
 
-response=$(curl -sf "http://127.0.0.1:${port}/v1/chat/completions" \
-    -H 'Content-Type: application/json' \
-    -d "{\"model\": \"${model}\", \"max_tokens\": 64, \"temperature\": 0,
-         \"messages\": [{\"role\": \"user\", \"content\": \"List the first five prime numbers.\"}]}" \
-    || true)
+ask() {
+    curl -sf "http://127.0.0.1:${port}/v1/chat/completions" \
+        -H 'Content-Type: application/json' \
+        -d "{\"model\": \"${model}\", \"max_tokens\": 64, \"temperature\": 0,
+             \"messages\": [{\"role\": \"user\", \"content\": \"List the first $1 prime numbers.\"}]}"
+}
 
-if [[ -z "$response" ]]; then
-    echo "RESULT=SMOKE_FAIL boot_seconds=${boot_seconds}"
+# CONCURRENCY > 1 sends parallel requests so decode batches get padded up to a captured graph size, which is
+# where padding-row bugs live; a single request never exercises them.
+concurrency=${CONCURRENCY:-1}
+base=${log_file%.log}.response
+pids=()
+for i in $(seq "$concurrency"); do
+    out=$base.json
+    if (( i > 1 )); then out=$base.$i.json; fi
+    ask $((4 + i)) >"$out" &
+    pids+=($!)
+done
+
+failed=0
+for pid in "${pids[@]}"; do
+    wait "$pid" || failed=$((failed + 1))
+done
+
+if (( failed > 0 )); then
+    echo "RESULT=SMOKE_FAIL boot_seconds=${boot_seconds} failed_requests=${failed}/${concurrency}"
     exit 1
 fi
-
-echo "$response" >"${log_file%.log}.response.json"
-echo "RESULT=OK boot_seconds=${boot_seconds}"
+echo "RESULT=OK boot_seconds=${boot_seconds} requests=${concurrency}"
