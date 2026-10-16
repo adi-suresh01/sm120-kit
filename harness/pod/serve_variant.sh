@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
-# Runs one variant rendered by `harness exec`: restores the package, applies the variant's patches, waits for idle
-# GPUs, boots and smoke-tests the server, runs quality.sh on the live server when asked, and writes one verdict.
+# Runs one variant rendered by `harness exec`: restores every snapshotted package, applies the variant's patches,
+# waits for idle GPUs, boots and smoke-tests the server, runs quality.sh on the live server when asked, and writes
+# one verdict.
 # Usage: serve_variant.sh <issue_dir> <variant_file> <results_dir>
-#   <variant_file>  sets VARIANT, PACKAGE, MODEL, PORT, FAIL_PATTERN, BOOT_TIMEOUT, CONCURRENCY, PATCH_STRIP,
-#                   GSM8K, and the arrays PATCHES, SERVER_CMD, VARIANT_ENV, BENCH
+#   <variant_file>  sets VARIANT, PACKAGE, MODEL, PORT, FAIL_PATTERN, BOOT_TIMEOUT, CONCURRENCY, GSM8K, and the
+#                   arrays SERVER_CMD, VARIANT_ENV, BENCH, SNAPSHOT_PKGS (the server package first, then every
+#                   package any variant of the issue patches), and PATCH_FILES, PATCH_PKGS, PATCH_STRIPS (patch i
+#                   is <issue_dir>/patches/<PATCH_FILES[i]>.diff, applied to the import name PATCH_PKGS[i] at
+#                   -p<PATCH_STRIPS[i]>)
 #   <issue_dir>/hooks.sh, when present, may define pre_launch and post_stop; each gets the run directory.
-# Writes <results_dir>/<variant>/verdict.json and appends the same line to <results_dir>/verdicts.jsonl.
+# Writes <results_dir>/<variant>/verdict.json, appends the same line to <results_dir>/verdicts.jsonl, and appends
+# phase lines (see progress.sh) to <results_dir>/<variant>/progress.jsonl, the verdict line last.
 set -euo pipefail
 
 usage="usage: $0 <issue_dir> <variant_file> <results_dir>"
@@ -24,10 +29,29 @@ case $PACKAGE in
     *) echo "no process pattern for package $PACKAGE" >&2; exit 2 ;;
 esac
 
+patch_count=${#PATCH_FILES[@]}
+if (( ${#PATCH_PKGS[@]} != patch_count || ${#PATCH_STRIPS[@]} != patch_count )); then
+    echo "PATCH_FILES, PATCH_PKGS, and PATCH_STRIPS differ in length" >&2
+    exit 2
+fi
+# Only snapshotted packages are put back before the next variant; a patch to any other would leak into it.
+for pkg in "${PATCH_PKGS[@]}"; do
+    if [[ " ${SNAPSHOT_PKGS[*]} " != *" $pkg "* ]]; then
+        echo "patched package $pkg is not in SNAPSHOT_PKGS" >&2
+        exit 2
+    fi
+done
+
 run_dir="$results_dir/$VARIANT"
 # A rerun under the same name must not inherit the last attempt's logs, scores, or verdict.
 rm -rf "${run_dir:?}"
 mkdir -p "$run_dir"
+progress_file="$run_dir/progress.jsonl"
+
+# Progress is for display only; a failed write must not fail the run.
+progress() {
+    bash "$here/progress.sh" "$progress_file" "$@" || true
+}
 
 if [[ -f $issue_dir/hooks.sh ]]; then
     # shellcheck source=/dev/null
@@ -44,10 +68,15 @@ cleanup() {
 }
 trap cleanup EXIT
 
-bash "$here/pkg_snapshot.sh" save "$PACKAGE"
-bash "$here/pkg_snapshot.sh" restore "$PACKAGE"
-for p in "${PATCHES[@]}"; do
-    bash "$here/patch_pkg.sh" apply "$issue_dir/patches/$p.diff" "$PACKAGE" "$PATCH_STRIP" >/dev/null
+progress restore "${SNAPSHOT_PKGS[*]}"
+for pkg in "${SNAPSHOT_PKGS[@]}"; do
+    bash "$here/pkg_snapshot.sh" save "$pkg"
+    bash "$here/pkg_snapshot.sh" restore "$pkg"
+done
+for i in "${!PATCH_FILES[@]}"; do
+    progress patch "${PATCH_FILES[i]} -> ${PATCH_PKGS[i]} (-p${PATCH_STRIPS[i]})"
+    bash "$here/patch_pkg.sh" apply "$issue_dir/patches/${PATCH_FILES[i]}.diff" "${PATCH_PKGS[i]}" \
+        "${PATCH_STRIPS[i]}" >/dev/null
 done
 if (( ${#VARIANT_ENV[@]} )); then
     export "${VARIANT_ENV[@]}"
@@ -58,20 +87,27 @@ if [[ -n $GSM8K ]]; then
     post=$(printf '%q ' bash "$here/quality.sh" "$PORT" "$run_dir" "$GSM8K" "${BENCH[@]}")
 fi
 
+progress idle_wait
 bash "$here/wait_gpu_idle.sh" 300
 if declare -F pre_launch >/dev/null; then
     pre_launch "$run_dir"
 fi
-echo ">>> $VARIANT patches=[${PATCHES[*]}]: ${SERVER_CMD[*]}"
+launch_cmd=("${SERVER_CMD[@]}" --host 127.0.0.1 --port "$PORT")
+progress launch "${launch_cmd[*]}"
+echo ">>> $VARIANT patches=[${PATCH_FILES[*]}]: ${launch_cmd[*]}"
 # The outer bound is the boot plus an hour for the smoke test and quality runs. A server wedged in a faulted
 # kernel can block serve_and_smoke's own shutdown, so timeout kills the whole group.
 run_timeout=$(( BOOT_TIMEOUT + 3600 ))
-result=$(POST_SMOKE=$post FAIL_PATTERN=$FAIL_PATTERN CONCURRENCY=$CONCURRENCY BOOT_TIMEOUT=$BOOT_TIMEOUT \
-    timeout -k 30 "$run_timeout" \
-    bash "$here/serve_and_smoke.sh" "$run_dir/server.log" "$PORT" "$MODEL" -- \
-    "${SERVER_CMD[@]}" --host 127.0.0.1 --port "$PORT" || true)
+result=$(PROGRESS_FILE=$progress_file POST_SMOKE=$post FAIL_PATTERN=$FAIL_PATTERN CONCURRENCY=$CONCURRENCY \
+    BOOT_TIMEOUT=$BOOT_TIMEOUT timeout -k 30 "$run_timeout" \
+    bash "$here/serve_and_smoke.sh" "$run_dir/server.log" "$PORT" "$MODEL" -- "${launch_cmd[@]}" || true)
 result=${result:-RESULT=TIMEOUT outer=${run_timeout}s}
 echo "$result"
 cleanup
 trap - EXIT
-bash "$here/verdict.sh" "$run_dir" "$VARIANT" "$result" | tee "$run_dir/verdict.json" >>"$results_dir/verdicts.jsonl"
+progress stop "$result"
+verdict=$(bash "$here/verdict.sh" "$run_dir" "$VARIANT" "$result")
+printf '%s\n' "$verdict" >"$run_dir/verdict.json"
+printf '%s\n' "$verdict" >>"$results_dir/verdicts.jsonl"
+# Last, so a reader that sees the verdict here finds verdict.json and verdicts.jsonl already written.
+printf '%s\n' "$verdict" >>"$progress_file"

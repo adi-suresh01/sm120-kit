@@ -5,15 +5,28 @@
 # <log_file minus .log>.post.log. It is stopped as POST_FAIL if the server dies, the log matches FAIL_PATTERN,
 # or the log goes quiet for STALL_MINUTES (default 15).
 # FAIL_PATTERN="<ERE>" ends the boot wait as soon as the log matches it, reported as BOOT_FAIL exit_code=pattern.
+# PROGRESS_FILE, when set, gets the boot, smoke, and quality phases (see progress.sh).
+# BOOT_POLL_S, POST_POLL_S, STOP_POLL_S (default 5, 10, 1) set the polling intervals; tests shorten them.
 # Usage: serve_and_smoke.sh <log_file> <port> <model> -- <server command...>
 set -euo pipefail
 
+here=$(cd "$(dirname "$0")" && pwd)
 log_file=$1 port=$2 model=$3
 shift 3
 [[ ${1:-} == "--" ]] && shift
 
 boot_timeout=${BOOT_TIMEOUT:-1800}
+boot_poll_s=${BOOT_POLL_S:-5}
+post_poll_s=${POST_POLL_S:-10}
+stop_poll_s=${STOP_POLL_S:-1}
 mkdir -p "$(dirname "$log_file")"
+
+# Progress is for display only; a failed write must not change the result.
+progress() {
+    if [[ -n ${PROGRESS_FILE:-} ]]; then
+        bash "$here/progress.sh" "$PROGRESS_FILE" "$@" || true
+    fi
+}
 
 "$@" >"$log_file" 2>&1 &
 server_pid=$!
@@ -23,7 +36,7 @@ stop_server() {
     # A launcher stuck in its own shutdown would otherwise hold this script until the caller's outer timeout.
     for _ in $(seq 60); do
         kill -0 "$server_pid" 2>/dev/null || break
-        sleep 1
+        sleep "$stop_poll_s"
     done
     kill -9 "$server_pid" 2>/dev/null || true
     wait "$server_pid" 2>/dev/null || true
@@ -38,22 +51,26 @@ started=$(date +%s)
 until curl -sf -m 10 "http://127.0.0.1:${port}/health" >/dev/null; do
     if ! kill -0 "$server_pid" 2>/dev/null; then
         wait "$server_pid" && code=0 || code=$?
+        progress boot_fail "server exited with code $code"
         echo "RESULT=BOOT_FAIL exit_code=${code} boot_seconds=$(( $(date +%s) - started ))"
         exit 1
     fi
     # A rank that faults can leave the launcher waiting on the other rank until the boot timeout; a matching
     # fatal line ends the wait now.
     if fatal_in_log; then
+        progress boot_fail "log matched: $(grep -a -m1 -E "$FAIL_PATTERN" "$log_file" | head -c 300 || true)"
         echo "RESULT=BOOT_FAIL exit_code=pattern boot_seconds=$(( $(date +%s) - started ))"
         exit 1
     fi
     if (( $(date +%s) - started > boot_timeout )); then
+        progress boot_fail "no answer on /health within ${boot_timeout}s"
         echo "RESULT=TIMEOUT boot_seconds=${boot_timeout}"
         exit 1
     fi
-    sleep 5
+    sleep "$boot_poll_s"
 done
 boot_seconds=$(( $(date +%s) - started ))
+progress boot_ok "boot_seconds=${boot_seconds}"
 
 ask() {
     curl -sf -m "${REQUEST_TIMEOUT:-600}" "http://127.0.0.1:${port}/v1/chat/completions" \
@@ -80,12 +97,15 @@ for pid in "${pids[@]}"; do
 done
 
 if (( failed > 0 )); then
+    progress smoke_fail "failed_requests=${failed}/${concurrency}"
     echo "RESULT=SMOKE_FAIL boot_seconds=${boot_seconds} failed_requests=${failed}/${concurrency}"
     exit 1
 fi
+progress smoke_ok "requests=${concurrency}"
 # Large checkpoints take minutes to boot, so evaluations reuse this server instead of booting their own. Eval
 # clients retry a dead server for up to an hour, so the server is watched while they run.
 if [[ -n ${POST_SMOKE:-} ]]; then
+    progress quality_start
     bash -c "$POST_SMOKE" >"${log_file%.log}.post.log" 2>&1 &
     post_pid=$!
     stall_minutes=${STALL_MINUTES:-15}
@@ -101,12 +121,14 @@ if [[ -n ${POST_SMOKE:-} ]]; then
         if [[ -n $reason ]]; then
             pkill -P "$post_pid" 2>/dev/null || true
             kill "$post_pid" 2>/dev/null || true
+            progress quality_done "post_exit=${reason}"
             echo "RESULT=POST_FAIL boot_seconds=${boot_seconds} requests=${concurrency} post_exit=${reason}"
             exit 1
         fi
-        sleep 10
+        sleep "$post_poll_s"
     done
     wait "$post_pid" && post=0 || post=$?
+    progress quality_done "post_exit=${post}"
     if (( post != 0 )); then
         echo "RESULT=POST_FAIL boot_seconds=${boot_seconds} requests=${concurrency} post_exit=${post}"
         exit 1
