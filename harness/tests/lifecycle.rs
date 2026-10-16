@@ -168,6 +168,8 @@ fn up_reserves_creates_waits_copies_and_sets_up() {
     assert_eq!(entry.deadline, "2026-10-16T18:00:00Z".parse().unwrap());
     assert_eq!(live.target.port, 40122);
     assert_eq!(*w.remote.uploads.borrow(), [vec!["harness/pod", "issues/vllm-47990"]]);
+    let armed = format!("watchdog armed for epoch {} in pid 1", entry.deadline.as_second());
+    assert!(w.remote.scripts.borrow()[0].contains(&armed));
     let setup = w.remote.jobs.borrow()[0].clone();
     assert!(setup.contains("env_report.sh > results/vllm-47990/env.txt 2>&1 && bash issues/vllm-47990/setup.sh"));
     let events = w.events();
@@ -336,6 +338,17 @@ fn a_pod_whose_ssh_never_answers_is_terminated() {
     assert!(err_text(w.up()).contains("did not answer on SSH"));
     assert_eq!(w.states(), [PodState::Terminated]);
     assert!(w.cloud.billing_pods().is_empty());
+}
+
+#[test]
+fn a_pod_whose_watchdog_did_not_arm_is_terminated_before_use() {
+    let w = World::default();
+    w.remote.watchdog_armed.set(false);
+    let err = err_text(w.up());
+    assert!(err.contains("no watchdog armed"), "{err}");
+    assert_eq!(w.states(), [PodState::Terminated]);
+    assert!(w.cloud.billing_pods().is_empty());
+    assert!(w.remote.uploads.borrow().is_empty());
 }
 
 #[test]

@@ -110,7 +110,8 @@ An error after the pod exists names the pod, its deadline in local time, and `ha
 2. **Watchdog on the pod.** The entrypoint runs it as PID 1 on the absolute `HARNESS_DEADLINE_EPOCH`, so a
    container restart cannot extend it. At the deadline it tries `DELETE /v2/pods/$RUNPOD_POD_ID` with the pod's
    own key, then `runpodctl pod remove`, then `runpodctl pod stop`, and keeps retrying; each attempt goes to
-   `/workspace/harness-watchdog.log`.
+   `/workspace/harness-watchdog.log`. `up` ends a pod at once when that log does not show the watchdog armed as
+   PID 1 for the ledger's deadline (an image or API that skipped the entrypoint).
 3. **Reaper**, first in every command: deletes a pod still listed 2 minutes past its deadline (booking at most
    its reservation), books a pod RunPod no longer lists once a GET agrees, adopts a reservation whose pod
    appeared, releases one whose pod never did (10 minutes), and warns about any `sm120-*` pod no ledger tracks

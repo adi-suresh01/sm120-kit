@@ -36,6 +36,8 @@ pub struct FakeRemote {
     /// Sets the flag once this many polls have been answered, as a Ctrl-C mid-job would.
     pub interrupt_after_polls: RefCell<Option<(u32, Rc<AtomicBool>)>>,
     pub panic_on_write: Cell<bool>,
+    /// Whether the pod's watchdog log shows it armed, as the entrypoint writes at boot.
+    pub watchdog_armed: Cell<bool>,
 }
 
 impl Default for FakeRemote {
@@ -63,6 +65,7 @@ impl Default for FakeRemote {
             interrupt_on_job: RefCell::new(None),
             interrupt_after_polls: RefCell::new(None),
             panic_on_write: Cell::new(false),
+            watchdog_armed: Cell::new(true),
         }
     }
 }
@@ -122,6 +125,14 @@ impl Remote for FakeRemote {
 
     fn run(&self, _: &Target, script: &str) -> Result<String> {
         self.scripts.borrow_mut().push(script.to_string());
+        if script.contains("watchdog armed for epoch") {
+            let reply = if self.watchdog_armed.get() {
+                "WATCHDOG_ARMED\n"
+            } else {
+                "WATCHDOG_MISSING\n"
+            };
+            return Ok(reply.into());
+        }
         if script.contains("nvidia-smi topo -m") {
             return Ok(self.topo.borrow().clone());
         }

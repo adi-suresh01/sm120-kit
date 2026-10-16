@@ -417,8 +417,8 @@ pub fn up(ctx: &Ctx, spec: &IssueSpec, run_setup: bool, after_failure: AfterFail
     refuse_untracked(issue, &ledger, &ctx.cloud.list_pods()?)?;
     refuse_clock_skew(ctx, issue)?;
     let (entry, pod) = create_first_available(ctx, spec, &offers)?;
-    let ready =
-        wait_ready(ctx, issue, &entry, pod).and_then(|target| gate_and_copy(ctx, spec, &target).map(|()| target));
+    let ready = wait_ready(ctx, issue, &entry, pod)
+        .and_then(|target| gate_and_copy(ctx, spec, &entry, &target).map(|()| target));
     let target = match ready {
         Ok(target) => target,
         Err(e) => {
@@ -636,7 +636,35 @@ fn wait_ready(ctx: &Ctx, issue: &str, entry: &PodEntry, mut pod: Pod) -> Result<
     }
 }
 
-fn gate_and_copy(ctx: &Ctx, spec: &IssueSpec, target: &Target) -> Result<()> {
+/// The line entrypoint.sh's watchdog logs as it starts, minus the timestamp.
+fn watchdog_armed_line(deadline: Timestamp) -> String {
+    format!("watchdog armed for epoch {} in pid 1", deadline.as_second())
+}
+
+/// The watchdog is what ends the pod once the laptop is gone. An image ENTRYPOINT or an API change that skips
+/// entrypoint.sh leaves a pod that only `down` or a later reaper pass can end, so such a pod is ended before use.
+/// The script also sources the container env the entrypoint wrote, which fails the same way.
+fn check_watchdog(ctx: &Ctx, entry: &PodEntry, target: &Target) -> Result<()> {
+    let armed = watchdog_armed_line(entry.deadline);
+    let script = format!(
+        "log=/workspace/harness-watchdog.log\n\
+         if grep -qE '^[^ ]* {armed}$' \"$log\" 2>/dev/null; then echo WATCHDOG_ARMED\n\
+         else echo WATCHDOG_MISSING; tail -n 5 \"$log\" 2>/dev/null || true; fi"
+    );
+    let reply = ctx.remote.run(target, &script).context("checking the pod's watchdog")?;
+    ensure!(
+        reply.lines().any(|line| line == "WATCHDOG_ARMED"),
+        "pod {} shows no watchdog armed as PID 1 for its deadline {}, so nothing on the pod would end it; the \
+         watchdog log ends: {:?}",
+        entry.name,
+        entry.deadline,
+        reply.trim()
+    );
+    Ok(())
+}
+
+fn gate_and_copy(ctx: &Ctx, spec: &IssueSpec, entry: &PodEntry, target: &Target) -> Result<()> {
+    check_watchdog(ctx, entry, target)?;
     if spec.pod.require_pcie() {
         check_pcie_topology(&ctx.remote.run(target, TOPOLOGY)?, spec.pod.count)?;
     }
@@ -901,6 +929,16 @@ mod tests {
         }
         assert!(topology_error(PCIE, 1).contains("exactly the 1 GPUs"));
         assert!(topology_error(PCIE, 4).contains("exactly the 4 GPUs"));
+    }
+
+    #[test]
+    fn the_watchdog_check_looks_for_the_line_the_entrypoint_logs() {
+        assert!(ENTRYPOINT.contains("log \"watchdog armed for epoch $deadline in pid $$\""));
+        let deadline: Timestamp = "2026-10-16T20:03:00Z".parse().unwrap();
+        assert_eq!(
+            watchdog_armed_line(deadline),
+            "watchdog armed for epoch 1792180980 in pid 1"
+        );
     }
 
     #[test]
