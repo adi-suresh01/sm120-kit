@@ -167,10 +167,88 @@ pub fn create_request(spec: &IssueSpec, entry: &PodEntry) -> CreatePodRequest {
     }
 }
 
-/// `nvidia-smi topo -m` marks NVLink pairs NV1, NV2, ...; PCIe-only boxes show PIX, PXB, PHB, NODE, or SYS.
-pub fn has_nvlink(topo: &str) -> bool {
-    topo.split_whitespace()
-        .any(|cell| cell.len() > 2 && cell.starts_with("NV") && cell[2..].bytes().all(|b| b.is_ascii_digit()))
+/// What `nvidia-smi topo -m` prints between two GPUs that share no NVLink; NVLink pairs show NV1, NV2, ...
+const PCIE_LINKS: [&str; 6] = ["X", "PIX", "PXB", "PHB", "NODE", "SYS"];
+
+/// nvidia-smi underlines the header with ANSI escapes even when stdout is not a terminal.
+fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            if chars.next() == Some('[') {
+                for c in chars.by_ref() {
+                    if ('\u{40}'..='\u{7e}').contains(&c) {
+                        break;
+                    }
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn is_device(cell: &str, kind: &str) -> bool {
+    cell.strip_prefix(kind)
+        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// Fails closed: the matrix must name exactly GPU0..GPU{count-1} and every GPU-to-GPU cell must be a PCIe link,
+/// so empty or garbled output (a driver error, a wedged GPU) refuses the box instead of passing it. NIC rows and
+/// columns and the legend are ignored.
+pub fn check_pcie_topology(topo: &str, count: u32) -> Result<()> {
+    let text = strip_ansi(topo);
+    let rows: Vec<Vec<&str>> = text
+        .lines()
+        .map(|line| line.split_whitespace().collect::<Vec<_>>())
+        .filter(|cells| cells.first().is_some_and(|first| is_device(first, "GPU")))
+        .collect();
+    // The header starts with GPU0 like a row does, but its second cell names a device or a column, not a link.
+    let is_header = |cells: &Vec<&str>| {
+        cells
+            .get(1)
+            .is_none_or(|cell| !PCIE_LINKS.contains(cell) && !cell.starts_with("NV"))
+    };
+    let Some(header) = rows.iter().find(|cells| is_header(cells)) else {
+        bail!("{TOPOLOGY} printed no GPU matrix, so the PCIe-only check cannot pass:\n{topo}");
+    };
+    let columns: Vec<&str> = header
+        .iter()
+        .copied()
+        .take_while(|cell| is_device(cell, "GPU") || is_device(cell, "NIC"))
+        .collect();
+    let expected: Vec<String> = (0..count).map(|i| format!("GPU{i}")).collect();
+    let gpu_columns: Vec<(usize, &str)> = columns
+        .iter()
+        .enumerate()
+        .filter(|(_, cell)| is_device(cell, "GPU"))
+        .map(|(i, cell)| (i, *cell))
+        .collect();
+    let gpu_rows: Vec<&Vec<&str>> = rows.iter().filter(|cells| !is_header(cells)).collect();
+    let column_names: Vec<&str> = gpu_columns.iter().map(|(_, cell)| *cell).collect();
+    let row_names: Vec<&str> = gpu_rows.iter().map(|cells| cells[0]).collect();
+    ensure!(
+        column_names == expected && row_names == expected,
+        "{TOPOLOGY} does not show exactly the {count} GPUs this pod rents, so the PCIe-only check cannot pass:\n{topo}"
+    );
+    for row in gpu_rows {
+        for &(column, peer) in &gpu_columns {
+            let cell = row.get(column + 1).copied().unwrap_or("");
+            ensure!(
+                !cell.starts_with("NV"),
+                "{TOPOLOGY} shows NVLink ({} to {peer}: {cell}), and this repro needs a PCIe-only box:\n{topo}",
+                row[0]
+            );
+            ensure!(
+                PCIE_LINKS.contains(&cell),
+                "{TOPOLOGY} shows {cell:?} between {} and {peer}, which is not a PCIe link:\n{topo}",
+                row[0]
+            );
+        }
+    }
+    Ok(())
 }
 
 /// The coreutils `timeout` ends nvidia-smi on a wedged GPU well inside the ssh command limit, so the gate fails
@@ -394,11 +472,7 @@ fn wait_ready(ctx: &Ctx, issue: &str, entry: &PodEntry, mut pod: Pod) -> Result<
 
 fn gate_and_copy(ctx: &Ctx, spec: &IssueSpec, target: &Target) -> Result<()> {
     if spec.pod.require_pcie() {
-        let topo = ctx.remote.run(target, TOPOLOGY)?;
-        ensure!(
-            !has_nvlink(&topo),
-            "nvidia-smi topo -m shows NVLink, and this repro needs a PCIe-only box:\n{topo}"
-        );
+        check_pcie_topology(&ctx.remote.run(target, TOPOLOGY)?, spec.pod.count)?;
     }
     let issue_dir = format!("issues/{}", spec.issue);
     ctx.remote.upload(target, ctx.repo, &["harness/pod", &issue_dir])
@@ -654,13 +728,43 @@ pub fn reconcile_billing(ctx: &Ctx, issue: &str) -> Result<()> {
 mod tests {
     use super::*;
 
+    const PCIE: &str = include_str!("../tests/fixtures/topo_pcie.txt");
+
+    fn topology_error(topo: &str, count: u32) -> String {
+        format!("{:#}", check_pcie_topology(topo, count).unwrap_err())
+    }
+
     #[test]
-    fn nvlink_shows_up_as_nv_cells() {
-        let pcie = include_str!("../tests/fixtures/topo_pcie.txt");
-        assert!(!has_nvlink(pcie));
+    fn a_pcie_matrix_with_nics_ansi_and_a_legend_passes() {
+        assert!(PCIE.contains("\u{1b}[4m") && PCIE.contains("NIC3") && PCIE.contains("NV#"));
+        check_pcie_topology(PCIE, 2).unwrap();
+        let one = "\t\u{1b}[4mGPU0\tCPU Affinity\tNUMA Affinity\tGPU NUMA ID\u{1b}[0m\nGPU0\t X \t0-63\t0\t\tN/A\n";
+        check_pcie_topology(one, 1).unwrap();
+        let every_link = "\tGPU0\tGPU1\tGPU2\tGPU3\tCPU Affinity\nGPU0\t X \tPIX\tPXB\tPHB\t0\n\
+                          GPU1\tPIX\t X \tNODE\tSYS\t0\nGPU2\tPXB\tNODE\t X \tSYS\t0\nGPU3\tPHB\tSYS\tSYS\t X \t0\n";
+        check_pcie_topology(every_link, 4).unwrap();
+    }
+
+    #[test]
+    fn nvlink_fails_the_gate() {
         let nvlink = "\tGPU0\tGPU1\tCPU Affinity\nGPU0\t X \tNV18\t0-63\nGPU1\tNV18\t X \t0-63\n";
-        assert!(has_nvlink(nvlink));
-        assert!(!has_nvlink("GPU0\t X \tNODE\nNIC0\tNODE\t X\n"));
+        assert!(topology_error(nvlink, 2).contains("shows NVLink (GPU0 to GPU1: NV18)"));
+    }
+
+    #[test]
+    fn output_that_proves_nothing_fails_the_gate() {
+        for garbled in [
+            "",
+            "NVIDIA-SMI has failed because it couldn't communicate with the NVIDIA driver.\n",
+            "GPU0\t X \tNODE\nNIC0\tNODE\t X\n",
+            "\tGPU0\tGPU1\nGPU0\t X \tSYS\n",
+            "\tGPU0\tGPU1\nGPU0\t X \tSYS\nGPU1\t??\t X \n",
+            "\tGPU0\tGPU1\nGPU0\t X\nGPU1\tSYS\t X \n",
+        ] {
+            assert!(check_pcie_topology(garbled, 2).is_err(), "{garbled:?} passed");
+        }
+        assert!(topology_error(PCIE, 1).contains("exactly the 1 GPUs"));
+        assert!(topology_error(PCIE, 4).contains("exactly the 4 GPUs"));
     }
 
     #[test]

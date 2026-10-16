@@ -310,6 +310,18 @@ fn nvlink_fails_the_topology_gate_and_terminates() {
     let err = w.with(|ctx| pod::up(ctx, &spec, true));
     assert!(err_text(err).contains("shows NVLink"));
     assert_eq!(w.states(), [PodState::Terminated]);
+    w.assert_every_billing_pod_is_tracked();
+}
+
+#[test]
+fn an_empty_topology_reply_fails_the_gate_and_terminates() {
+    let w = World::default();
+    w.remote.topo.borrow_mut().clear();
+    let spec = IssueSpec::parse(&SPEC.replace("count = 1", "count = 2"), ISSUE, |_| true).unwrap();
+    let err = err_text(w.with(|ctx| pod::up(ctx, &spec, false)));
+    assert!(err.contains("printed no GPU matrix"), "{err}");
+    assert_eq!(w.states(), [PodState::Terminated]);
+    assert!(w.cloud.billing_pods().is_empty());
 }
 
 #[test]
