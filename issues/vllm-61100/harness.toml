@@ -1,0 +1,93 @@
+issue = "vllm-61100"
+# Setup about 12 min (image, 73 GB of weights, two package overlays), then about 8 min per variant. a0 decides
+# the rest: a reproduction runs a1-a8 (about 65 min), a clean a0 ends the pod. 2 h leaves one slow boot of slack.
+planned_hours = 2.0
+
+[pod]
+# The reporter's failing image, by the manifest-list digest they posted.
+image = "vllm/vllm-openai:v0.25.1@sha256:e4f88a835143cd22aee2397a26ec6bb80b3a4a6fe0c882bcbc63822904766089"
+count = 1
+# Driver 595.x reports CUDA 13.2, the reporter's driver family; the one commenter who could not reproduce had a
+# different driver.
+min_cuda = "13.2"
+container_disk_gb = 60
+volume_gb = 120
+needs_hf_token = false
+gpus = [
+  { id = "NVIDIA RTX PRO 6000 Blackwell Server Edition", cloud = "SECURE" },
+  { id = "NVIDIA RTX PRO 6000 Blackwell Workstation Edition", cloud = "SECURE" },
+]
+
+[server]
+package = "vllm"
+model = "RedHatAI/Apertus-70B-Instruct-2509-FP8-dynamic"
+launch = ["vllm", "serve", "RedHatAI/Apertus-70B-Instruct-2509-FP8-dynamic"]
+# The reporter's table: TP1, fp8_e4m3 KV, 64K context, default compile and FULL_AND_PIECEWISE graphs.
+base_flags = [
+  "--revision", "79a917d6a8034910fa610b097dc61e96eac65d29",
+  "--kv-cache-dtype", "fp8_e4m3",
+  "--max-model-len", "65536",
+  "--gpu-memory-utilization", "0.95",
+]
+port = 8000
+fail_pattern = "illegal memory access|cudaErrorIllegalAddress"
+boot_timeout_s = 1200
+
+# Stock v0.25.1: the reporter's exact request (expects "2"), GSM8K, and the UVA probe from #57224.
+[variants.a0-stock]
+env = { GSM8K_MAX_TOKENS = "1024" }
+[variants.a0-stock.quality]
+gsm8k = 200
+
+# H1: Model Runner V2 became the default for Apertus in 0.25.0 (#44443); the V1 runner is what 0.22.1 ran.
+[variants.a1-v1-runner]
+env = { GSM8K_MAX_TOKENS = "1024", VLLM_USE_V2_MODEL_RUNNER = "0" }
+[variants.a1-v1-runner.quality]
+gsm8k = 200
+
+# H2: FlashInfer 0.6.13 rewrote the FP8-KV attention loop (flashinfer#3485). BF16 KV needs half the context to fit.
+[variants.a2-kv-auto]
+flags = ["--kv-cache-dtype", "auto", "--max-model-len", "32768"]
+env = { GSM8K_MAX_TOKENS = "1024" }
+[variants.a2-kv-auto.quality]
+gsm8k = 200
+
+# H2 vs H5: Triton attention reads the same FP8 KV cache without FlashInfer.
+[variants.a3-triton-attn]
+flags = ["--attention-backend", "TRITON_ATTN"]
+env = { GSM8K_MAX_TOKENS = "1024" }
+[variants.a3-triton-attn.quality]
+gsm8k = 200
+
+# H3: FULL decode graph capture is a new path under Model Runner V2; piecewise keeps compile on.
+[variants.a4-piecewise]
+flags = ["--compilation-config", '{"cudagraph_mode":"PIECEWISE"}']
+env = { GSM8K_MAX_TOKENS = "1024" }
+[variants.a4-piecewise.quality]
+gsm8k = 200
+
+[variants.a5-eager]
+flags = ["--enforce-eager"]
+env = { GSM8K_MAX_TOKENS = "1024" }
+[variants.a5-eager.quality]
+gsm8k = 200
+
+# H2 with everything else fixed: FlashInfer 0.6.12 (the version before #3485) under vLLM 0.25.1, FP8 KV kept.
+[variants.a6-fi0612]
+env = { GSM8K_MAX_TOKENS = "1024", PYTHONPATH = "/workspace/ovl/fi0612" }
+[variants.a6-fi0612.quality]
+gsm8k = 200
+
+# Positive control inside this image: vLLM 0.24.0 with its own FlashInfer 0.6.12, which runs Apertus on V1.
+[variants.a7-v0240]
+env = { GSM8K_MAX_TOKENS = "1024", PYTHONPATH = "/workspace/ovl/v0240:/workspace/ovl/fi0612" }
+[variants.a7-v0240.quality]
+gsm8k = 200
+
+# H1 inside 0.24.0 code: the same control forced onto Model Runner V2.
+[variants.a8-v0240-mrv2.env]
+GSM8K_MAX_TOKENS = "1024"
+PYTHONPATH = "/workspace/ovl/v0240:/workspace/ovl/fi0612"
+VLLM_USE_V2_MODEL_RUNNER = "1"
+[variants.a8-v0240-mrv2.quality]
+gsm8k = 200
