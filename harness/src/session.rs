@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 
+use crate::cloud::PodStatus;
 use crate::ledger::PodEntry;
 use crate::pod::{Ctx, POLL};
 
@@ -469,8 +470,17 @@ fn truncate(text: &str) -> String {
 /// About five minutes of failed polls, at POLL apart, before a job counts as lost.
 const POLL_FAILURES: u32 = 30;
 
-/// Polls a job started with `start_job` until it exits, handing every complete new line of `tail_path` to
-/// `on_line`. Ends early on Ctrl-C, at the pod deadline, or after POLL_FAILURES polls in a row fail.
+/// What `wait_job` does for its caller while the job runs.
+pub struct Watch<'w> {
+    /// Gets every complete line added to the tailed file.
+    pub on_line: &'w mut dyn FnMut(&str),
+    /// Runs about once a period while the job answers polls, as for a pull of what it wrote so far.
+    pub every: Option<(Duration, &'w mut dyn FnMut())>,
+}
+
+/// Polls a job started with `start_job` until it exits, handing every complete new line of `tail_path` to the
+/// watch. Ends early on Ctrl-C, at the pod deadline, when RunPod reports the pod stopped or gone after a failed poll,
+/// or after POLL_FAILURES polls in a row fail.
 pub fn wait_job(
     ctx: &Ctx,
     issue: &str,
@@ -478,8 +488,10 @@ pub fn wait_job(
     target: &Target,
     job: &str,
     tail_path: &str,
-    on_line: &mut dyn FnMut(&str),
+    watch: Watch,
 ) -> Result<i32> {
+    let Watch { on_line, mut every } = watch;
+    let mut due = every.as_ref().map(|(period, _)| ctx.clock.now() + *period);
     let mut offset = 0;
     let mut failures = 0;
     loop {
@@ -502,9 +514,16 @@ pub fn wait_job(
                     ),
                     JobState::Running => {}
                 }
+                if let (Some((period, run)), Some(at)) = (every.as_mut(), due)
+                    && ctx.clock.now() >= at
+                {
+                    run();
+                    due = Some(ctx.clock.now() + *period);
+                }
             }
             Err(e) => {
                 failures += 1;
+                check_pod_up(ctx, issue, entry, job)?;
                 if failures >= POLL_FAILURES {
                     return Err(e).context(format!("lost contact with the pod while {job} ran"));
                 }
@@ -513,6 +532,33 @@ pub fn wait_job(
         }
         ctx.clock.sleep(POLL);
     }
+}
+
+/// A container RunPod stopped (as it does at about 98% of the container's memory limit) never answers again, so a
+/// failed poll asks RunPod about the pod before it waits out POLL_FAILURES. RunPod failing to answer is no evidence
+/// either way.
+fn check_pod_up(ctx: &Ctx, issue: &str, entry: &PodEntry, job: &str) -> Result<()> {
+    let Some(id) = entry.id.as_deref() else {
+        return Ok(());
+    };
+    let what = match ctx.cloud.get_pod(id) {
+        Ok(Some(pod)) if matches!(pod.status, PodStatus::Exited | PodStatus::Error | PodStatus::Terminated) => {
+            format!("RunPod reports pod {} (id {id}) {:?}", entry.name, pod.status)
+        }
+        Ok(Some(_)) => return Ok(()),
+        Ok(None) => format!("RunPod no longer lists pod {} (id {id})", entry.name),
+        Err(e) => {
+            ctx.warn(
+                issue,
+                format!("reading pod {} from RunPod after a failed poll failed: {e}", entry.name),
+            );
+            return Ok(());
+        }
+    };
+    bail!(
+        "{what} while {job} ran: its container is gone, and with it every file on the pod that was not pulled yet; \
+         run `harness down {issue}`, since a stopped pod still bills its disk"
+    )
 }
 
 #[cfg(test)]
