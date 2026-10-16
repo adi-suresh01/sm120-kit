@@ -1,0 +1,27 @@
+# Live test of the harness itself: pod lifecycle, watchdog, SSH, billing. No server runs here, so [server] only
+# satisfies the schema. Cheapest GPUs first; the GPU model does not matter for these checks.
+issue = "harness-test"
+planned_hours = 0.25
+
+[pod]
+image = "nvidia/cuda:12.8.1-base-ubuntu24.04@sha256:133c78a0575303be34164d0b90137a042172bdf60696af01a3c424ab402d86e2"
+count = 1
+min_cuda = "12.8"
+container_disk_gb = 20
+volume_gb = 10
+needs_hf_token = false
+gpus = [
+  { id = "NVIDIA GeForce RTX 3070", cloud = "COMMUNITY" },
+  { id = "NVIDIA GeForce RTX 3080 Ti", cloud = "COMMUNITY" },
+  { id = "NVIDIA RTX 4000 Ada Generation", cloud = "COMMUNITY" },
+  { id = "NVIDIA GeForce RTX 3090", cloud = "COMMUNITY" },
+  { id = "NVIDIA GeForce RTX 3090", cloud = "SECURE" },
+]
+
+[server]
+package = "vllm"
+model = "none"
+launch = ["true"]
+port = 8000
+fail_pattern = "never-matches"
+boot_timeout_s = 60
