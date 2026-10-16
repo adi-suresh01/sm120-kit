@@ -10,8 +10,8 @@ use serde_json::json;
 use sm120_harness::clock::SystemClock;
 use sm120_harness::cloud::{API_BASE, Cloud, RunpodRest};
 use sm120_harness::events::{Events, Kind};
-use sm120_harness::ledger::{Budget, check_accounts};
-use sm120_harness::pod::{self, Ctx, cents};
+use sm120_harness::ledger::{Budget, LedgerStore, check_accounts};
+use sm120_harness::pod::{self, AfterFailure, Ctx, cents};
 use sm120_harness::session::{Remote, SshRemote, TRANSFER_LIMIT};
 use sm120_harness::spec::{IssueSpec, is_slug};
 use sm120_harness::{exec, reap};
@@ -76,6 +76,24 @@ enum BudgetAction {
     Show { issue: String },
 }
 
+impl Command {
+    fn issue(&self) -> Option<&str> {
+        match self {
+            Self::Budget {
+                action: BudgetAction::Set { issue, .. } | BudgetAction::Show { issue },
+            }
+            | Self::Quote { issue }
+            | Self::Up { issue, .. }
+            | Self::Exec { issue, .. }
+            | Self::Pull { issue }
+            | Self::Down { issue }
+            | Self::Run { issue, .. }
+            | Self::Ssh { issue, .. } => Some(issue),
+            Self::Reap => None,
+        }
+    }
+}
+
 fn main() -> ExitCode {
     match run(Cli::parse()) {
         Ok(()) => ExitCode::SUCCESS,
@@ -83,6 +101,20 @@ fn main() -> ExitCode {
             let _ = writeln!(io::stderr().lock(), "harness: {e:#}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// Printed from the signal thread at once: teardown can take minutes, and a person who sees nothing presses
+/// Ctrl-C again. Only `run` ends the pod here; the other commands stop at the next safe point.
+fn interrupt_notice(repo: &Path, issue: Option<&str>, ends_pod: bool) -> String {
+    let pod = issue.and_then(|issue| {
+        let ledger = LedgerStore::new(repo, issue).load().ok()?;
+        ledger.active().map(|entry| entry.name.clone())
+    });
+    match (ends_pod, pod) {
+        (true, Some(pod)) => format!("harness: interrupted; tearing down pod {pod}, do not interrupt again"),
+        (true, None) => "harness: interrupted; tearing down, do not interrupt again".into(),
+        (false, _) => "harness: interrupted; stopping at the next safe point".into(),
     }
 }
 
@@ -109,47 +141,76 @@ fn run(cli: Cli) -> Result<()> {
         .ok()
         .filter(|key| !key.is_empty())
         .context("RUNPOD_API_KEY is not set")?;
+    let issue = cli.command.issue().map(str::to_string);
     let interrupted = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&interrupted);
+    let (handler_repo, handler_issue) = (repo.clone(), issue.clone());
+    let ends_pod = matches!(cli.command, Command::Run { .. });
     // Only a flag: every loop stops at a safe point, and `run` still reaches `down`.
-    ctrlc::set_handler(move || flag.store(true, Ordering::SeqCst)).context("installing the signal handler")?;
+    ctrlc::set_handler(move || {
+        flag.store(true, Ordering::SeqCst);
+        let notice = interrupt_notice(&handler_repo, handler_issue.as_deref(), ends_pod);
+        let _ = writeln!(io::stderr().lock(), "{notice}");
+    })
+    .context("installing the signal handler")?;
     let clock = SystemClock;
     let cloud = RunpodRest::new(API_BASE, &api_key, &clock);
     let events = Events::new(&repo.join("results"), &clock, true);
+    let result = dispatch(&repo, &cloud, &clock, &events, &interrupted, cli.command);
+    if let Err(e) = &result {
+        pod::report_error(&events, issue.as_deref(), e);
+    }
+    result
+}
+
+fn dispatch(
+    repo: &Path,
+    cloud: &RunpodRest,
+    clock: &SystemClock,
+    events: &Events,
+    interrupted: &AtomicBool,
+    command: Command,
+) -> Result<()> {
     let account = cloud.account().context("reading the key's RunPod organization")?;
-    check_accounts(&repo, account.as_deref())?;
+    check_accounts(repo, account.as_deref())?;
     let ctx = Ctx {
-        repo: &repo,
-        cloud: &cloud,
+        repo,
+        cloud,
         remote: &SshRemote,
-        clock: &clock,
-        events: &events,
-        interrupted: &interrupted,
+        clock,
+        events,
+        interrupted,
         account: account.as_deref(),
     };
     let reaped = reap::reap(&ctx);
-    if let Command::Reap = cli.command {
+    if let Command::Reap = command {
         return reaped;
     }
     if let Err(e) = reaped {
-        events.emit(None, Kind::Warn, json!({"detail": format!("reaper failed: {e:#}")}));
+        events.emit(
+            command.issue(),
+            Kind::Warn,
+            json!({"detail": format!("reaper failed: {e:#}")}),
+        );
     }
-    match cli.command {
+    match command {
         Command::Budget {
             action: BudgetAction::Set { issue, usd, note },
         } => budget_set(&ctx, &issue, usd, &note),
         Command::Budget {
             action: BudgetAction::Show { issue },
         } => budget_show(&ctx, &issue),
-        Command::Quote { issue } => pod::quote(&ctx, &load(&repo, &issue)?),
-        Command::Up { issue, no_setup } => pod::up(&ctx, &load(&repo, &issue)?, !no_setup).map(drop),
+        Command::Quote { issue } => pod::quote(&ctx, &load(repo, &issue)?),
+        Command::Up { issue, no_setup } => {
+            pod::up(&ctx, &load(repo, &issue)?, !no_setup, AfterFailure::KeepPod).map(drop)
+        }
         Command::Exec { issue, variants } => {
-            let spec = load(&repo, &issue)?;
+            let spec = load(repo, &issue)?;
             exec::exec(&ctx, &spec, &pod::live_pod(&ctx, &issue)?, &variants)
         }
         Command::Pull { issue } => pod::pull(&ctx, &issue, &pod::live_pod(&ctx, &issue)?.target, TRANSFER_LIMIT),
         Command::Down { issue } => pod::down(&ctx, &issue),
-        Command::Run { issue, variants } => exec::run(&ctx, &load(&repo, &issue)?, &variants),
+        Command::Run { issue, variants } => exec::run(&ctx, &load(repo, &issue)?, &variants),
         Command::Reap => Ok(()),
         Command::Ssh { issue, command } => {
             SshRemote.run_streaming(&pod::live_pod(&ctx, &issue)?.target, &command.join(" "))
@@ -226,6 +287,46 @@ mod tests {
             ),
             _ => panic!("parsed as another command"),
         }
+    }
+
+    #[test]
+    fn ctrl_c_under_run_names_the_pod_it_tears_down() {
+        let repo = std::env::temp_dir().join(format!("sm120-notice-{}", std::process::id()));
+        std::fs::create_dir_all(repo.join("issues/vllm-47990")).unwrap();
+        let ledger = r#"{"issue": "vllm-47990", "budget": null, "pods": [{"name": "sm120-vllm-47990-7f3a2c",
+            "id": "p1", "state": "live", "gpu": "g", "count": 1, "cloud": "SECURE", "rate_usd_hr": 2.0,
+            "reserved_usd": 2.2, "reserved_at": "2026-10-16T17:00:00Z", "deadline": "2026-10-16T18:00:00Z",
+            "terminated_at": null, "cost_usd": null, "cost_source": null}]}"#;
+        std::fs::write(repo.join("issues/vllm-47990/harness-ledger.json"), ledger).unwrap();
+        assert_eq!(
+            interrupt_notice(&repo, Some("vllm-47990"), true),
+            "harness: interrupted; tearing down pod sm120-vllm-47990-7f3a2c, do not interrupt again"
+        );
+        assert!(interrupt_notice(&repo, Some("vllm-47990"), false).ends_with("stopping at the next safe point"));
+        assert!(interrupt_notice(&repo, Some("other"), true).ends_with("tearing down, do not interrupt again"));
+        std::fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[test]
+    fn every_command_but_reap_names_its_issue() {
+        for args in [
+            &["harness", "budget", "show", "x-1"][..],
+            &["harness", "budget", "set", "x-1", "5", "--note", "n"],
+            &["harness", "quote", "x-1"],
+            &["harness", "up", "x-1"],
+            &["harness", "exec", "x-1", "a"],
+            &["harness", "pull", "x-1"],
+            &["harness", "down", "x-1"],
+            &["harness", "run", "x-1"],
+            &["harness", "ssh", "x-1", "--", "ls"],
+        ] {
+            assert_eq!(
+                Cli::try_parse_from(args).unwrap().command.issue(),
+                Some("x-1"),
+                "{args:?}"
+            );
+        }
+        assert_eq!(Cli::try_parse_from(["harness", "reap"]).unwrap().command.issue(), None);
     }
 
     #[test]

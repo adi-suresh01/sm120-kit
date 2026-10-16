@@ -4,7 +4,7 @@ use anyhow::{Result, bail, ensure};
 use serde_json::{Value, json};
 
 use crate::events::Kind;
-use crate::pod::{self, Ctx, LivePod};
+use crate::pod::{self, AfterFailure, Ctx, LivePod, StillLive};
 use crate::reap;
 use crate::session::{TRANSFER_LIMIT, shell_quote, start_job};
 use crate::spec::{IssueSpec, Variant};
@@ -66,7 +66,15 @@ pub fn render_variant(spec: &IssueSpec, variant: &Variant) -> Result<String> {
     Ok(out)
 }
 
-pub fn exec(ctx: &Ctx, spec: &IssueSpec, live: &LivePod, names: &[String]) -> Result<()> {
+/// A variant resolved and rendered.
+pub struct Planned<'s> {
+    variant: &'s Variant,
+    rendered: String,
+}
+
+/// Every requested variant, resolved and rendered before anything is reserved, so a typo costs nothing. No names
+/// means every variant in file order.
+pub fn plan<'s>(spec: &'s IssueSpec, names: &[String]) -> Result<Vec<Planned<'s>>> {
     let variants: Vec<&Variant> = if names.is_empty() {
         spec.variants.iter().collect()
     } else {
@@ -77,22 +85,46 @@ pub fn exec(ctx: &Ctx, spec: &IssueSpec, live: &LivePod, names: &[String]) -> Re
         "issues/{}/harness.toml defines no variants",
         spec.issue
     );
-    for variant in variants {
+    variants
+        .into_iter()
+        .map(|variant| {
+            Ok(Planned {
+                variant,
+                rendered: render_variant(spec, variant)?,
+            })
+        })
+        .collect()
+}
+
+/// `harness exec`: the pod outlives any error here, so every error names it and says how to end it.
+pub fn exec(ctx: &Ctx, spec: &IssueSpec, live: &LivePod, names: &[String]) -> Result<()> {
+    let run = || {
+        let planned = plan(spec, names)?;
+        // A patch or hooks.sh edited since `up` has to reach the pod before the variant that uses it.
+        let issue_dir = format!("issues/{}", spec.issue);
+        ctx.remote.upload(&live.target, ctx.repo, &[&issue_dir])?;
+        run_planned(ctx, spec, live, &planned)
+    };
+    run().map_err(|e| e.context(StillLive::of(&spec.issue, &live.entry)))
+}
+
+fn run_planned(ctx: &Ctx, spec: &IssueSpec, live: &LivePod, planned: &[Planned]) -> Result<()> {
+    for variant in planned {
         ctx.check_interrupted()?;
         run_variant(ctx, spec, live, variant)?;
     }
     Ok(())
 }
 
-fn run_variant(ctx: &Ctx, spec: &IssueSpec, live: &LivePod, variant: &Variant) -> Result<()> {
+fn run_variant(ctx: &Ctx, spec: &IssueSpec, live: &LivePod, planned: &Planned) -> Result<()> {
     let issue = spec.issue.as_str();
+    let variant = planned.variant;
     let name = variant.name.as_str();
     let file = format!("results/{issue}/variants/{name}.sh");
     // The first poll can come before serve_variant.sh clears the last attempt, so its verdict goes first.
     ctx.remote
         .run(&live.target, &format!("rm -rf results/{issue}/{name}"))?;
-    ctx.remote
-        .write_file(&live.target, &file, &render_variant(spec, variant)?)?;
+    ctx.remote.write_file(&live.target, &file, &planned.rendered)?;
     ctx.events.emit(
         Some(issue),
         Kind::VariantStart,
@@ -140,17 +172,31 @@ fn emit_verdict(ctx: &Ctx, issue: &str, line: &str) {
 /// `up`, `exec`, `down`. `down` runs on every way out: errors and Ctrl-C come back here as `Err`, and a panic
 /// reaches it through the guard's `Drop`.
 pub fn run(ctx: &Ctx, spec: &IssueSpec, names: &[String]) -> Result<()> {
+    let planned = plan(spec, names)?;
+    // The guard below would end a pod that an earlier `up` left for `exec`, so stop before arming it.
+    if let Some(active) = ctx.ledger(&spec.issue).load()?.active() {
+        bail!(
+            "issue {} already has pod {} ({:?}), and `run` would end it; use `harness exec` on it, or `harness \
+             down {}` first",
+            spec.issue,
+            active.name,
+            active.state,
+            spec.issue
+        );
+    }
     let guard = Teardown {
         ctx,
         issue: &spec.issue,
         armed: true,
     };
-    let result = pod::up(ctx, spec, true).and_then(|live| exec(ctx, spec, &live, names));
+    let result =
+        pod::up(ctx, spec, true, AfterFailure::CallerEnds).and_then(|live| run_planned(ctx, spec, &live, &planned));
     let down = guard.finish();
     match (result, down) {
         (Ok(()), down) => down,
         (Err(e), Ok(())) => Err(e),
-        (Err(e), Err(down)) => bail!("{e:#}; then down failed too: {down:#}"),
+        // The teardown's error comes last so a pod it could not end keeps its StillLive context.
+        (Err(e), Err(down)) => Err(down.context(format!("{e:#}; then down failed too"))),
     }
 }
 

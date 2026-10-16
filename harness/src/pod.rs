@@ -7,7 +7,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
-use jiff::SignedDuration;
+use jiff::tz::TimeZone;
+use jiff::{SignedDuration, Timestamp};
 use serde_json::json;
 
 use crate::clock::Clock;
@@ -75,9 +76,79 @@ impl Ctx<'_> {
     }
 }
 
+#[derive(Debug)]
 pub struct LivePod {
     pub entry: PodEntry,
     pub target: Target,
+}
+
+/// Who ends the pod when `up` fails after the pod became usable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AfterFailure {
+    /// `harness up`: the pod stays for debugging until `harness down` or its deadline.
+    KeepPod,
+    /// `harness run`: its teardown ends the pod right after.
+    CallerEnds,
+}
+
+/// Context on an error after which the pod still bills: which pod, until when, and how to stop it now. `main`
+/// reads it back to put the same facts into the error event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StillLive {
+    pub issue: String,
+    pub pod: String,
+    pub id: Option<String>,
+    pub deadline: Timestamp,
+}
+
+impl StillLive {
+    pub fn of(issue: &str, entry: &PodEntry) -> Self {
+        Self {
+            issue: issue.to_string(),
+            pod: entry.name.clone(),
+            id: entry.id.clone(),
+            deadline: entry.deadline,
+        }
+    }
+
+    /// The deadline on the laptop's clock, since the person reading it acts on local time.
+    pub fn deadline_local(&self) -> String {
+        self.deadline
+            .to_zoned(TimeZone::system())
+            .strftime("%Y-%m-%d %H:%M:%S %Z")
+            .to_string()
+    }
+
+    pub fn next_step(&self) -> String {
+        format!("harness down {}", self.issue)
+    }
+}
+
+impl fmt::Display for StillLive {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "pod {} (id {}) is still up and billing until its watchdog ends it at {}; end it now with `{}`",
+            self.pod,
+            self.id.as_deref().unwrap_or("unknown"),
+            self.deadline_local(),
+            self.next_step()
+        )
+    }
+}
+
+/// Records a command's error as an event, with the live pod's facts when the error carries them, so a monitor
+/// tailing events.jsonl sees every failure without reading stderr.
+pub fn report_error(events: &Events, issue: Option<&str>, error: &anyhow::Error) {
+    let mut fields = json!({ "detail": format!("{error:#}") });
+    if let Some(live) = error.downcast_ref::<StillLive>() {
+        fields["pod"] = json!(live.pod);
+        fields["id"] = json!(live.id);
+        fields["deadline"] = json!(live.deadline);
+        fields["deadline_local"] = json!(live.deadline_local());
+        fields["next"] = json!(live.next_step());
+    }
+    events.emit(issue, Kind::Error, fields);
 }
 
 pub fn cents(usd: f64) -> f64 {
@@ -294,7 +365,7 @@ pub fn quote(ctx: &Ctx, spec: &IssueSpec) -> Result<()> {
     Ok(())
 }
 
-pub fn up(ctx: &Ctx, spec: &IssueSpec, run_setup: bool) -> Result<LivePod> {
+pub fn up(ctx: &Ctx, spec: &IssueSpec, run_setup: bool, after_failure: AfterFailure) -> Result<LivePod> {
     let issue = spec.issue.as_str();
     let ledger = ctx.ledger(issue).load()?;
     if let Some(active) = ledger.active() {
@@ -322,14 +393,16 @@ pub fn up(ctx: &Ctx, spec: &IssueSpec, run_setup: bool) -> Result<LivePod> {
                 issue,
                 format!("up failed before the pod was usable: {e:#}; terminating {}", entry.name),
             );
-            if let Err(stop) = terminate(ctx, issue, &entry) {
-                ctx.events.emit(
-                    Some(issue),
-                    Kind::Error,
-                    json!({"pod": entry.name, "detail": format!("terminate failed: {stop:#}"), "watchdog_at": entry.deadline}),
-                );
-            }
-            return Err(e);
+            return match terminate(ctx, issue, &entry) {
+                Ok(()) => Err(e),
+                Err(stop) => {
+                    let e = e.context(format!("then terminating it failed: {stop:#}"));
+                    Err(match after_failure {
+                        AfterFailure::KeepPod => e.context(StillLive::of(issue, &entry)),
+                        AfterFailure::CallerEnds => e,
+                    })
+                }
+            };
         }
     };
     ctx.events.emit(
@@ -337,8 +410,11 @@ pub fn up(ctx: &Ctx, spec: &IssueSpec, run_setup: bool) -> Result<LivePod> {
         Kind::Ready,
         json!({"pod": entry.name, "id": entry.id, "host": target.host, "port": target.port, "deadline": entry.deadline}),
     );
-    setup(ctx, spec, &entry, &target, run_setup)?;
-    Ok(LivePod { entry, target })
+    match setup(ctx, spec, &entry, &target, run_setup) {
+        Ok(()) => Ok(LivePod { entry, target }),
+        Err(e) if after_failure == AfterFailure::KeepPod => Err(e.context(StillLive::of(issue, &entry))),
+        Err(e) => Err(e),
+    }
 }
 
 fn create_first_available(ctx: &Ctx, spec: &IssueSpec, offers: &[Offer]) -> Result<(PodEntry, Pod)> {
@@ -546,13 +622,7 @@ fn setup(ctx: &Ctx, spec: &IssueSpec, entry: &PodEntry, target: &Target, run_set
     if let Err(e) = pull(ctx, issue, target, TRANSFER_LIMIT) {
         ctx.warn(issue, format!("pulling setup output failed: {e:#}"));
     }
-    ensure!(
-        code == 0,
-        "setup exited {code}; see results/{issue}/jobs/setup.log. Pod {} stays up for debugging until {} or \
-         `harness down {issue}`",
-        entry.name,
-        entry.deadline
-    );
+    ensure!(code == 0, "setup exited {code}; see results/{issue}/jobs/setup.log");
     ctx.events.emit(
         Some(issue),
         Kind::Setup,
@@ -655,7 +725,7 @@ pub fn down(ctx: &Ctx, issue: &str) -> Result<()> {
     if let Err(e) = pulled {
         ctx.warn(issue, format!("pull before terminate failed: {e:#}"));
     }
-    terminate(ctx, issue, &entry)
+    terminate(ctx, issue, &entry).map_err(|e| e.context(StillLive::of(issue, &entry)))
 }
 
 /// Deletes the pod, waits until RunPod no longer lists it, then books the estimate and any billing record.

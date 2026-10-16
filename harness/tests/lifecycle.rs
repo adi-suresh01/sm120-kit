@@ -11,7 +11,7 @@ use sm120_harness::cloud::{Cloud, PodStatus};
 use sm120_harness::events::Events;
 use sm120_harness::exec;
 use sm120_harness::ledger::{Budget, CostSource, Ledger, LedgerStore, PodState, check_accounts};
-use sm120_harness::pod::{self, Ctx};
+use sm120_harness::pod::{self, AfterFailure, Ctx, StillLive};
 use sm120_harness::reap;
 use sm120_harness::spec::IssueSpec;
 use support::fake_cloud::{Create, FakeCloud};
@@ -128,7 +128,7 @@ impl World {
 
     fn up(&self) -> anyhow::Result<pod::LivePod> {
         let spec = self.spec();
-        self.with(|ctx| pod::up(ctx, &spec, true))
+        self.with(|ctx| pod::up(ctx, &spec, true, AfterFailure::KeepPod))
     }
 }
 
@@ -177,7 +177,7 @@ fn the_create_request_carries_the_deadline_and_never_a_token() {
         |_| true,
     )
     .unwrap();
-    w.with(|ctx| pod::up(ctx, &spec, false)).unwrap();
+    w.with(|ctx| pod::up(ctx, &spec, false, AfterFailure::KeepPod)).unwrap();
     let (_, _, env) = w.cloud.billing_pods().remove(0);
     assert_eq!(env["HF_TOKEN"], "{{ RUNPOD_SECRET_hf_token }}");
 }
@@ -349,7 +349,7 @@ fn nvlink_fails_the_topology_gate_and_terminates() {
     let w = World::default();
     *w.remote.topo.borrow_mut() = "\tGPU0\tGPU1\nGPU0\t X \tNV18\nGPU1\tNV18\t X \n".into();
     let spec = IssueSpec::parse(&SPEC.replace("count = 1", "count = 2"), ISSUE, |_| true).unwrap();
-    let err = w.with(|ctx| pod::up(ctx, &spec, true));
+    let err = w.with(|ctx| pod::up(ctx, &spec, true, AfterFailure::KeepPod));
     assert!(err_text(err).contains("shows NVLink"));
     assert_eq!(w.states(), [PodState::Terminated]);
     w.assert_every_billing_pod_is_tracked();
@@ -360,7 +360,7 @@ fn an_empty_topology_reply_fails_the_gate_and_terminates() {
     let w = World::default();
     w.remote.topo.borrow_mut().clear();
     let spec = IssueSpec::parse(&SPEC.replace("count = 1", "count = 2"), ISSUE, |_| true).unwrap();
-    let err = err_text(w.with(|ctx| pod::up(ctx, &spec, false)));
+    let err = err_text(w.with(|ctx| pod::up(ctx, &spec, false, AfterFailure::KeepPod)));
     assert!(err.contains("printed no GPU matrix"), "{err}");
     assert_eq!(w.states(), [PodState::Terminated]);
     assert!(w.cloud.billing_pods().is_empty());
@@ -374,18 +374,48 @@ fn an_api_outage_after_create_keeps_the_pod_in_the_ledger() {
         state.get_error = Some(401);
         state.delete_error = Some(401);
     }
-    assert!(w.up().is_err());
+    let err = w.up().unwrap_err();
+    let text = format!("{err:#}");
+    assert!(text.contains("then terminating it failed"), "{text}");
+    assert!(
+        text.contains("is still up and billing") && text.contains("`harness down vllm-47990`"),
+        "{text}"
+    );
     assert_eq!(w.states(), [PodState::Live]);
     assert_eq!(w.cloud.billing_pods().len(), 1);
     w.assert_every_billing_pod_is_tracked();
-    assert!(w.events().contains("terminate failed"));
 }
 
 #[test]
-fn a_failed_setup_leaves_the_pod_up_for_debugging() {
+fn a_failed_setup_leaves_the_pod_up_and_says_how_to_end_it() {
     let w = World::default();
     w.remote.exits.borrow_mut().push_back(3);
-    assert!(err_text(w.up()).contains("setup exited 3"));
+    let err = w.up().unwrap_err();
+    let text = format!("{err:#}");
+    assert!(text.contains("setup exited 3"), "{text}");
+    let entry = w.ledger().pods[0].clone();
+    let live = err.downcast_ref::<StillLive>().unwrap();
+    assert_eq!(live, &StillLive::of(ISSUE, &entry));
+    assert!(
+        text.starts_with(&format!("pod {} (id fakepod0001) is still up", entry.name)),
+        "{text}"
+    );
+    assert!(
+        text.contains(&live.deadline_local()) && text.contains("`harness down vllm-47990`"),
+        "{text}"
+    );
+    w.with(|ctx| pod::report_error(ctx.events, Some(ISSUE), &err));
+    let events = w.events();
+    let error = events.lines().find(|line| line.contains("\"kind\":\"error\"")).unwrap();
+    for field in [
+        format!("\"pod\":\"{}\"", entry.name),
+        "\"id\":\"fakepod0001\"".to_string(),
+        "\"deadline\":\"2026-10-16T18:00:00Z\"".to_string(),
+        "\"deadline_local\":".to_string(),
+        "\"next\":\"harness down vllm-47990\"".to_string(),
+    ] {
+        assert!(error.contains(&field), "{field} missing from {error}");
+    }
     assert_eq!(w.states(), [PodState::Live]);
     w.assert_every_billing_pod_is_tracked();
 }
@@ -419,7 +449,7 @@ fn a_second_checkout_cannot_spend_the_budget_again() {
     w.up().unwrap();
     let other = funded_checkout(20.0);
     let spec = w.spec();
-    let err = err_text(w.with_repo(other.path(), |ctx| pod::up(ctx, &spec, false)));
+    let err = err_text(w.with_repo(other.path(), |ctx| pod::up(ctx, &spec, false, AfterFailure::KeepPod)));
     assert!(err.contains("does not track it"), "{err}");
     assert!(err.contains("fakepod0001") && err.contains("another checkout"), "{err}");
     assert_eq!(w.cloud.0.borrow().create_calls, 1);
@@ -461,7 +491,8 @@ fn pods_of_another_issue_or_already_ended_do_not_block_up() {
             Ok(())
         })
         .unwrap();
-    w.with(|ctx| pod::up(ctx, &other, false)).unwrap();
+    w.with(|ctx| pod::up(ctx, &other, false, AfterFailure::KeepPod))
+        .unwrap();
     w.up().unwrap();
     w.with(|ctx| pod::down(ctx, ISSUE)).unwrap();
     w.up().unwrap();
@@ -504,7 +535,7 @@ fn down_caps_the_pull_and_deletes_whatever_the_pull_did() {
 fn the_topology_gate_cannot_hang_on_a_wedged_gpu() {
     let w = World::default();
     let spec = IssueSpec::parse(&SPEC.replace("count = 1", "count = 2"), ISSUE, |_| true).unwrap();
-    w.with(|ctx| pod::up(ctx, &spec, false)).unwrap();
+    w.with(|ctx| pod::up(ctx, &spec, false, AfterFailure::KeepPod)).unwrap();
     assert!(
         w.remote
             .scripts
@@ -792,10 +823,71 @@ fn run_comes_down_after_a_panic() {
 }
 
 #[test]
-fn run_comes_down_on_an_unknown_variant() {
+fn run_spends_nothing_on_an_unknown_or_unrenderable_variant() {
     let w = World::default();
-    assert!(err_text(run(&w, &["nope"])).contains("no variant \"nope\""));
+    assert!(err_text(run(&w, &["baseline", "nope"])).contains("no variant \"nope\""));
+    let spec = IssueSpec::parse(&SPEC.replace("\"flashinfer_b12x\"", "\"b\\u0000\""), ISSUE, |_| true).unwrap();
+    let err = err_text(w.with(|ctx| exec::run(ctx, &spec, &[])));
+    assert!(err.contains("NUL byte"), "{err}");
+    assert_eq!(w.cloud.0.borrow().create_calls, 0);
+    assert!(w.ledger().pods.is_empty());
+}
+
+#[test]
+fn run_refuses_a_live_pod_without_ending_it() {
+    let w = World::default();
+    w.up().unwrap();
+    let err = err_text(run(&w, &[]));
+    assert!(
+        err.contains("already has pod") && err.contains("`run` would end it"),
+        "{err}"
+    );
+    assert_eq!(w.states(), [PodState::Live]);
+    assert_eq!(w.cloud.billing_pods().len(), 1);
+    assert_eq!(w.cloud.0.borrow().create_calls, 1);
+}
+
+#[test]
+fn run_never_says_the_pod_stays_up() {
+    let w = World::default();
+    w.remote.exits.borrow_mut().push_back(3);
+    let err = run(&w, &[]).unwrap_err();
+    let text = format!("{err:#}");
+    assert!(text.contains("setup exited 3"), "{text}");
+    assert!(!text.contains("still up") && !text.contains("stays up"), "{text}");
+    assert!(err.downcast_ref::<StillLive>().is_none());
     assert_down(&w);
+}
+
+#[test]
+fn run_names_the_pod_its_teardown_could_not_end() {
+    let w = World::default();
+    w.remote.exits.borrow_mut().push_back(3);
+    w.cloud.0.borrow_mut().delete_error = Some(401);
+    let err = run(&w, &[]).unwrap_err();
+    let text = format!("{err:#}");
+    assert!(
+        text.contains("setup.log; then down failed too: pod sm120-vllm-47990-"),
+        "{text}"
+    );
+    assert!(err.downcast_ref::<StillLive>().is_some(), "{text}");
+    assert_eq!(w.states(), [PodState::Live]);
+    w.assert_every_billing_pod_is_tracked();
+}
+
+#[test]
+fn exec_sends_the_issue_folder_again_and_names_the_pod_on_errors() {
+    let w = World::default();
+    let live = w.up().unwrap();
+    let spec = w.spec();
+    let names = vec!["baseline".to_string()];
+    w.with(|ctx| exec::exec(ctx, &spec, &live, &names)).unwrap();
+    assert_eq!(w.remote.uploads.borrow().last().unwrap(), &["issues/vllm-47990"]);
+    let err = w
+        .with(|ctx| exec::exec(ctx, &spec, &live, &["nope".to_string()]))
+        .unwrap_err();
+    assert!(err.downcast_ref::<StillLive>().is_some());
+    assert!(format!("{err:#}").contains("no variant \"nope\""));
 }
 
 #[test]
