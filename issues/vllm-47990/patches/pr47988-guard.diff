@@ -1,0 +1,22 @@
+diff --git a/vllm/model_executor/kernels/linear/scaled_mm/cutlass.py b/vllm/model_executor/kernels/linear/scaled_mm/cutlass.py
+index da8c69eed..0b6968d91 100644
+--- a/vllm/model_executor/kernels/linear/scaled_mm/cutlass.py
++++ b/vllm/model_executor/kernels/linear/scaled_mm/cutlass.py
+@@ -308,6 +308,17 @@ class CutlassFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
+                 "Supports only dynamic per token group activation "
+                 "quantization with group_shape=(1,128).",
+             )
++
++        if (
++            current_platform.is_device_capability_family(120)
++            and config.weight_shape[0] % 128 != 0
++        ):
++            return (
++                False,
++                "SM12x CUTLASS block FP8 requires the weight output "
++                f"dimension to be divisible by 128, got "
++                f"{config.weight_shape[0]}.",
++            )
+         return True, None
+ 
+     def apply_block_scaled_mm(

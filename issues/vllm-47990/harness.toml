@@ -1,0 +1,47 @@
+issue = "vllm-47990"
+# Setup about 12 min, then 4 variants about 50 min together (README.md, "Hours and cost"). Each pre_launch step has
+# its own timeout, so the deadline leaves room for one cold compile or slow download without losing the last variant.
+planned_hours = 2.0
+
+[pod]
+image = "vllm/vllm-openai:v0.31.0@sha256:c1c9f6fd5c109ba7f0546a59f5b2f15fb87f64c77782e90a27b648b42a8e67c3"
+count = 1
+min_cuda = "13.0"
+container_disk_gb = 60
+volume_gb = 60
+needs_hf_token = false
+apt = ["git"]
+# SECURE first: community hosts can be proxy-only (no direct SSH), seen on the harness test 2026-10-16.
+gpus = [
+  { id = "NVIDIA RTX PRO 6000 Blackwell Server Edition", cloud = "SECURE" },
+  { id = "NVIDIA RTX PRO 6000 Blackwell Workstation Edition", cloud = "SECURE" },
+  { id = "NVIDIA RTX PRO 6000 Blackwell Workstation Edition", cloud = "COMMUNITY" },
+]
+
+[server]
+package = "vllm"
+model = "gaunernst/DeepSeek-V2-Lite-Chat-FP8"
+launch = ["vllm", "serve", "gaunernst/DeepSeek-V2-Lite-Chat-FP8"]
+base_flags = ["--revision", "c6f13916a378a8020921732bda65cddc9a3d13f6", "--max-model-len", "4096"]
+port = 8000
+fail_pattern = "Invalid status|illegal memory access|cudaErrorIllegalAddress|Failed to find a kernel"
+boot_timeout_s = 600
+
+# Stock v0.31.0 and vLLM's own kernel choice (DeepGEMM is in the image): does the default ever reach CUTLASS here.
+[variants.auto]
+env = { KERNEL_SUITE = "1", OFFLINE_EVAL = "1" }
+
+# DeepGEMM and FlashInfer's DeepGEMM-backed kernel disabled, so kv_a_proj (N=576) routes to CUTLASS.
+[variants.cutlass]
+env = { VLLM_DISABLED_KERNELS = "FlashInferFp8DeepGEMMDynamicBlockScaledKernel,DeepGemmFp8BlockScaledMMKernel", ROUTE_PROBE = "1" }
+
+# The same routing with only the N % 128 guard from PR #47988: kv_a_proj falls through to Marlin (W8A16), the next
+# kernel in vLLM's order that accepts it. Before pad-48588, so a slow pad variant cannot cost this comparison.
+[variants.guard-47988]
+patches = ["pr47988-guard"]
+env = { VLLM_DISABLED_KERNELS = "FlashInferFp8DeepGEMMDynamicBlockScaledKernel,DeepGemmFp8BlockScaledMMKernel", ROUTE_PROBE = "1", OFFLINE_EVAL = "1" }
+
+# The same routing with PR #48588 (rebased onto v0.31.0): N padded to 640 at load, output sliced back to 576.
+[variants.pad-48588]
+patches = ["pr48588-pad-n"]
+env = { VLLM_DISABLED_KERNELS = "FlashInferFp8DeepGEMMDynamicBlockScaledKernel,DeepGemmFp8BlockScaledMMKernel", ROUTE_PROBE = "1", KERNEL_SUITE = "1", GEMM_BENCH = "1", OFFLINE_EVAL = "1" }

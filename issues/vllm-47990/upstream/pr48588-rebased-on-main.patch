@@ -1,0 +1,374 @@
+From 068dab18e67fb2154c1311787cd9f7d0a25cdc20 Mon Sep 17 00:00:00 2001
+From: Zhirui <69025003+jszzr@users.noreply.github.com>
+Date: Tue, 14 Jul 2026 16:04:57 +0800
+Subject: [PATCH] [Bugfix] Pad unaligned N in SM12x CUTLASS blockwise FP8 GEMM
+ (#47990)
+
+The SM120 CUTLASS blockwise FP8 kernels reject every problem whose
+weight output dim N is not a multiple of the 128x128 scale block
+(CUTLASS can_implement fails for all three tile configs), so any
+DeepSeek-shaped block-FP8 checkpoint (kv_a_proj_with_mqa N=576)
+crashes on engine startup once the layer routes to the CUTLASS kernel.
+
+Zero-pad N to the scale block at weight load time and slice the
+padding off after the GEMM, following the pattern the per-tensor
+CUTLASS FP8 kernel already uses for its 16-element alignment. The
+padded rows land in the last, already-present scale block, so the
+scale tensor needs no change. The shared padding helpers move to
+module scope, and the block kernel base derives the logical output
+width from the layer config instead of the (possibly padded) weight.
+
+Padded CUTLASS is 1.9-2.9x faster than the Triton fallback at decode
+batch sizes on the DeepSeek kv_a_proj shape, measured on an RTX PRO
+5000 Blackwell.
+
+Fixes #47990
+
+Signed-off-by: Zhirui <69025003+jszzr@users.noreply.github.com>
+---
+ tests/kernels/quantization/test_block_fp8.py  | 120 +++++++++++++++++-
+ .../scaled_mm/BlockScaledMMLinearKernel.py    |   5 +-
+ .../kernels/linear/scaled_mm/cutlass.py       |  96 +++++++++-----
+ 3 files changed, 184 insertions(+), 37 deletions(-)
+
+diff --git a/tests/kernels/quantization/test_block_fp8.py b/tests/kernels/quantization/test_block_fp8.py
+index fe2622693..b33db02ea 100644
+--- a/tests/kernels/quantization/test_block_fp8.py
++++ b/tests/kernels/quantization/test_block_fp8.py
+@@ -18,11 +18,24 @@ from vllm.model_executor.kernels.linear.scaled_mm.b12x import (
+     B12xFp8BlockScaledMMKernel,
+     _run_b12x_fp8_block_scaled_mm,
+ )
+-from vllm.model_executor.kernels.linear.scaled_mm.cutlass import cutlass_scaled_mm
++from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
++    CutlassFp8BlockScaledMMKernel,
++    cutlass_scaled_mm,
++)
++from vllm.model_executor.kernels.linear.scaled_mm.ScaledMMLinearKernel import (
++    FP8ScaledMMLinearLayerConfig,
++)
++from vllm.model_executor.kernels.linear.scaled_mm.triton import (
++    TritonFp8BlockScaledMMKernel,
++)
+ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+     per_token_group_quant_fp8,
+     w8a8_triton_block_scaled_mm,
+ )
++from vllm.model_executor.layers.quantization.utils.quant_utils import (
++    GroupShape,
++    create_fp8_quant_key,
++)
+ from vllm.platforms import current_platform
+ from vllm.utils.deep_gemm import (
+     fp8_gemm_nt,
+@@ -167,14 +180,21 @@ def test_w8a8_block_fp8_matmul(M, N, K, block_size, out_dtype, seed):
+     # 65/66/67 cover all M%4 residue classes above the SM100 swapAB
+     # threshold (m <= 64); 1026 crosses multiple 128-row SF atoms.
+     "M",
+-    [32, 65, 66, 67, 1026],
++    [1, 32, 65, 66, 67, 256, 1026],
++)
++@pytest.mark.parametrize(
++    ("N", "K"),
++    [
++        # weight.shape[0] % 128 != 0, like DSV3 kv_a_proj_with_mqa; on SM12x
++        # the kernel requires N padded to the 128 scale block (#47990).
++        (576, 7168),
++        (2112, 1536),
++        # aligned control
++        (512, 7168),
++    ],
+ )
+ @torch.inference_mode()
+-def test_w8a8_block_fp8_cutlass_matmul(M):
+-    # Test simple case where weight.shape % 128 != 0,
+-    # like in DSV3 kv_a_proj_with_mqa
+-    N = 576
+-    K = 7168
++def test_w8a8_block_fp8_cutlass_matmul(M, N, K):
+     block_size = [128, 128]
+     out_dtype = torch.bfloat16
+     seed = 0
+@@ -271,6 +291,92 @@ def test_w8a8_block_fp8_torch_scaled_mm_matmul():
+     assert rel_diff < 0.001
+ 
+ 
++@pytest.mark.skipif(
++    not current_platform.is_cuda(), reason="CUTLASS only supported on CUDA platform."
++)
++@torch.inference_mode()
++def test_cutlass_fp8_block_kernel_unaligned_n_layer(default_vllm_config):
++    # Layer-level path for weight.shape[0] % 128 != 0 (#47990): on SM12x the
++    # kernel zero-pads N to the 128 scale block at load time and slices the
++    # padding off at apply time; on other architectures the weight is
++    # untouched. Uses a 3D input to also cover the logical output_shape.
++    N, K = 576, 7168
++    batch, seq = 2, 16
++    torch.manual_seed(0)
++
++    is_supported, reason = CutlassFp8BlockScaledMMKernel.is_supported()
++    if not is_supported:
++        pytest.skip(reason)
++
++    fp8_info = torch.finfo(torch.float8_e4m3fn)
++    weight_fp32 = (torch.rand(N, K, dtype=torch.float32) - 0.5) * 2 * fp8_info.max
++    weight = weight_fp32.clamp(fp8_info.min, fp8_info.max).to(torch.float8_e4m3fn)
++    weight_scale = (
++        torch.rand((N + 127) // 128, (K + 127) // 128, dtype=torch.float32) * 1e-2
++    )
++
++    config = FP8ScaledMMLinearLayerConfig(
++        weight_quant_key=create_fp8_quant_key(
++            static=True, group_shape=GroupShape(128, 128)
++        ),
++        activation_quant_key=create_fp8_quant_key(
++            static=False, group_shape=GroupShape(1, 128)
++        ),
++        weight_shape=(N, K),
++        input_dtype=torch.bfloat16,
++        out_dtype=torch.bfloat16,
++    )
++    kernel = CutlassFp8BlockScaledMMKernel(config)
++    triton_kernel = TritonFp8BlockScaledMMKernel(config)
++
++    def make_layer():
++        layer = torch.nn.Module()
++        layer.weight = torch.nn.Parameter(weight.clone(), requires_grad=False)
++        layer.weight_scale_inv = torch.nn.Parameter(
++            weight_scale.clone(), requires_grad=False
++        )
++        layer.input_scale = None
++        return layer
++
++    layer = make_layer()
++    kernel.process_weights_after_loading(layer)
++    expected_rows = 640 if current_platform.is_device_capability_family(120) else N
++    assert layer.weight.shape[0] == expected_rows
++
++    ref_layer = make_layer()
++    triton_kernel.process_weights_after_loading(ref_layer)
++    assert ref_layer.weight.shape[0] == N
++
++    x = torch.randn(batch, seq, K, dtype=torch.bfloat16)
++    bias = torch.randn(N, dtype=torch.bfloat16)
++    out = kernel.apply_weights(layer, x, bias)
++    assert out.shape == (batch, seq, N)
++
++    # Both kernels share the base apply_weights and QuantFP8 activation
++    # quantization, so the comparison isolates the GEMM (and the pad/slice).
++    ref_out = triton_kernel.apply_weights(ref_layer, x, bias)
++    rel_diff = torch.mean(
++        torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))
++    ) / torch.mean(torch.abs(ref_out.to(torch.float32)))
++    assert rel_diff < 0.001
++
++    # Loose sanity check against the native reference (quantized with an
++    # independent implementation, hence the wide tolerance).
++    x_fp8, x_scale = per_token_group_quant_fp8(
++        x.view(-1, K).float(), 128, column_major_scales=False
++    )
++    native_ref = (
++        native_w8a8_block_matmul(
++            x_fp8, weight, x_scale, weight_scale, [128, 128], torch.bfloat16
++        )
++        + bias
++    )
++    native_rel_diff = torch.mean(
++        torch.abs(out.view(-1, N).to(torch.float32) - native_ref.to(torch.float32))
++    ) / torch.mean(torch.abs(native_ref.to(torch.float32)))
++    assert native_rel_diff < 0.05
++
++
+ @pytest.mark.skipif(
+     current_platform.is_fp8_fnuz(),
+     reason="This platform supports e4m3fnuz, not e4m3fn.",
+diff --git a/vllm/model_executor/kernels/linear/scaled_mm/BlockScaledMMLinearKernel.py b/vllm/model_executor/kernels/linear/scaled_mm/BlockScaledMMLinearKernel.py
+index 865bebead..b24b0acfa 100644
+--- a/vllm/model_executor/kernels/linear/scaled_mm/BlockScaledMMLinearKernel.py
++++ b/vllm/model_executor/kernels/linear/scaled_mm/BlockScaledMMLinearKernel.py
+@@ -113,7 +113,10 @@ class Fp8BlockScaledMMLinearKernel(
+ 
+         # View input as 2D matrix for fp8 methods
+         input_2d = x.view(-1, x.shape[-1])
+-        output_shape = [*x.shape[:-1], weight.shape[0]]
++        # The weight tensor may carry kernel-specific padding (e.g. the SM12x
++        # CUTLASS kernel pads N to the 128 scale block), so the logical output
++        # width comes from the layer config rather than weight.shape[0].
++        output_shape = [*x.shape[:-1], self.config.weight_shape[0]]
+ 
+         if self.apply_input_quant:
+             q_input, input_scale = self.quant_fp8(
+diff --git a/vllm/model_executor/kernels/linear/scaled_mm/cutlass.py b/vllm/model_executor/kernels/linear/scaled_mm/cutlass.py
+index a541debfe..ba521374a 100644
+--- a/vllm/model_executor/kernels/linear/scaled_mm/cutlass.py
++++ b/vllm/model_executor/kernels/linear/scaled_mm/cutlass.py
+@@ -155,6 +155,27 @@ class CutlassInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
+         )
+ 
+ 
++def _pad_to_alignment(
++    x: torch.Tensor, dim: int, alignment: int, value: float = 0.0
++) -> torch.Tensor:
++    """Pad tensor ``x`` along ``dim`` to the next multiple of ``alignment``."""
++    remainder = x.shape[dim] % alignment
++    if remainder == 0:
++        return x
++    pad_size = alignment - remainder
++    pad_spec = [0] * (2 * x.dim())
++    pad_spec[-(2 * dim + 1)] = pad_size
++    return torch.nn.functional.pad(x, pad_spec, value=value)
++
++
++def padded_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
++    if loaded_weight.shape != param.shape:
++        slices = tuple(slice(0, s) for s in loaded_weight.shape)
++        param.data[slices].copy_(loaded_weight)
++    else:
++        param.data.copy_(loaded_weight.view(param.shape))
++
++
+ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
+     def __init__(
+         self, c: FP8ScaledMMLinearLayerConfig, layer_param_names: Sequence[str]
+@@ -181,28 +202,6 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
+             return kFp8StaticTensorSym
+         return None
+ 
+-    @staticmethod
+-    def _pad_to_alignment(
+-        x: torch.Tensor, dim: int, alignment: int, value: float = 0.0
+-    ) -> torch.Tensor:
+-        """Pad tensor ``x`` along ``dim`` to the next multiple of
+-        ``alignment``."""
+-        remainder = x.shape[dim] % alignment
+-        if remainder == 0:
+-            return x
+-        pad_size = alignment - remainder
+-        pad_spec = [0] * (2 * x.dim())
+-        pad_spec[-(2 * dim + 1)] = pad_size
+-        return torch.nn.functional.pad(x, pad_spec, value=value)
+-
+-    @staticmethod
+-    def padded_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
+-        if loaded_weight.shape != param.shape:
+-            slices = tuple(slice(0, s) for s in loaded_weight.shape)
+-            param.data[slices].copy_(loaded_weight)
+-        else:
+-            param.data.copy_(loaded_weight.view(param.shape))
+-
+     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+         weight_name, weight_scale_name, _, _ = self.layer_param_names
+         weight = getattr(layer, weight_name)
+@@ -224,21 +223,21 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
+         set_weight_attrs(
+             getattr(layer, weight_name),
+             {
+-                "weight_loader": self.padded_weight_loader,
++                "weight_loader": padded_weight_loader,
+             },
+         )
+ 
+         weight_scale = getattr(layer, weight_scale_name, None)
+         if weight_scale is not None and pad_n > 0 and weight_scale.numel() > 1:
+             flat_scale = weight_scale.reshape(-1)
+-            padded_scale = self._pad_to_alignment(
++            padded_scale = _pad_to_alignment(
+                 flat_scale, dim=0, alignment=16, value=1.0
+             ).view(-1, *weight_scale.shape[1:])
+             replace_parameter(layer, weight_scale_name, padded_scale.data)
+             set_weight_attrs(
+                 getattr(layer, weight_name),
+                 {
+-                    "weight_loader": self.padded_weight_loader,
++                    "weight_loader": padded_weight_loader,
+                 },
+             )
+ 
+@@ -260,9 +259,9 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
+         pad_n = padded_n - output_size
+ 
+         if pad_k > 0:
+-            A = self._pad_to_alignment(A, dim=1, alignment=16)
++            A = _pad_to_alignment(A, dim=1, alignment=16)
+         if pad_n > 0 and bias is not None:
+-            bias = self._pad_to_alignment(bias, dim=0, alignment=16)
++            bias = _pad_to_alignment(bias, dim=0, alignment=16)
+ 
+         output = ops.cutlass_scaled_mm(
+             A, B, out_dtype=out_dtype, scale_a=As, scale_b=Bs, bias=bias
+@@ -311,6 +310,33 @@ class CutlassFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
+             )
+         return True, None
+ 
++    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
++        super().process_weights_after_loading(layer)
++        # The SM12x blockwise kernels reject shapes whose N is not a multiple
++        # of the 128x128 scale block, e.g. the N=576 kv_a_proj_with_mqa in
++        # DeepSeek models (https://github.com/vllm-project/vllm/issues/47990).
++        # Zero-pad N up to the block size: the padded rows fall in the last,
++        # already present, scale block and only produce zero output columns,
++        # which apply_block_scaled_mm slices away.
++        if not current_platform.is_device_capability_family(120):
++            return
++        params = self._get_layer_params(layer)
++        padded_weight = _pad_to_alignment(params.weight, dim=0, alignment=128)
++        if padded_weight is params.weight:
++            return
++        weight_scale = (
++            params.weight_scale
++            if params.weight_scale_inv is None
++            else params.weight_scale_inv
++        )
++        assert weight_scale is not None
++        assert weight_scale.shape[0] * 128 == padded_weight.shape[0]
++        replace_parameter(layer, params.WEIGHT, padded_weight.data)
++        set_weight_attrs(
++            getattr(layer, params.WEIGHT),
++            {"weight_loader": padded_weight_loader},
++        )
++
+     def apply_block_scaled_mm(
+         self,
+         A: torch.Tensor,
+@@ -319,13 +345,17 @@ class CutlassFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
+         Bs: torch.Tensor,
+     ) -> torch.Tensor:
+         out_dtype = self.config.out_dtype
+-        return ops.cutlass_scaled_mm(
++        output = ops.cutlass_scaled_mm(
+             A,
+             B.T,
+             out_dtype=out_dtype,
+             scale_a=As,
+             scale_b=Bs.T,
+         )
++        out_features = self.config.weight_shape[0]
++        if output.shape[-1] != out_features:
++            output = output[..., :out_features].contiguous()
++        return output
+ 
+ 
+ def cutlass_scaled_mm(
+@@ -336,10 +366,18 @@ def cutlass_scaled_mm(
+     block_size: list[int],
+     output_dtype: torch.dtype = torch.float16,
+ ) -> torch.Tensor:
+-    return ops.cutlass_scaled_mm(
++    out_features = B.shape[0]
++    if current_platform.is_device_capability_family(120):
++        # Per-call padding is acceptable here: this wrapper is a test/utility
++        # surface; the layer path pads once in process_weights_after_loading.
++        B = _pad_to_alignment(B, dim=0, alignment=128)
++    output = ops.cutlass_scaled_mm(
+         A,
+         B.T,
+         out_dtype=output_dtype,
+         scale_a=As,
+         scale_b=Bs.T,
+     )
++    if output.shape[-1] != out_features:
++        output = output[..., :out_features].contiguous()
++    return output
+-- 
+2.54.0 (Apple Git-157)
+
