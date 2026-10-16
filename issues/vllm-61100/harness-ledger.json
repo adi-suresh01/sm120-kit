@@ -5,5 +5,21 @@
     "approved_at": "2026-10-16T13:23:00Z",
     "note": "Aditya approved 2026-10-16 (batch approval for 61100 + 56771): 1x RTX PRO 6000 Server Edition SECURE, 2.49/hr, planned 2h, quote 5.48 worst case"
   },
-  "pods": []
+  "pods": [
+    {
+      "name": "sm120-vllm-61100-101f40",
+      "id": "7y8i808oz1vfg6",
+      "state": "terminated",
+      "gpu": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+      "count": 1,
+      "cloud": "SECURE",
+      "rate_usd_hr": 2.49,
+      "reserved_usd": 5.478000000000001,
+      "reserved_at": "2026-10-16T13:23:12Z",
+      "deadline": "2026-10-16T15:23:12Z",
+      "terminated_at": "2026-10-16T13:49:35Z",
+      "cost_usd": 1.0949083333333334,
+      "cost_source": "estimate"
+    }
+  ]
 }

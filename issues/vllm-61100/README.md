@@ -69,6 +69,26 @@ plus the UVA probe for their host.
 overlays), about 8 min per variant. Expected 0.4 h if a0 is clean, about 1.6 h with the full matrix;
 `planned_hours = 2.0` caps it at $5.48.
 
-## Results
+## Results (2026-10-16, pod sm120-vllm-61100-101f40, US-NC-2, $1.09)
 
-Not run yet.
+Host: RTX PRO 6000 Blackwell Server Edition, driver 595.91.07 (CUDA 13.2), the reporter's v0.25.1 image by
+digest. `versions.txt`: vllm 0.25.1, flashinfer-python 0.6.13, flashinfer-jit-cache 0.6.13+cu130,
+compressed-tensors 0.17.0, transformers 5.13.1. The server log matches the reporter's: `Using V2 Model Runner`,
+`Selected CutlassFP8ScaledMMLinearKernel for CompressedTensorsW8A8Fp8`, FLASHINFER, `decode_backend=flashinfer-native,
+kv_cache_dtype=torch.float8_e4m3fn, arch=sm120`, FULL_AND_PIECEWISE, prefix caching on. Setup took 4 min,
+including both overlays (they import as vllm 0.24.0 + FlashInfer 0.6.12) and the 72.8 GB of weights in 21 s (HF
+xet); boots 55-106 s.
+
+| Variant | Reporter request | GSM8K-200 (chat, 5-shot, greedy) | Notes |
+|---|---|---|---|
+| a0-stock | `2`, stop | 0.775 (hit_max_tokens 3, no_number 0) | UVA probe coherent |
+| a9-long-context | `2`, stop (after the load) | 0.775 after 1x60K + 8x30K + 24x8K prompts | 33/33 long requests answered |
+| a9b-long-fi (60K, 30K alone) | `2` | 0.785 | 60K: 200 tokens of `\r\n`; 30K: continues the book |
+| a9c-long-triton (same prompts) | `2` | 0.755 | 60K: one sentence of the book, then `\r\n`; 30K: a summary |
+
+Verdict: **does not reproduce** on this host. The 60K degeneration happens on both FlashInfer and Triton attention
+over the same FP8 KV cache, so it is not the FlashInfer path and not this bug; the 30K difference is one greedy
+sample on a borderline prompt. a1-a8 were not run: with a clean a0 they cannot split anything. Remaining
+differences from the reporter: Workstation vs Server Edition, 595.99.02 vs 595.91.07, and their long-lived
+production server. Next step is on the reporter's box: `VLLM_USE_V2_MODEL_RUNNER=0`, the #57224 UVA check,
+Triton attention, BF16 KV.

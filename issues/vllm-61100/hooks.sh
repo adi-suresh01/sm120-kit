@@ -16,10 +16,21 @@ for p in ("vllm", "flashinfer-python", "flashinfer-jit-cache", "compressed-tenso
     bash "$hooks_dir/../../harness/pod/wait_gpu_idle.sh" 120
 }
 
-# Runs after GSM8K, so a garbage server still gets its raw output recorded word for word.
+# Runs after GSM8K, so a garbage server still gets its raw output recorded word for word. With LONG_CONTEXT set,
+# the server first takes a batch of long prompts, and GSM8K runs again after them (the variant has no quality
+# block, so the only score is the one taken on the loaded server).
 post_smoke() {
-    local run_dir=$1 port=$2 model=$3
+    local run_dir=$1 port=$2 model=$3 model_dir
+    if [[ -n ${LONG_CONTEXT:-} ]]; then
+        model_dir=$(python3 -I -c "from huggingface_hub import snapshot_download as d
+print(d('$model', revision='79a917d6a8034910fa610b097dc61e96eac65d29', local_files_only=True))")
+        progress post_smoke "long context: $LONG_CONTEXT"
+        python3 -I "$hooks_dir/long_context.py" "$port" "$model" "$run_dir" "$model_dir"
+    fi
     python3 -I "$hooks_dir/probe_requests.py" "$port" "$model" "$run_dir"
+    if [[ -n ${LONG_CONTEXT:-} ]]; then
+        python3 -I "$hooks_dir/../../harness/pod/gsm8k_chat.py" "$port" "$model" 200 "$run_dir"
+    fi
 }
 
 # Which runner, attention backend, and linear kernel the server actually picked.

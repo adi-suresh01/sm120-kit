@@ -91,3 +91,17 @@ PYTHONPATH = "/workspace/ovl/v0240:/workspace/ovl/fi0612"
 VLLM_USE_V2_MODEL_RUNNER = "1"
 [variants.a8-v0240-mrv2.quality]
 gsm8k = 200
+
+# a0 is clean on a fresh server. The reporter's server had been serving a RAG app; this loads it with long prompts
+# (prefix caching and the FP8 KV cache filled and reused) before the reporter's request and GSM8K run again.
+[variants.a9-long-context]
+env = { GSM8K_MAX_TOKENS = "1024", LONG_CONTEXT = "60000x1,30000x8,8000x24" }
+
+# a9's 60K prompt came back as 200 tokens of "\r\n". The same two prompts (the first 60K and first 30K slices),
+# alone, on FlashInfer and on Triton attention over the same FP8 KV cache: model limit or attention kernel.
+[variants.a9b-long-fi]
+env = { GSM8K_MAX_TOKENS = "1024", LONG_CONTEXT = "60000x1,30000x1" }
+
+[variants.a9c-long-triton]
+flags = ["--attention-backend", "TRITON_ATTN"]
+env = { GSM8K_MAX_TOKENS = "1024", LONG_CONTEXT = "60000x1,30000x1" }
