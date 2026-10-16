@@ -18,7 +18,7 @@ use crate::cloud::{
 };
 use crate::events::{Events, Kind};
 use crate::ledger::{ADOPT_WINDOW, Ledger, LedgerStore, Offer, PodEntry, PodState};
-use crate::session::{Remote, TRANSFER_LIMIT, Target, poll_job, start_job};
+use crate::session::{JobState, Remote, TRANSFER_LIMIT, Target, poll_job, start_job};
 use crate::spec::IssueSpec;
 
 pub const ENTRYPOINT: &str = include_str!("../pod/entrypoint.sh");
@@ -655,8 +655,13 @@ pub fn wait_job(
                 failures = 0;
                 status.lines.iter().for_each(|line| on_line(line));
                 offset = status.offset;
-                if let Some(code) = status.exit {
-                    return Ok(code);
+                match status.state {
+                    JobState::Exited(code) => return Ok(code),
+                    JobState::Dead => bail!(
+                        "job {job} died without an exit code (killed, or the container restarted); see \
+                         results/{issue}/jobs/{job}.log"
+                    ),
+                    JobState::Running => {}
                 }
             }
             Err(e) => {

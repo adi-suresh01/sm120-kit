@@ -325,31 +325,72 @@ impl Remote for SshRemote {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JobState {
+    Running,
+    Exited(i32),
+    /// Gone without writing an exit code: killed, or lost with a container restart.
+    Dead,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct JobStatus {
-    pub exit: Option<i32>,
+    pub state: JobState,
     pub lines: Vec<String>,
     pub offset: u64,
 }
+
+/// Opens the poll reply, so whatever a login shell prints first (a motd, an echo in .bashrc) is never read as
+/// the job's state.
+pub const POLL_SENTINEL: &str = "--harness-poll--";
 
 pub fn job_dir(issue: &str) -> String {
     format!("results/{issue}/jobs")
 }
 
-/// Starts `command` detached from the SSH session, so a dropped connection never kills a run. The exit code is
-/// written by rename once the command ends, so a poll never reads a half-written file.
+/// Starts `command` detached from the SSH session, so a dropped connection never kills a run. The job records its
+/// pid first and its exit code by rename last, so a poll never reads a half-written file and can tell a job that
+/// died from one that runs. One job per issue at a time: two servers on the same GPUs would spoil both results.
 pub fn start_job(remote: &dyn Remote, target: &Target, issue: &str, job: &str, command: &str) -> Result<()> {
     let dir = job_dir(issue);
-    let body = format!("{command}\necho $? > {dir}/{job}.exit.tmp && mv {dir}/{job}.exit.tmp {dir}/{job}.exit");
+    let (pid, exit) = (format!("{dir}/{job}.pid"), format!("{dir}/{job}.exit"));
+    // The subshell keeps an `exit` in the command from ending the wrapper before it records the code.
+    let body = format!(
+        "echo $$ > {pid}.tmp && mv {pid}.tmp {pid}\n(\n{command}\n)\necho $? > {exit}.tmp && mv {exit}.tmp {exit}"
+    );
     let script = format!(
-        "mkdir -p {dir}\nrm -f {dir}/{job}.exit\nsetsid nohup bash -c {} > {dir}/{job}.log 2>&1 < /dev/null &",
+        "mkdir -p {dir}\n\
+         for other in {dir}/*.pid; do\n\
+         \x20 [[ -e $other ]] || continue\n\
+         \x20 if [[ ! -f ${{other%.pid}}.exit ]] && kill -0 \"$(cat \"$other\")\" 2>/dev/null; then\n\
+         \x20   other=${{other##*/}}; echo \"BUSY ${{other%.pid}}\"; exit 0\n\
+         \x20 fi\n\
+         done\n\
+         rm -f {exit} {pid}\n\
+         setsid nohup bash -c {} > {dir}/{job}.log 2>&1 < /dev/null &\n\
+         for _ in $(seq 50); do\n\
+         \x20 if [[ -s {pid} ]]; then echo STARTED; exit 0; fi\n\
+         \x20 sleep 0.1\n\
+         done",
         shell_quote(&body)
     );
-    remote.run(target, &script).map(drop)
+    let output = remote.run(target, &script)?;
+    if let Some(busy) = output.lines().find_map(|line| line.strip_prefix("BUSY ")) {
+        bail!(
+            "job {busy} of issue {issue} still runs on the pod, so {job} did not start; wait for it, or stop it with \
+             `harness ssh {issue} -- 'kill $(cat {dir}/{busy}.pid)'`"
+        );
+    }
+    ensure!(
+        output.lines().any(|line| line == "STARTED"),
+        "job {job} did not start within 5 s; see results/{issue}/jobs/{job}.log on the pod"
+    );
+    Ok(())
 }
 
-/// Reports whether the job has exited and returns the complete lines added to `tail_path` since `offset`. The
-/// exit check comes first, so once it reports an exit the tail holds everything the job wrote.
+/// Reports the job's state and the complete lines added to `tail_path` since `offset`. The state is read first,
+/// so once it says the job exited the tail holds everything the job wrote. The exit file is read again after the
+/// liveness check, since a job can write it and exit between the two.
 pub fn poll_job(
     remote: &dyn Remote,
     target: &Target,
@@ -359,8 +400,13 @@ pub fn poll_job(
     offset: u64,
 ) -> Result<JobStatus> {
     let dir = job_dir(issue);
+    let (pid, exit) = (format!("{dir}/{job}.pid"), format!("{dir}/{job}.exit"));
     let script = format!(
-        "if [[ -f {dir}/{job}.exit ]]; then echo \"EXIT $(cat {dir}/{job}.exit)\"; else echo RUNNING; fi\n\
+        "echo {POLL_SENTINEL}\n\
+         if [[ -f {exit} ]]; then echo \"EXIT $(cat {exit})\"\n\
+         elif kill -0 \"$(cat {pid} 2>/dev/null)\" 2>/dev/null; then echo RUNNING\n\
+         elif [[ -f {exit} ]]; then echo \"EXIT $(cat {exit})\"\n\
+         else echo DEAD; fi\n\
          tail -c +{} {tail_path} 2>/dev/null || true",
         offset + 1
     );
@@ -368,15 +414,28 @@ pub fn poll_job(
 }
 
 pub fn parse_poll(output: &str, offset: u64) -> Result<JobStatus> {
-    let (head, rest) = output.split_once('\n').unwrap_or((output, ""));
-    let exit = match head.strip_prefix("EXIT ") {
-        Some(code) => Some(code.trim().parse().with_context(|| format!("bad exit line {head:?}"))?),
-        None if head == "RUNNING" => None,
-        None => bail!("unexpected poll reply {head:?}"),
+    let marker = format!("{POLL_SENTINEL}\n");
+    let start = if output.starts_with(&marker) {
+        0
+    } else {
+        output
+            .find(&format!("\n{marker}"))
+            .map(|at| at + 1)
+            .with_context(|| format!("poll reply has no {POLL_SENTINEL} line: {:?}", truncate(output)))?
+    };
+    let reply = &output[start + marker.len()..];
+    let (head, rest) = reply.split_once('\n').unwrap_or((reply, ""));
+    let state = match head {
+        "RUNNING" => JobState::Running,
+        "DEAD" => JobState::Dead,
+        _ => match head.strip_prefix("EXIT ") {
+            Some(code) => JobState::Exited(code.trim().parse().with_context(|| format!("bad exit line {head:?}"))?),
+            None => bail!("unexpected poll reply {head:?}"),
+        },
     };
     let complete = rest.rfind('\n').map_or("", |end| &rest[..=end]);
     Ok(JobStatus {
-        exit,
+        state,
         lines: complete
             .lines()
             .filter(|line| !line.is_empty())
@@ -384,6 +443,10 @@ pub fn parse_poll(output: &str, offset: u64) -> Result<JobStatus> {
             .collect(),
         offset: offset + complete.len() as u64,
     })
+}
+
+fn truncate(text: &str) -> String {
+    text.chars().take(200).collect()
 }
 
 #[cfg(test)]
@@ -472,14 +535,26 @@ mod tests {
 
     #[test]
     fn poll_reply_keeps_only_complete_lines() {
-        let running = parse_poll("RUNNING\n{\"a\":1}\n{\"b\":", 10).unwrap();
-        assert_eq!(running.exit, None);
+        let running = parse_poll("--harness-poll--\nRUNNING\n{\"a\":1}\n{\"b\":", 10).unwrap();
+        assert_eq!(running.state, JobState::Running);
         assert_eq!(running.lines, ["{\"a\":1}"]);
         assert_eq!(running.offset, 18);
-        let done = parse_poll("EXIT 3\n", 18).unwrap();
-        assert_eq!((done.exit, done.lines.len(), done.offset), (Some(3), 0, 18));
-        assert!(parse_poll("EXIT \n", 0).is_err());
-        assert!(parse_poll("Welcome to Ubuntu\n", 0).is_err());
+        let done = parse_poll("--harness-poll--\nEXIT 3\n", 18).unwrap();
+        assert_eq!(
+            (done.state, done.lines.len(), done.offset),
+            (JobState::Exited(3), 0, 18)
+        );
+        let dead = parse_poll("--harness-poll--\nDEAD\n", 18).unwrap();
+        assert_eq!(dead.state, JobState::Dead);
+        assert!(parse_poll("--harness-poll--\nEXIT \n", 0).is_err());
+        assert!(parse_poll("RUNNING\n", 0).is_err());
+    }
+
+    #[test]
+    fn login_shell_output_before_the_sentinel_cannot_break_a_poll() {
+        let noisy = "Welcome to Ubuntu 24.04\nEXIT 9\n--harness-poll--\nRUNNING\n{\"a\":1}\n";
+        let status = parse_poll(noisy, 0).unwrap();
+        assert_eq!((status.state, status.lines.len()), (JobState::Running, 1));
     }
 
     struct Recorder(RefCell<Vec<String>>);
@@ -493,7 +568,7 @@ mod tests {
         }
         fn run(&self, _: &Target, script: &str) -> Result<String> {
             self.0.borrow_mut().push(script.to_string());
-            Ok(String::new())
+            Ok("STARTED\n".into())
         }
         fn run_streaming(&self, _: &Target, _: &str) -> Result<()> {
             Ok(())
@@ -608,16 +683,161 @@ mod tests {
         .unwrap();
         let script = recorder.0.borrow()[0].clone();
         assert!(
-            script.contains("rm -f results/vllm-47990/jobs/setup.exit\n"),
+            script.contains("rm -f results/vllm-47990/jobs/setup.exit results/vllm-47990/jobs/setup.pid\n"),
             "{script}"
         );
         assert!(
-            script.contains("setsid nohup bash -c 'bash issues/vllm-47990/setup.sh\necho $?"),
+            script.contains("setsid nohup bash -c 'echo $$ > results/vllm-47990/jobs/setup.pid.tmp"),
             "{script}"
         );
         assert!(
-            script.ends_with("> results/vllm-47990/jobs/setup.log 2>&1 < /dev/null &"),
+            script.contains("(\nbash issues/vllm-47990/setup.sh\n)\necho $?"),
             "{script}"
         );
+        assert!(
+            script.contains("> results/vllm-47990/jobs/setup.log 2>&1 < /dev/null &\n"),
+            "{script}"
+        );
+    }
+
+    /// Runs the job scripts in local bash in a temp dir standing in for the kit directory, with a `setsid` shim
+    /// where the system has none (macOS).
+    struct LocalBash {
+        dir: PathBuf,
+        path: String,
+    }
+
+    impl LocalBash {
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("sm120-jobs-{tag}-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&dir);
+            let shims = dir.join(".shims");
+            fs::create_dir_all(&shims).unwrap();
+            let mut path = std::env::var("PATH").unwrap_or_default();
+            if !Command::new("sh")
+                .args(["-c", "command -v setsid"])
+                .status()
+                .unwrap()
+                .success()
+            {
+                let shim = shims.join("setsid");
+                fs::write(&shim, "#!/bin/sh\nexec \"$@\"\n").unwrap();
+                Command::new("chmod").arg("+x").arg(&shim).status().unwrap();
+                path = format!("{}:{path}", shims.display());
+            }
+            Self { dir, path }
+        }
+
+        fn poll_until_done(&self, job: &str, tail: &str) -> (JobState, Vec<String>, u64) {
+            let target = local_target();
+            let (mut lines, mut offset) = (Vec::new(), 0);
+            for _ in 0..200 {
+                let status = poll_job(self, &target, "x-1", job, tail, offset).unwrap();
+                lines.extend(status.lines);
+                offset = status.offset;
+                if status.state != JobState::Running {
+                    return (status.state, lines, offset);
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+            panic!("job {job} never finished");
+        }
+
+        fn pid(&self, job: &str) -> String {
+            fs::read_to_string(self.dir.join(format!("results/x-1/jobs/{job}.pid")))
+                .unwrap()
+                .trim()
+                .to_string()
+        }
+    }
+
+    impl Drop for LocalBash {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn local_target() -> Target {
+        Target {
+            host: "local".into(),
+            port: 0,
+            known_hosts: PathBuf::from("unused"),
+        }
+    }
+
+    impl Remote for LocalBash {
+        fn preflight(&self) -> Result<()> {
+            Ok(())
+        }
+        fn reachable(&self, _: &Target) -> bool {
+            true
+        }
+        fn run(&self, _: &Target, script: &str) -> Result<String> {
+            let out = Command::new("bash")
+                .arg("-c")
+                .arg(format!("set -euo pipefail\n{script}"))
+                .current_dir(&self.dir)
+                .env("PATH", &self.path)
+                .output()?;
+            ensure!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            Ok(String::from_utf8(out.stdout)?)
+        }
+        fn run_streaming(&self, _: &Target, _: &str) -> Result<()> {
+            Ok(())
+        }
+        fn write_file(&self, _: &Target, _: &str, _: &str) -> Result<()> {
+            Ok(())
+        }
+        fn upload(&self, _: &Target, _: &Path, _: &[&str]) -> Result<()> {
+            Ok(())
+        }
+        fn download(&self, _: &Target, _: &[&str], _: &Path, _: Duration) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_real_job_streams_a_file_that_grows_in_partial_lines() {
+        let bash = LocalBash::new("grow");
+        let writer = "f=results/x-1/out.jsonl; mkdir -p results/x-1\n\
+                      printf '{\"phase\":\"a\"}\\n{\"pha' >> $f; sleep 0.4\n\
+                      printf 'se\":\"b\"}\\n' >> $f; sleep 0.4\n\
+                      printf '{\"verdict\":\"OK\"}\\n' >> $f\nexit 3";
+        start_job(&bash, &local_target(), "x-1", "grow", writer).unwrap();
+        let (state, lines, offset) = bash.poll_until_done("grow", "results/x-1/out.jsonl");
+        assert_eq!(state, JobState::Exited(3));
+        assert_eq!(
+            lines,
+            ["{\"phase\":\"a\"}", "{\"phase\":\"b\"}", "{\"verdict\":\"OK\"}"]
+        );
+        assert_eq!(
+            offset,
+            fs::metadata(bash.dir.join("results/x-1/out.jsonl")).unwrap().len()
+        );
+    }
+
+    #[test]
+    fn a_real_job_killed_without_an_exit_code_reads_as_dead() {
+        let bash = LocalBash::new("dead");
+        start_job(&bash, &local_target(), "x-1", "victim", "sleep 30").unwrap();
+        let pid = bash.pid("victim");
+        let first = poll_job(&bash, &local_target(), "x-1", "victim", "/dev/null", 0).unwrap();
+        assert_eq!(first.state, JobState::Running);
+        assert!(Command::new("kill").args(["-9", &pid]).status().unwrap().success());
+        let (state, _, _) = bash.poll_until_done("victim", "/dev/null");
+        assert_eq!(state, JobState::Dead);
+    }
+
+    #[test]
+    fn a_real_job_refuses_to_start_beside_a_running_one() {
+        let bash = LocalBash::new("busy");
+        start_job(&bash, &local_target(), "x-1", "first", "sleep 30").unwrap();
+        let err = start_job(&bash, &local_target(), "x-1", "second", "true").unwrap_err();
+        assert!(err.to_string().contains("job first of issue x-1 still runs"), "{err}");
+        Command::new("kill").arg(bash.pid("first")).status().unwrap();
+        bash.poll_until_done("first", "/dev/null");
+        start_job(&bash, &local_target(), "x-1", "second", "true").unwrap();
+        let (state, _, _) = bash.poll_until_done("second", "/dev/null");
+        assert_eq!(state, JobState::Exited(0));
     }
 }

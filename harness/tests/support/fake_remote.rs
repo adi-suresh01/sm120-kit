@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Result, bail};
-use sm120_harness::session::{Remote, Target};
+use sm120_harness::session::{POLL_SENTINEL, Remote, Target};
 
 /// A pod that answers the harness's scripts the way the pod-side bash would: each job reports RUNNING once, then
 /// exits with the next code from `exits` (0 when empty) and, for a variant job that exits 0, one verdict line.
@@ -25,6 +25,8 @@ pub struct FakeRemote {
     pub files: RefCell<Vec<(String, String)>>,
     pub downloads: RefCell<Vec<(Vec<String>, Duration)>>,
     pub download_fails: Cell<bool>,
+    /// The next job is killed without writing an exit code.
+    pub job_dies: Cell<bool>,
     pub interrupt_on_job: RefCell<Option<Rc<AtomicBool>>>,
     pub panic_on_write: Cell<bool>,
 }
@@ -45,6 +47,7 @@ impl Default for FakeRemote {
             files: RefCell::new(Vec::new()),
             downloads: RefCell::new(Vec::new()),
             download_fails: Cell::new(false),
+            job_dies: Cell::new(false),
             interrupt_on_job: RefCell::new(None),
             panic_on_write: Cell::new(false),
         }
@@ -53,12 +56,19 @@ impl Default for FakeRemote {
 
 impl FakeRemote {
     fn poll(&self, script: &str) -> String {
+        // What a login shell might print before the poll script runs.
+        let mut reply = format!("Welcome to Ubuntu\n{POLL_SENTINEL}\n");
         let left = self.polls_before_exit.get();
         if left > 0 {
             self.polls_before_exit.set(left - 1);
-            return "RUNNING\n".into();
+            reply.push_str("RUNNING\n");
+            return reply;
         }
-        let mut reply = format!("EXIT {}\n", self.exit.get());
+        if self.job_dies.get() {
+            reply.push_str("DEAD\n");
+            return reply;
+        }
+        reply.push_str(&format!("EXIT {}\n", self.exit.get()));
         if script.contains("verdict.json") && self.exit.get() == 0 {
             reply.push_str(&self.verdict.borrow());
             reply.push('\n');
@@ -95,7 +105,7 @@ impl Remote for FakeRemote {
             if let Some(flag) = self.interrupt_on_job.borrow().as_ref() {
                 flag.store(true, Ordering::SeqCst);
             }
-            return Ok(String::new());
+            return Ok("STARTED\n".into());
         }
         if script.contains(".exit ]]") {
             return Ok(self.poll(script));

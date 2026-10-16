@@ -930,6 +930,15 @@ fn run_spends_nothing_on_an_unknown_or_unrenderable_variant() {
 }
 
 #[test]
+fn run_comes_down_when_a_job_dies_without_an_exit_code() {
+    let w = World::default();
+    w.remote.job_dies.set(true);
+    let err = err_text(run(&w, &[]));
+    assert!(err.contains("job setup died without an exit code"), "{err}");
+    assert_down(&w);
+}
+
+#[test]
 fn run_refuses_a_live_pod_without_ending_it() {
     let w = World::default();
     w.up().unwrap();
