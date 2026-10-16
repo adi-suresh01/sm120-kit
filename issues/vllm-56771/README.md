@@ -90,4 +90,10 @@ Host RAM must be at least 256 GB for the pinned Engram tables; `setup.sh` stops 
 
 ## Results
 
-Not run yet.
+### Attempts 1-3 (2026-10-16, no run, $23.82)
+
+Two pods ended as "proxy-only" while the uncached 9.6 GB nightly image pulled (a harness bug, fixed in 2f34e1b),
+$0.52 and $0.53. The third (sm120-vllm-56771-4f142b, EUR-IS-2) waited 25 min for the image, then sat in
+`setup.sh` for 1h52m: its /workspace was a MooseFS network mount (`mfs#eur-is-2.runpod.net`) and the weights came
+down at 6-9 MB/s, 60 of 510 GB. Terminated by hand at 15:55Z, $22.78. `setup.sh` now measures the download for 3
+min and stops under 400 MB/s, and the retry fits the $16.18 left: `planned_hours = 1.6`, a1 then a0, g0 dropped.

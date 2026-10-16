@@ -45,6 +45,11 @@ harness replaces the entrypoint with `harness/pod/entrypoint.sh` (sshd, the cont
 the deadline watchdog), so any Debian-based image with bash works. Weights go to the pod's volume
 (`HF_HOME=/workspace/hf`).
 
+Some data centers mount /workspace from a network filesystem (EUR-IS-2 on 10-16: MooseFS, 6-9 MB/s writes, against
+21 s for 72.8 GB on US-NC-2). For weights over about 100 GB, `setup.sh` should time the first minutes of the
+download and stop under a floor (see `issues/vllm-56771/setup.sh`); `harness up` keeps the pod when setup fails,
+so the driver command ends with `harness down`.
+
 ## Rules
 
 - Each issue's GPU budget needs Aditya's explicit approval (GPU, count, $/hr, hours, total), recorded with

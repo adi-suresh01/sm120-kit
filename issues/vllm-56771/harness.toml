@@ -1,7 +1,7 @@
 issue = "vllm-56771"
 # Setup about 25 min (image, 510 GB of weights, prompts), then g0 + a1 + a0 about 60 min, then two follow-up
 # variants about 30 min (README.md, "Hours and cost"). 3.5 h leaves one slow cold boot of slack.
-planned_hours = 3.5
+planned_hours = 1.6
 
 [pod]
 # Nightly 2026-10-16: FlashInfer 0.7.2 (FI #5197, the SM120 sparse-MLA rewrite) plus #60945 and #57152.
