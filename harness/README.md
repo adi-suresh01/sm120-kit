@@ -70,14 +70,28 @@ env = { MEM_BUDGET_GIB = "31.45" }               # exported for the hooks and th
 smoke_concurrency = 13                           # parallel smoke requests
 ```
 
-With `package = "sglang"`, a variant can also measure quality and speed on the live server: GSM8K first (its
-accept length is the per-request mean), then one `bench_serving` run per `[concurrency, prompts]` pair:
+A variant can also measure quality and speed on the live server: GSM8K on the first `gsm8k` test questions, then one
+benchmark run per `[concurrency, prompts]` pair, random prompts of 1024 tokens in and 512 out:
 
 ```toml
 [variants.a6.quality]
 gsm8k = 200
 bench = [[1, 8], [16, 64], [64, 256]]
 ```
+
+- `sglang`: its own `run_eval` (5-shot, 16k token budget) and `bench_serving`. The verdict also carries the
+  speculative accept length, the per-request mean over GSM8K.
+- `vllm`: `pod/gsm8k_chat.py` and `vllm bench serve`. GSM8K is 5-shot from the first 5 train examples, greedy,
+  through `/v1/chat/completions`, scored on the last number in each reply, with every reply kept in
+  `<variant>/gsm8k_responses.jsonl`; the data is openai/grade-school-math at a pinned commit, checked against pinned
+  sha256s and cached in `/workspace/gsm8k`. `max_tokens` is the smaller of `GSM8K_MAX_TOKENS` (default 4096) and
+  `max_model_len - 2048` from `/v1/models`, and under 256 fails the run: vLLM refuses a prompt plus `max_tokens`
+  over `max_model_len`, and a model generating garbage runs every reply to the cap. `gsm8k` is at most 1319, and
+  the benchmark loads its tokenizer from `server.model`, so that has to be the checkpoint's id or path, not a
+  `--served-model-name` alias.
+
+Either way a GSM8K request that failed, or a benchmark that completed fewer requests than it sent, is `POST_FAIL`,
+not a low score or a slow run.
 
 Unknown keys are errors, and every named patch must exist. Variants run in file order when `run` names none.
 Before every variant the pod restores each package any variant of the issue patches, so patches never leak from
@@ -156,4 +170,4 @@ shellcheck pod/*.sh tests/pod/*.sh
 ```
 
 `cargo test` also runs the bash tests in `tests/pod/` (watchdog, package snapshot, `serve_variant.sh` against a
-fake server, and stage 2 log replay) and the job start and poll scripts in local bash.
+fake server with both quality protocols, and stage 2 log replay) and the job start and poll scripts in local bash.

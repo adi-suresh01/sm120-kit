@@ -2,6 +2,9 @@
 # Runs serve_variant.sh on this machine against fake_server.py and the fake sglang and fakeinfer packages: a
 # healthy boot with the quality protocol and a patch to each package, a fatal log line, a hung boot, a failed smoke
 # test, and a server that dies mid-evaluation. Also checks restores between runs, the hooks, and progress.jsonl.
+# Then vllm variants with quality, through gsm8k_chat.py on a fixture and fake_vllm.py: right answers, garbage
+# answers, HTTP 500s, a retried failure, a max_model_len too short to answer in, a fixture hash mismatch, and a bench
+# run that drops a request.
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -42,6 +45,10 @@ if [[ $1 == -P ]]; then
     exec "$REAL_PKILL" "$@"
 fi
 EOF
+cat >"$work/bin/vllm" <<EOF
+#!/usr/bin/env bash
+exec python3 -I '$here/fake_vllm.py' "\$@"
+EOF
 chmod +x "$work/bin/"*
 REAL_PKILL=$(command -v pkill)
 export PATH="$work/bin:$PATH" PYTHONPATH="$work/site" PKG_SNAPSHOT_DIR="$work/snap" WORK="$work" REAL_PKILL
@@ -58,9 +65,11 @@ free_port() {
 # A server flag with quotes, a backslash, and a newline, which the launch phase's detail must carry intact.
 note=$'--note=say "hi"\nback\\slash'
 
-# Writes a variant file shaped like `harness exec` renders one. Args: name mode gsm8k env [patch:package:strip...]
+# Writes a variant file shaped like `harness exec` renders one, serving $package and restoring $snapshot_pkgs.
+# Args: name server gsm8k env [patch:package:strip...]; server is the fake server's mode, then any flags for it.
+package=sglang snapshot_pkgs="'sglang' 'fakeinfer'"
 write_variant() {
-    local name=$1 mode=$2 gsm8k=$3 env=$4 files="" pkgs="" strips="" spec file pkg strip
+    local name=$1 server=$2 gsm8k=$3 env=$4 files="" pkgs="" strips="" spec file pkg strip
     shift 4
     for spec in "$@"; do
         IFS=: read -r file pkg strip <<<"$spec"
@@ -68,17 +77,17 @@ write_variant() {
     done
     cat >"$work/$name.sh" <<EOF
 VARIANT='$name'
-PACKAGE='sglang'
+PACKAGE='$package'
 MODEL='fake/model'
 PORT='$(free_port)'
 FAIL_PATTERN='illegal memory access'
 BOOT_TIMEOUT='1'
 CONCURRENCY='2'
 GSM8K='$gsm8k'
-SERVER_CMD=('python3' '$here/fake_server.py' '$mode' '$note')
+SERVER_CMD=('python3' '$here/fake_server.py' $server '$note')
 VARIANT_ENV=(${env:+"'$env'"})
 BENCH=('1:8' '16:64')
-SNAPSHOT_PKGS=('sglang' 'fakeinfer')
+SNAPSHOT_PKGS=($snapshot_pkgs)
 PATCH_FILES=($files)
 PATCH_PKGS=($pkgs)
 PATCH_STRIPS=($strips)
@@ -190,11 +199,105 @@ if pgrep -f "sglang.test.run_eval .*--port $post_port" >/dev/null; then
 fi
 echo "ok: a server that dies mid-evaluation ends as POST_FAIL and takes the eval client down"
 
-[[ $(wc -l <"$work/results/verdicts.jsonl") -eq 5 ]] || fail "verdicts.jsonl should hold one line per run"
-cmp -s <(tail -n 1 "$work/results/verdicts.jsonl") "$work/results/postfail/verdict.json" || fail "verdict.json differs"
+# The vllm variants ask for 3 of the fixture's 4 test questions; its train split has 6 rows, of which 5 are shots.
+package=vllm snapshot_pkgs="'vllm'"
+sha256() {
+    python3 -I -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$1"
+}
+# A copy, so a client that wrote its cache would not write into the repo.
+cp -R "$here/gsm8k" "$work/gsm8k"
+GSM8K_TRAIN_SHA256=$(sha256 "$work/gsm8k/train.jsonl")
+GSM8K_TEST_SHA256=$(sha256 "$work/gsm8k/test.jsonl")
+export GSM8K_DIR="$work/gsm8k" GSM8K_TRAIN_SHA256 GSM8K_TEST_SHA256
+
+# Checks a run's gsm8k_responses.jsonl: one row per question asked, in the fixture's order, and in every row the
+# fields of a Python dict literal. Args: variant fields
+responses() {
+    python3 -I - "$work/results/$1/gsm8k_responses.jsonl" "$GSM8K_DIR/test.jsonl" "$2" <<'EOF' || fail "$1: responses"
+import ast
+import json
+import sys
+
+path, fixture, want = sys.argv[1:]
+rows = [json.loads(line) for line in open(path, encoding="utf-8")]
+questions = [json.loads(line)["question"] for line in open(fixture, encoding="utf-8")][:3]
+if [(row["index"], row["question"]) for row in rows] != list(enumerate(questions)):
+    sys.exit(f"want the first 3 fixture questions in order, got {rows}")
+for row in rows:
+    bad = {key: row[key] for key, value in ast.literal_eval(want).items() if row[key] != value}
+    if bad:
+        sys.exit(f"row {row['index']}: {bad}")
+EOF
+}
+
+write_variant vllm-correct "ok --fake-gsm8k correct" 3 ""
+serve vllm-correct
+field vllm-correct verdict "'OK'"
+field vllm-correct gsm8k 1.0
+field vllm-correct accept None
+field vllm-correct tok_s "{'1': 100.0, '16': 1600.0}"
+field vllm-correct verdict_error None
+# The fixture's references include a thousands comma and a negative number.
+responses vllm-correct "{'correct': True, 'finish_reason': 'stop', 'error': None}"
+grep -q 'max_tokens 4096 (max_model_len 8192)' "$work/results/vllm-correct/gsm8k.txt" || fail "default max_tokens"
+for c in 1 16; do
+    [[ -s $work/results/vllm-correct/bench_c$c.json ]] || fail "no bench_c$c.json"
+done
+phases vllm-correct "restore idle_wait launch boot_ok smoke_ok quality_start quality_done stop"
+echo "ok: vllm quality scores a server with the right answers 1.0, and both bench runs report tok/s"
+
+write_variant vllm-garbage "ok --fake-gsm8k garbage --max-model-len 3000" 3 ""
+serve vllm-garbage
+field vllm-garbage verdict "'OK'"
+field vllm-garbage gsm8k 0.0
+responses vllm-garbage "{'correct': False, 'parsed': None, 'finish_reason': 'length', 'completion_tokens': 952}"
+echo "ok: a server answering in commas completes with 0.0, each reply capped at max_model_len 3000 - 2048 tokens"
+
+write_variant vllm-error "ok --fake-gsm8k error" 3 ""
+serve vllm-error
+field vllm-error verdict "'POST_FAIL'"
+field vllm-error gsm8k None
+grep -q '3/3 requests failed against the server; first: HTTP 500' "$work/results/vllm-error/gsm8k.txt" \
+    || fail "vllm-error: no failure line"
+[[ ! -e $work/results/vllm-error/bench.jsonl ]] || fail "vllm-error: bench ran after GSM8K failed"
+echo "ok: GSM8K requests that keep failing with 500 fail the quality run, with no score"
+
+write_variant vllm-flaky "ok --fake-gsm8k flaky" 3 ""
+serve vllm-flaky
+field vllm-flaky verdict "'OK'"
+field vllm-flaky gsm8k 1.0
+echo "ok: a request that fails once is retried"
+
+write_variant vllm-short "ok --fake-gsm8k correct --max-model-len 2200" 3 ""
+serve vllm-short
+field vllm-short verdict "'POST_FAIL'"
+grep -q 'max_tokens would be 152' "$work/results/vllm-short/gsm8k.txt" || fail "vllm-short: no max_tokens error"
+[[ ! -e $work/results/vllm-short/gsm8k_responses.jsonl ]] || fail "vllm-short: GSM8K requests were sent"
+echo "ok: a max_model_len that leaves under 256 tokens to answer in fails before any GSM8K request"
+
+write_variant vllm-badsha "ok --fake-gsm8k correct" 3 "GSM8K_TEST_SHA256=0000"
+serve vllm-badsha
+field vllm-badsha verdict "'POST_FAIL'"
+grep -q "test.jsonl has sha256 $GSM8K_TEST_SHA256, want 0000" "$work/results/vllm-badsha/gsm8k.txt" \
+    || fail "vllm-badsha: no hash error"
+echo "ok: a GSM8K file whose hash is not the pinned one fails the quality run"
+
+write_variant vllm-drop "ok --fake-gsm8k correct" 3 "FAKE_BENCH=drop"
+serve vllm-drop
+field vllm-drop verdict "'POST_FAIL'"
+field vllm-drop gsm8k 1.0
+field vllm-drop tok_s "{'1': 100.0}"
+grep -q 'bench c=1: 7/8 requests completed' "$work/results/vllm-drop/server.post.log" \
+    || fail "vllm-drop: no bench error"
+echo "ok: a bench run that completes fewer requests than it sent fails the quality run and keeps its speed"
+
+[[ $(wc -l <"$work/results/verdicts.jsonl") -eq 12 ]] || fail "verdicts.jsonl should hold one line per run"
+cmp -s <(tail -n 1 "$work/results/verdicts.jsonl") "$work/results/vllm-drop/verdict.json" || fail "verdict.json differs"
 if pgrep -f "$here/fake_server.py" >/dev/null; then
     fail "a fake server outlived its run"
 fi
 [[ $(grep -cxF -- '-9 -f [s]glang[.]launch_server|[s]glang::' "$work/pkill.log") -eq 5 ]] \
-    || fail "each run should clean up the server pattern once"
+    || fail "each sglang run should clean up the server pattern once"
+[[ $(grep -cxF -- '-9 -f [v]llm serve|[V]LLM::' "$work/pkill.log") -eq 7 ]] \
+    || fail "each vllm run should clean up the server pattern once"
 echo "ok: one verdict line per run, one cleanup per run, and no server left behind"

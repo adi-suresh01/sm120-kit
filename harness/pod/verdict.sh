@@ -30,7 +30,8 @@ where=$(awk '
     /illegal memory access|cudaErrorIllegalAddress|CUDA error: / && f != "" { c = f; exit }
     /Error: / && g == "" && f != "" { g = f }
     END { w = (c != "" ? c : g); sub(/.*\//, "", w); print w }' "$log" 2>/dev/null || true)
-# The per-request mean over GSM8K only; the server log's last value would come from whatever bench ran last.
+# The per-request mean over GSM8K only; the server log's last value would come from whatever bench ran last. Only
+# sglang's run_eval logs it; gsm8k_chat.py (vllm) writes the same Score line and no accept length.
 accept=$(grep -a -m1 -oE 'from meta_info\): n=[0-9]+ mean=[0-9.]+' "$run_dir/gsm8k.txt" 2>/dev/null \
     | sed 's/.*mean=//' || true)
 score=$(grep -a -m1 -oE '^Score: [0-9.]+' "$run_dir/gsm8k.txt" 2>/dev/null | awk '{print $2}' || true)

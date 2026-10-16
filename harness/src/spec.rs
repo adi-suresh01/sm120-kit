@@ -194,6 +194,8 @@ pub struct Quality {
     pub bench: Vec<(u32, u32)>,
 }
 
+const GSM8K_TEST_QUESTIONS: u32 = 1319;
+
 fn default_patch_strip() -> u32 {
     1
 }
@@ -367,12 +369,12 @@ impl Variant {
         }
         ensure!(self.smoke_concurrency >= 1, "smoke_concurrency must be at least 1");
         if let Some(quality) = &self.quality {
-            // quality.sh drives sglang's run_eval and bench_serving; no vLLM protocol exists yet.
-            ensure!(
-                package == Package::Sglang,
-                "quality runs need server.package = \"sglang\""
-            );
             ensure!(quality.gsm8k >= 1, "quality.gsm8k must be at least 1");
+            // gsm8k_chat.py refuses more questions than the split holds too, but only once the server has booted.
+            ensure!(
+                package != Package::Vllm || quality.gsm8k <= GSM8K_TEST_QUESTIONS,
+                "quality.gsm8k must be at most {GSM8K_TEST_QUESTIONS}, the questions in GSM8K's test split"
+            );
             for &(concurrency, prompts) in &quality.bench {
                 ensure!(concurrency >= 1 && prompts >= 1, "quality.bench pairs must be positive");
             }
@@ -612,16 +614,49 @@ smoke_concurrency = 13
         assert!(err.contains("not a package name"), "{err}");
     }
 
-    #[test]
-    fn rejects_quality_on_vllm() {
-        let text = example() + "\n[variants.baseline-graphs.quality]\ngsm8k = 50\n";
-        let err = error_of(&text);
-        assert!(err.contains("quality runs need server.package"), "{err}");
-        let sglang = text.replace("package = \"vllm\"", "package = \"sglang\"");
-        let spec = parse(&sglang).unwrap();
+    /// The example served by `package`, with a quality table on baseline-graphs.
+    fn with_quality(package: &str, quality: &str) -> String {
+        example().replace("package = \"vllm\"", &format!("package = \"{package}\""))
+            + "\n[variants.baseline-graphs.quality]\n"
+            + quality
+    }
+
+    fn quality_of(text: &str) -> (u32, Vec<(u32, u32)>) {
+        let spec = parse(text).unwrap();
         let quality = spec.variant("baseline-graphs").unwrap().quality.as_ref().unwrap();
-        assert_eq!(quality.gsm8k, 50);
-        assert!(quality.bench.is_empty());
+        (quality.gsm8k, quality.bench.clone())
+    }
+
+    #[test]
+    fn reads_quality_on_either_package() {
+        for package in ["vllm", "sglang"] {
+            let bare = with_quality(package, "gsm8k = 50\n");
+            assert_eq!(quality_of(&bare), (50, vec![]), "{package}");
+            let text = with_quality(package, "gsm8k = 200\nbench = [[1, 8], [64, 256]]\n");
+            assert_eq!(quality_of(&text), (200, vec![(1, 8), (64, 256)]), "{package}");
+            assert!(parse(&text).unwrap().variant("zeta-first").unwrap().quality.is_none());
+        }
+    }
+
+    #[test]
+    fn checks_quality_the_same_on_either_package() {
+        for package in ["vllm", "sglang"] {
+            let err = error_of(&with_quality(package, "gsm8k = 0\n"));
+            assert!(err.contains("quality.gsm8k must be at least 1"), "{package}: {err}");
+            let err = error_of(&with_quality(package, "gsm8k = 50\nbench = [[1, 8], [0, 64]]\n"));
+            assert!(err.contains("quality.bench pairs must be positive"), "{package}: {err}");
+            let err = error_of(&with_quality(package, "gsm8k = 50\nmax_tokens = 4096\n"));
+            assert!(err.contains("unknown field `max_tokens`"), "{package}: {err}");
+        }
+    }
+
+    #[test]
+    fn caps_vllm_gsm8k_at_the_test_split() {
+        assert_eq!(quality_of(&with_quality("vllm", "gsm8k = 1319\n")).0, 1319);
+        let err = error_of(&with_quality("vllm", "gsm8k = 1320\n"));
+        assert!(err.contains("at most 1319"), "{err}");
+        // sglang variants keep the limits they always had.
+        assert_eq!(quality_of(&with_quality("sglang", "gsm8k = 2000\n")).0, 2000);
     }
 
     #[test]

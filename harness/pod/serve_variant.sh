@@ -84,7 +84,7 @@ fi
 
 post=""
 if [[ -n $GSM8K ]]; then
-    post=$(printf '%q ' bash "$here/quality.sh" "$PORT" "$run_dir" "$GSM8K" "${BENCH[@]}")
+    post=$(printf '%q ' bash "$here/quality.sh" "$PACKAGE" "$PORT" "$MODEL" "$run_dir" "$GSM8K" "${BENCH[@]}")
 fi
 
 progress idle_wait
