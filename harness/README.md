@@ -193,10 +193,11 @@ carries `variant, verdict (OK|BOOT_FAIL|SMOKE_FAIL|POST_FAIL|TIMEOUT), boot_s, f
 accept, tok_s, mem_guard, result`; `mem_guard` is null unless the memory guard (below) fired, and then holds the
 reading it fired at. An `error` line for a pod that is still up adds `pod, id, deadline, deadline_local, next`.
 
-When a poll of a running job fails, the harness asks RunPod about the pod. A pod RunPod reports `EXITED`, `ERROR`, or
-`TERMINATED`, or no longer lists, ends `exec` (and `up` during setup) at once: its container is gone, and with it
-every file on the pod that was not pulled, and the error says to run `harness down <issue>`, since a stopped pod still
-bills its disk. A RunPod read that fails only warns; 30 failed polls in a row (about 5 minutes) still end the wait.
+When a poll of a running job fails, the harness reads the pod from RunPod once, without retries. A pod RunPod
+reports `EXITED`, `ERROR`, or `TERMINATED`, or one a GET answers 404 for and the pod list leaves out too, ends `exec`
+(and `up` during setup) at once: its container is gone, and with it every file on the pod that was not pulled, and
+the error says to run `harness down <issue>`, since a stopped pod still bills its disk. A RunPod read that fails only
+warns; 30 failed polls in a row (about 5 minutes) still end the wait.
 
 ## On the pod
 
@@ -207,34 +208,45 @@ results in `/workspace/sm120-kit/results/<issue>/`: `env.txt`, `jobs/<job>.log` 
 `exec` clears the laptop's copy of a variant's folder when the variant starts, pulls the folder every 5 minutes while
 it runs (2 minute limit, a failure only warns), so a container that dies mid-run leaves its logs up to then on the
 laptop, and after it pulls the folder, `jobs/`, and `verdicts.jsonl` over that copy. The last pull also runs when the
-wait fails, and deletes nothing.
+wait fails, and deletes nothing. Every pull unpacks into a staging directory beside its target and moves the files
+into place only once the archive is whole, so one cut off mid-stream leaves the earlier copy as it was.
 
 ### Memory guard
 
 RunPod stops a container at about 98% of its memory limit (`docs/runpod.md`) and removes it with every file on it.
-From just before the launch until the server is killed, `serve_variant.sh` runs `pod/mem_guard.py`, which reads the
-container's cgroup (v2, or v1's names mapped to v2's) and writes `<variant>/memory.jsonl`:
+From just before the launch until the server is killed, `serve_variant.sh` runs `pod/mem_guard.py`. It reads the
+container's cgroup (v2, or v1's names mapped to v2's; under a host cgroup namespace, the path `/proc/self/cgroup`
+names) and writes `<variant>/memory.jsonl`:
 
 - First a `controls` line: whether `memory.reclaim` and `memory.high` exist and are writable in this container.
-- Every `MEM_GUARD_POLL_S` seconds (default 15) `t, current, max` (null for no limit) and the `memory.stat` counters
-  `anon, file, active_file, inactive_file, shmem, file_mapped, file_dirty, unevictable` in bytes.
+- Every `MEM_GUARD_POLL_S` seconds (default 5) `t, current, max` (null for no limit) and the `memory.stat` counters
+  `anon, file, active_file, inactive_file, shmem, file_mapped, file_dirty, unevictable` in bytes. Each poll also
+  follows the server's process tree: `serve_and_smoke.sh` writes the server's pid to `<variant>/server.pid`, and the
+  guard adds its descendants from `/proc/*/stat`, never `cmdline`, whose read blocks on a worker stuck in a page
+  fault.
 - At `MEM_GUARD_TRIM_FRACTION` of the limit (default 0.80), at most once a minute, a trim: `posix_fadvise(DONTNEED)`
-  over the HF hub cache (`HF_HUB_CACHE`, else `$HF_HOME/hub`), then a write of the bytes over that line to
-  `memory.reclaim` where the container may write it, since fadvise skips page cache a process has mapped. The line
-  carries `trim: {fadvise, reclaim}` (`reclaim` is `ok`, `unavailable`, or an errno name) and `after_trim`, the usage
-  after. The guard never writes `memory.high` or `memory.max`.
-- At `MEM_GUARD_KILL_FRACTION` (default 0.93, under RunPod's 98%) on a poll after a trim, it fires: a `mem_guard`
-  phase line, then `<variant>/memory_guard.txt` (the reading on its first line, all of `memory.stat`, the 40 largest
-  processes, each server process's `VmRSS`, `VmLck`, `VmPin`, and `Rss*` lines, and a `py-spy dump --nonblocking` of
-  each when `py-spy` is on PATH, all bounded at 60 s), then `pkill -9 -f` of the server's process pattern, and it
-  exits. The run then ends the usual way, most likely as `BOOT_FAIL` or `POST_FAIL`, with `mem_guard` in its verdict,
-  while the container and its logs still exist.
+  over the HF hub cache (`HF_HUB_CACHE`, else `$HF_HOME/hub`, links followed), then, under the kill line, a request
+  to `memory.reclaim` for the bytes over the trim line, at most 4 GiB, where the container may write it, since
+  fadvise skips page cache a process has mapped. The line carries `trim: {fadvise, reclaim}` (`reclaim` is `ok`,
+  `unavailable`, `skipped`, or an errno name) and `after_trim`. Once a trim frees under 1 GiB, trims stop until the
+  usage reaches the kill line. The guard never writes `memory.high` or `memory.max`.
+- When the usage after that poll's trim is at `MEM_GUARD_KILL_FRACTION` (default 0.93, under RunPod's 98%) or over,
+  and `server.pid` exists, it fires, once: it stops the server's tree (SIGSTOP), adds a `mem_guard` phase line,
+  writes `<variant>/memory_guard.txt` (the reading on its first line, all of `memory.stat`, the 40 largest processes
+  by RSS, and for each server process its `State`, `VmRSS`, `VmLck`, `VmPin`, and `Rss*` lines, each thread's state
+  and wait channel, and the kernel stack of each thread in uninterruptible sleep where the container may read it;
+  then a `py-spy dump --nonblocking` of each within 15 s when `py-spy` is on PATH), kills the tree (SIGKILL), and
+  drops the hub cache again once the server is gone (an `after_kill` line). Only a `server.pid` with no pid in it
+  makes it fall back to `pkill -9 -f` of the server's process pattern, which would also hit the wrappers above the
+  server. The run then ends the usual way, `BOOT_FAIL` or `POST_FAIL` with the server's death in its `RESULT` line
+  and `mem_guard` in its verdict, while the container and its logs still exist, and the guard keeps logging.
 - With no limit, or one it cannot read, it writes one `warn` line and only logs.
 
 Its own errors go to `<variant>/mem_guard.log` and never fail the run. `serve_variant.sh` stops it on every way out,
-and it exits by itself once its parent is gone, so it cannot outlive its variant and kill the next one's server. The
-three knobs go in a variant's `env`. `mem_guard.py --drop-cache <path>...` does the fadvise pass once and prints a
-summary; `issues/vllm-56771/setup.sh` runs it on `$HF_HOME` after the weights download.
+and it exits by itself once the pid `serve_variant.sh` passed it is no longer its parent. The three knobs go in a
+variant's `env`. `mem_guard.py --drop-cache <path>...` syncs each file and does the fadvise pass once, and
+`mem_guard.py --limit` prints the limit in bytes (or `none`) and where it came from; `issues/vllm-56771/setup.sh`
+uses both.
 
 ## Tests
 
