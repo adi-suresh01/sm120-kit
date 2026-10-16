@@ -21,7 +21,7 @@ budget Aditya approved for that issue.
 issues/<repo>-<num>/
   harness.toml        what to rent and what to run (below)
   setup.sh            optional: installs and downloads; runs once per pod, after env_report.sh
-  hooks.sh            optional: defines pre_launch and post_stop, each called with the run directory
+  hooks.sh            optional: defines pre_launch, post_smoke, and post_stop (below)
   patches/<name>.diff patches a variant can apply to an installed Python package
   harness-ledger.json written by the harness: budget, pods, cost, RunPod organization. Commit it.
 ```
@@ -92,6 +92,20 @@ bench = [[1, 8], [16, 64], [64, 256]]
 
 Either way a GSM8K request that failed, or a benchmark that completed fewer requests than it sent, is `POST_FAIL`,
 not a low score or a slow run.
+
+`hooks.sh` is sourced before each variant and may define any of:
+
+- `pre_launch <run_dir>`: before the server starts.
+- `post_smoke <run_dir> <port> <model>`: on the live server after a passing smoke test, after quality when the
+  variant has it, for the issue's own requests (a reporter's exact prompt, long-context prefills). The watchdog
+  that covers quality covers it too: the server exiting, a `fail_pattern` line in its log, or 15 quiet minutes stop
+  it as `POST_FAIL`, and so does a non-zero exit. It still runs after a failed quality; either failing is
+  `POST_FAIL`.
+- `post_stop <run_dir>`: after the server is killed, on every way out.
+
+`pre_launch` and `post_smoke` see the variant's `env`, the variant file's variables (`VARIANT`, `PORT`, `MODEL`,
+...), and `progress <phase> [detail]`, which adds a phase line to the run's progress; both stop at their first
+failing command.
 
 Unknown keys are errors, and every named patch must exist. Variants run in file order when `run` names none.
 Before every variant the pod restores each package any variant of the issue patches, so patches never leak from

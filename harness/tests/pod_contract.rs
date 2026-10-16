@@ -132,12 +132,7 @@ fn shim(bin: &Path, name: &str, body: &str) {
 fn write_shims(bin: &Path) {
     fs::create_dir_all(bin).unwrap();
     shim(bin, "nvidia-smi", "echo 0\n");
-    let pkill = command_path("pkill").expect("pkill");
-    shim(
-        bin,
-        "pkill",
-        &format!("printf '%s\\n' \"$*\" >>\"$WORK/pkill.log\"\nif [[ $1 == -P ]]; then exec {pkill} \"$@\"; fi\n"),
-    );
+    shim(bin, "pkill", "printf '%s\\n' \"$*\" >>\"$WORK/pkill.log\"\n");
     if command_path("setsid").is_none() {
         shim(bin, "setsid", "exec \"$@\"\n");
     }

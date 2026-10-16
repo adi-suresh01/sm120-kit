@@ -2,8 +2,8 @@
 # Boots an OpenAI-compatible server, sends one chat request, and reports a single verdict line:
 #   RESULT=OK | RESULT=BOOT_FAIL | RESULT=SMOKE_FAIL | RESULT=POST_FAIL | RESULT=TIMEOUT
 # POST_SMOKE="<command>" runs after a passing smoke test while the server is still up; its output goes to
-# <log_file minus .log>.post.log. It is stopped as POST_FAIL if the server dies, the log matches FAIL_PATTERN,
-# or the log goes quiet for STALL_MINUTES (default 15).
+# <log_file minus .log>.post.log. It is stopped, with every process under it, as POST_FAIL if the server dies, the
+# log matches FAIL_PATTERN, or the log goes quiet for STALL_MINUTES (default 15).
 # FAIL_PATTERN="<ERE>" ends the boot wait as soon as the log matches it, reported as BOOT_FAIL exit_code=pattern.
 # PROGRESS_FILE, when set, gets the boot, smoke, and quality phases (see progress.sh).
 # BOOT_POLL_S, POST_POLL_S, STOP_POLL_S (default 5, 10, 1) set the polling intervals; tests shorten them.
@@ -45,6 +45,14 @@ trap stop_server EXIT
 
 fatal_in_log() {
     [[ -n ${FAIL_PATTERN:-} ]] && grep -qE "$FAIL_PATTERN" "$log_file"
+}
+
+descendants() {
+    local child
+    for child in $(pgrep -P "$1"); do
+        echo "$child"
+        descendants "$child"
+    done
 }
 
 started=$(date +%s)
@@ -119,8 +127,10 @@ if [[ -n ${POST_SMOKE:-} ]]; then
             reason=stall
         fi
         if [[ -n $reason ]]; then
-            pkill -P "$post_pid" 2>/dev/null || true
-            kill "$post_pid" 2>/dev/null || true
+            # The clients sit several processes down (post_smoke.sh, quality.sh or a hook, then python). The whole
+            # tree is listed before any of it is killed, so no parent can start its next step in between.
+            mapfile -t tree < <(descendants "$post_pid")
+            kill "${tree[@]}" "$post_pid" 2>/dev/null || true
             progress quality_done "post_exit=${reason}"
             echo "RESULT=POST_FAIL boot_seconds=${boot_seconds} requests=${concurrency} post_exit=${reason}"
             exit 1
