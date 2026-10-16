@@ -63,11 +63,16 @@ delete_self() {
     [[ $code == 2[0-9][0-9] ]]
 }
 
-# One round stops at the first call that reports success; the next round tries again regardless.
+# One round stops at the first call that reports success; the next round tries again regardless. Pods ship
+# runpodctl 1.x (1.14.15 on a live pod, 2026-10-16), which spells these `remove pod` and `stop pod` and has no
+# `pod` command; 2.x renamed them to `pod remove` and `pod stop`, so each is tried in both spellings.
 terminate_round() {
+    local id=${RUNPOD_POD_ID:-}
     delete_self && return 0
-    run_logged "${bound[@]}" runpodctl pod remove "${RUNPOD_POD_ID:-}" && return 0
-    run_logged "${bound[@]}" runpodctl pod stop "${RUNPOD_POD_ID:-}"
+    run_logged "${bound[@]}" runpodctl remove pod "$id" && return 0
+    run_logged "${bound[@]}" runpodctl pod remove "$id" && return 0
+    run_logged "${bound[@]}" runpodctl stop pod "$id" && return 0
+    run_logged "${bound[@]}" runpodctl pod stop "$id"
 }
 
 # Never returns. The deadline is re-read from the clock every nap, so a nap cut short only means an early check,

@@ -46,9 +46,14 @@ EOF
 cat >"$work/bin/runpodctl" <<'EOF'
 #!/usr/bin/env bash
 printf 'runpodctl %s\n' "$*" >>"$FAKE_DIR/calls.log"
+# Like the runpodctl 1.x that pods ship: `remove pod <id>` and `stop pod <id>`, and no `pod` command.
+if [[ $1 == pod ]]; then
+    echo 'Error: unknown command "pod" for "runpodctl"' >&2
+    exit 1
+fi
 case $FAKE_RUNPODCTL in
     ok) echo "pod $3 done" ;;
-    stop-only) [[ $2 == stop ]] || { echo "Error: forbidden" >&2; exit 1; } ;;
+    stop-only) [[ $1 == stop ]] || { echo "Error: forbidden" >&2; exit 1; } ;;
     hang) exec sleep 30 ;;
     *) echo "Error: forbidden" >&2; exit 1 ;;
 esac
@@ -188,18 +193,20 @@ echo "ok: deletes after the deadline, also after killed naps, signals, and a kil
 grep -q 'http 200' "$work/delete2xx/root/workspace/harness-watchdog.log" || fail "delete result not logged"
 echo "ok: a 2xx delete is logged, and the watchdog keeps going after it"
 
-(( $(count notfound 'runpodctl pod remove pod123') >= 2 )) || fail "a 404 must not count, and remove's exit 0 must not end the loop"
-(( $(count notfound 'runpodctl pod stop') == 0 )) || fail "stop ran after a remove that succeeded"
+(( $(count notfound 'runpodctl remove pod pod123') >= 2 )) || fail "a 404 must not count, and remove's exit 0 must not end the loop"
+(( $(count notfound 'runpodctl pod ') + $(count notfound 'runpodctl stop') == 0 )) \
+    || fail "another runpodctl call ran after a remove that succeeded"
 echo "ok: a 404 is not success, and an exit-0 remove does not end the watchdog"
 
-[[ $(kills fallback | head -n 4 | cut -d' ' -f1-3 | tr '\n' ',') == "curl -sS -K,runpodctl pod remove,runpodctl pod stop,curl -sS -K," ]] \
+[[ $(kills fallback | head -n 5 | cut -d' ' -f1-3 | tr '\n' ',') \
+    == "curl -sS -K,runpodctl remove pod,runpodctl pod remove,runpodctl stop pod,curl -sS -K," ]] \
     || fail "fallback order"
-grep -q 'runpodctl pod remove pod123: exit 1: Error: forbidden' "$work/fallback/root/workspace/harness-watchdog.log" \
+grep -q 'runpodctl remove pod pod123: exit 1: Error: forbidden' "$work/fallback/root/workspace/harness-watchdog.log" \
     || fail "failed remove not logged with its output"
-echo "ok: falls back to runpodctl remove, then stop, every round"
+echo "ok: falls back to runpodctl remove, then stop, in both spellings, every round"
 
 (( $(count nokey 'curl ') == 0 )) || fail "curl ran without a key"
-(( $(count nokey 'runpodctl pod remove') >= 1 )) || fail "a missing key must still try runpodctl"
+(( $(count nokey 'runpodctl remove pod') >= 1 )) || fail "a missing key must still try runpodctl"
 grep -q 'RUNPOD_API_KEY or RUNPOD_POD_ID is not set' "$work/nokey/root/workspace/harness-watchdog.log" \
     || fail "missing key not logged"
 echo "ok: a missing key is logged and runpodctl still runs"
