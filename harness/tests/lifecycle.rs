@@ -806,3 +806,24 @@ fn run_after_a_lost_create_leaves_only_a_tracked_reservation() {
     assert_eq!(w.states(), [PodState::Reserved]);
     w.assert_every_billing_pod_is_tracked();
 }
+
+#[test]
+fn a_ledger_write_that_fails_after_create_deletes_the_pod() {
+    use std::os::unix::fs::PermissionsExt;
+    let w = World::default();
+    let dir = w.repo.path().join("issues").join(ISSUE);
+    let locked = dir.clone();
+    w.cloud.0.borrow_mut().after_create = Some(Box::new(move || {
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o555)).unwrap();
+    }));
+    let result = run(&w, &[]);
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+    let err = err_text(result);
+    assert!(err.contains("so the harness deleted it"), "{err}");
+    assert_eq!(w.cloud.0.borrow().create_calls, 1);
+    assert!(w.cloud.billing_pods().is_empty());
+    assert_eq!(w.states(), [PodState::Reserved]);
+    w.clock.advance(SignedDuration::from_mins(11));
+    run_reaper(&w);
+    assert_eq!(w.states(), [PodState::CreateFailed]);
+}

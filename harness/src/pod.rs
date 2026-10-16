@@ -360,7 +360,7 @@ fn create_first_available(ctx: &Ctx, spec: &IssueSpec, offers: &[Offer]) -> Resu
         );
         match ctx.cloud.create_pod(&create_request(spec, &entry)) {
             Ok(pod) => {
-                let entry = mark_live(&store, &name, &pod.id)?;
+                let entry = track(ctx, &store, &name, &pod.id)?;
                 ctx.events
                     .emit(Some(issue), Kind::Create, json!({"pod": name, "id": pod.id}));
                 return Ok((entry, pod));
@@ -384,12 +384,25 @@ fn create_first_available(ctx: &Ctx, spec: &IssueSpec, offers: &[Offer]) -> Resu
     bail!("every in-stock choice was refused: {}", rejections.join(" | "))
 }
 
-fn mark_live(store: &LedgerStore, name: &str, id: &str) -> Result<PodEntry> {
-    store.update(|ledger| {
+/// Records a new pod's id. A pod the ledger cannot record is deleted at once: nothing would show it billing, and
+/// `run`'s teardown could not find it to end it.
+fn track(ctx: &Ctx, store: &LedgerStore, name: &str, id: &str) -> Result<PodEntry> {
+    let recorded = store.update(|ledger| {
         let entry = ledger.entry_mut(name)?;
         entry.mark_live(id)?;
         Ok(entry.clone())
-    })
+    });
+    let Err(e) = recorded else {
+        return recorded;
+    };
+    let outcome = match ctx.cloud.delete_pod(id) {
+        Ok(()) => "deleted it".to_string(),
+        Err(delete) => format!("could not delete it ({delete}); its watchdog ends it at its deadline"),
+    };
+    Err(e.context(format!(
+        "recording pod {name} ({id}) in {} failed, so the harness {outcome}",
+        store.path().display()
+    )))
 }
 
 fn adopt_by_name(ctx: &Ctx, store: &LedgerStore, entry: &PodEntry, error: CloudError) -> Result<(PodEntry, Pod)> {
@@ -409,7 +422,7 @@ fn adopt_by_name(ctx: &Ctx, store: &LedgerStore, entry: &PodEntry, error: CloudE
         match ctx.cloud.list_pods() {
             Ok(pods) => {
                 if let Some(pod) = pods.into_iter().find(|pod| pod.name == entry.name) {
-                    let entry = mark_live(store, &entry.name, &pod.id)?;
+                    let entry = track(ctx, store, &entry.name, &pod.id)?;
                     ctx.events.emit(
                         Some(issue),
                         Kind::Create,

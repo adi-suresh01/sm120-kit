@@ -13,6 +13,7 @@ pub enum Create {
     Made,
     Refused(u16),
     MadeButReplyLost,
+    MadeBut5xx,
     RequestLost,
     MadeButListedLater,
     KilledBeforeSend,
@@ -46,6 +47,8 @@ pub struct State {
     pub account: Option<String>,
     pub billing: Option<f64>,
     pub interrupt_on_create: Option<Rc<AtomicBool>>,
+    /// Runs right after a pod is made, before the reply: the moment a local failure hurts most.
+    pub after_create: Option<Box<dyn Fn()>>,
     pub create_calls: usize,
     next_id: u32,
 }
@@ -84,6 +87,7 @@ impl Default for FakeCloud {
             account: Some("org-sm120".into()),
             billing: None,
             interrupt_on_create: None,
+            after_create: None,
             create_calls: 0,
             next_id: 0,
         }))
@@ -137,6 +141,9 @@ impl FakeCloud {
         } else {
             state.unlisted.push(fake);
         }
+        if let Some(hook) = &state.after_create {
+            hook();
+        }
         pod
     }
 }
@@ -165,6 +172,10 @@ impl Cloud for FakeCloud {
             Create::MadeButReplyLost => {
                 self.make(request, true);
                 Err(CloudError::Network("connection reset by peer".into()))
+            }
+            Create::MadeBut5xx => {
+                self.make(request, true);
+                Err(http(502))
             }
             Create::RequestLost => Err(CloudError::Network("connection refused".into())),
             Create::MadeButListedLater => {
