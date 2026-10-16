@@ -11,12 +11,13 @@ use jiff::tz::TimeZone;
 use jiff::{SignedDuration, Timestamp};
 use serde_json::json;
 
+use crate::budget;
 use crate::clock::Clock;
 use crate::cloud::{
     Cloud, CloudError, CreatePodRequest, GpuRequest, Mounts, PersistentMount, Pod, PodStatus, SshEndpoint, find_offers,
 };
 use crate::events::{Events, Kind};
-use crate::ledger::{ADOPT_WINDOW, Ledger, LedgerStore, Offer, PodEntry, PodState, plan_reservation};
+use crate::ledger::{ADOPT_WINDOW, Ledger, LedgerStore, Offer, PodEntry, PodState};
 use crate::session::{Remote, TRANSFER_LIMIT, Target, poll_job, start_job};
 use crate::spec::IssueSpec;
 
@@ -360,32 +361,6 @@ const GONE_CHECKS: usize = 6;
 /// About five minutes of failed polls, at POLL apart, before a job counts as lost.
 const POLL_FAILURES: u32 = 30;
 
-pub fn quote(ctx: &Ctx, spec: &IssueSpec) -> Result<()> {
-    let offers = find_offers(ctx.cloud, &spec.pod)?;
-    let Some(first) = offers.first() else {
-        bail!(
-            "nothing in the preference list of issues/{}/harness.toml is in stock",
-            spec.issue
-        );
-    };
-    let remaining = ctx.ledger(&spec.issue).load()?.remaining_usd()?;
-    let plan = plan_reservation(ctx.clock.now(), spec.planned_hours, remaining, first.rate_usd_hr)?;
-    let fallbacks: Vec<String> = offers[1..]
-        .iter()
-        .map(|o| format!("{} {} ${:.2}/hr", o.gpu, o.cloud.as_str(), o.rate_usd_hr))
-        .collect();
-    ctx.events.emit(
-        Some(&spec.issue),
-        Kind::Quote,
-        json!({
-            "gpu": first.gpu, "cloud": first.cloud, "count": first.count, "rate_usd_hr": first.rate_usd_hr,
-            "deadline": plan.deadline, "worst_case_usd": cents(plan.reserved_usd),
-            "remaining_usd": cents(remaining), "fallbacks": fallbacks,
-        }),
-    );
-    Ok(())
-}
-
 pub fn up(ctx: &Ctx, spec: &IssueSpec, run_setup: bool, after_failure: AfterFailure) -> Result<LivePod> {
     let issue = spec.issue.as_str();
     let ledger = ctx.ledger(issue).load()?;
@@ -396,12 +371,14 @@ pub fn up(ctx: &Ctx, spec: &IssueSpec, run_setup: bool, after_failure: AfterFail
             active.state
         );
     }
+    let remaining = ledger.remaining_usd()?;
     ctx.remote.preflight()?;
     let offers = find_offers(ctx.cloud, &spec.pod)?;
     ensure!(
         !offers.is_empty(),
         "nothing in the preference list of issues/{issue}/harness.toml is in stock"
     );
+    budget::emit_quote(ctx, spec, &offers, Some(remaining))?;
     refuse_untracked(issue, &ledger, &ctx.cloud.list_pods()?)?;
     refuse_clock_skew(ctx, issue)?;
     let (entry, pod) = create_first_available(ctx, spec, &offers)?;

@@ -1,3 +1,4 @@
+pub mod budget;
 pub mod clock;
 pub mod cloud;
 pub mod events;

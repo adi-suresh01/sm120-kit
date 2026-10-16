@@ -10,11 +10,11 @@ use serde_json::json;
 use sm120_harness::clock::SystemClock;
 use sm120_harness::cloud::{API_BASE, Cloud, RunpodRest};
 use sm120_harness::events::{Events, Kind};
-use sm120_harness::ledger::{Budget, LedgerStore, check_accounts};
-use sm120_harness::pod::{self, AfterFailure, Ctx, cents};
+use sm120_harness::ledger::{LedgerStore, check_accounts};
+use sm120_harness::pod::{self, AfterFailure, Ctx};
 use sm120_harness::session::{Remote, SshRemote, TRANSFER_LIMIT};
 use sm120_harness::spec::{IssueSpec, is_slug};
-use sm120_harness::{exec, reap};
+use sm120_harness::{budget, exec, reap};
 
 /// Rents a RunPod pod for an issue, runs server variants on it, pulls the results, and terminates it, within the
 /// GPU budget recorded for the issue.
@@ -196,11 +196,11 @@ fn dispatch(
     match command {
         Command::Budget {
             action: BudgetAction::Set { issue, usd, note },
-        } => budget_set(&ctx, &issue, usd, &note),
+        } => budget::set(&ctx, &issue, usd, &note),
         Command::Budget {
             action: BudgetAction::Show { issue },
-        } => budget_show(&ctx, &issue),
-        Command::Quote { issue } => pod::quote(&ctx, &load(repo, &issue)?),
+        } => budget::show(&ctx, &issue),
+        Command::Quote { issue } => budget::quote(&ctx, &load(repo, &issue)?),
         Command::Up { issue, no_setup } => {
             pod::up(&ctx, &load(repo, &issue)?, !no_setup, AfterFailure::KeepPod).map(drop)
         }
@@ -216,54 +216,6 @@ fn dispatch(
             SshRemote.run_streaming(&pod::live_pod(&ctx, &issue)?.target, &command.join(" "))
         }
     }
-}
-
-fn budget_set(ctx: &Ctx, issue: &str, usd: f64, note: &str) -> Result<()> {
-    ensure!(
-        is_slug(issue),
-        "issue {issue:?} must be lowercase letters, digits, and dashes"
-    );
-    ensure!(
-        ctx.repo.join("issues").join(issue).is_dir(),
-        "issues/{issue} does not exist"
-    );
-    ensure!(
-        usd.is_finite() && usd > 0.0,
-        "the budget must be a positive dollar amount"
-    );
-    let approved_at = ctx.clock.now();
-    ctx.ledger(issue).update(|ledger| {
-        ledger.budget = Some(Budget {
-            usd,
-            approved_at,
-            note: note.to_string(),
-        });
-        Ok(())
-    })?;
-    budget_show(ctx, issue)
-}
-
-fn budget_show(ctx: &Ctx, issue: &str) -> Result<()> {
-    pod::reconcile_billing(ctx, issue)?;
-    let ledger = ctx.ledger(issue).load()?;
-    let pods: Vec<_> = ledger
-        .pods
-        .iter()
-        .map(|p| {
-            json!({"pod": p.name, "state": p.state, "gpu": p.gpu, "rate_usd_hr": p.rate_usd_hr,
-                   "deadline": p.deadline, "cost_usd": p.cost_usd.map(cents), "cost_source": p.cost_source})
-        })
-        .collect();
-    ctx.events.emit(
-        Some(issue),
-        Kind::Budget,
-        json!({
-            "budget_usd": ledger.budget.as_ref().map(|b| b.usd), "note": ledger.budget.as_ref().map(|b| &b.note),
-            "spent_usd": cents(ledger.spent_usd()), "reserved_usd": cents(ledger.reserved_usd()),
-            "remaining_usd": ledger.remaining_usd().ok().map(cents), "pods": pods,
-        }),
-    );
-    Ok(())
 }
 
 #[cfg(test)]

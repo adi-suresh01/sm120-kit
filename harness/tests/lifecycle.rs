@@ -9,11 +9,11 @@ use std::sync::atomic::AtomicBool;
 use jiff::SignedDuration;
 use sm120_harness::cloud::{Cloud, PodStatus};
 use sm120_harness::events::Events;
-use sm120_harness::exec;
 use sm120_harness::ledger::{Budget, CostSource, Ledger, LedgerStore, PodState, check_accounts};
 use sm120_harness::pod::{self, AfterFailure, Ctx, StillLive};
 use sm120_harness::reap;
 use sm120_harness::spec::IssueSpec;
+use sm120_harness::{budget, exec};
 use support::fake_cloud::{Create, FakeCloud};
 use support::fake_remote::FakeRemote;
 use support::{FakeClock, TempDir, repo_with_issue};
@@ -186,17 +186,66 @@ fn the_create_request_carries_the_deadline_and_never_a_token() {
 fn quote_prices_the_first_choice_without_reserving() {
     let w = World::default();
     let spec = w.spec();
-    w.with(|ctx| pod::quote(ctx, &spec)).unwrap();
+    w.with(|ctx| budget::quote(ctx, &spec)).unwrap();
     let events = w.events();
     assert!(
         events.contains("\"gpu\":\"NVIDIA RTX PRO 6000 Blackwell Server Edition\""),
         "{events}"
     );
     assert!(
-        events.contains("\"deadline\":\"2026-10-16T18:00:00Z\",\"worst_case_usd\":2.74"),
+        events.contains("\"deadline\":\"2026-10-16T18:00:00Z\",\"worst_case_usd\":2.74,\"remaining_usd\":20.0"),
         "{events}"
     );
     assert!(w.ledger().pods.is_empty());
+}
+
+#[test]
+fn quote_works_before_any_budget_is_approved() {
+    let w = World {
+        repo: repo_with_issue(ISSUE, &[]),
+        ..World::default()
+    };
+    let spec = IssueSpec::parse(
+        &SPEC.replace("planned_hours = 1.0", "planned_hours = 3.0"),
+        ISSUE,
+        |_| true,
+    )
+    .unwrap();
+    w.with(|ctx| budget::quote(ctx, &spec)).unwrap();
+    // $2.49/hr x 1.10 x 3 h, with what remains unknown until `budget set`.
+    let events = w.events();
+    assert!(
+        events.contains("\"deadline\":\"2026-10-16T20:00:00Z\",\"worst_case_usd\":8.22,\"remaining_usd\":null"),
+        "{events}"
+    );
+    assert!(w.ledger().pods.is_empty());
+}
+
+#[test]
+fn up_records_the_quote_it_reserves_from() {
+    let w = World::default();
+    w.up().unwrap();
+    let events = w.events();
+    let quote = events.find("\"kind\":\"quote\"").unwrap();
+    assert!(quote < events.find("\"kind\":\"reserve\"").unwrap(), "{events}");
+}
+
+#[test]
+fn a_budget_cut_below_what_a_live_pod_holds_warns_and_keeps_its_deadline() {
+    let w = World::default();
+    w.up().unwrap();
+    let deadline = w.ledger().pods[0].deadline;
+    w.with(|ctx| budget::set(ctx, ISSUE, 1.0, "cut")).unwrap();
+    let events = w.events();
+    assert!(
+        events.contains("the new budget $1.00 is below the $2.74 already spent and reserved"),
+        "{events}"
+    );
+    assert!(events.contains("`harness down vllm-47990`"), "{events}");
+    let ledger = w.ledger();
+    assert_eq!((ledger.pods[0].deadline, ledger.budget.unwrap().usd), (deadline, 1.0));
+    w.with(|ctx| budget::set(ctx, ISSUE, 30.0, "raise")).unwrap();
+    assert_eq!(w.events().matches("is below the").count(), 1);
 }
 
 #[test]
