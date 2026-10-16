@@ -1,7 +1,7 @@
 issue = "vllm-56771"
-# What is left of the approved $40 after the EUR-IS-2 attempts: setup about 25 min (image, 510 GB of weights,
-# prompts), then a1 and a0 about 40 min (README.md, "Attempts 1-5").
-planned_hours = 1.45
+# Setup 10-25 min (image, 510 GB of weights to container disk, cache drop, cold-read gate), then a1 and a0 about
+# 25 min each (boot from local disk, graph capture, long prompts).
+planned_hours = 1.75
 
 [pod]
 # Nightly 2026-10-16: FlashInfer 0.7.2 (FI #5197, the SM120 sparse-MLA rewrite) plus #60945 and #57152.
@@ -44,62 +44,66 @@ fail_pattern = "illegal memory access|cudaErrorIllegalAddress|CUDA error: "
 # Reading 510 GB, pinning about 189 GiB of Engram tables, compiling, and capturing graphs with DSpark.
 boot_timeout_s = 2400
 
-# Stock nightly, no #60762 and no block-size flags: does vLLM boot DSV4.1 on sm_120 at all yet (#59203).
+# Stock nightly, no #60762 and no block-size flags: does vLLM boot DSV4.1 on sm_120 at all yet (#59203). Without
+# dsv41-stream-load it keeps the whole checkpoint mapped and fills the container as attempt 6 did.
 [variants.g0-boot-stock]
 env = { VLLM_DEEP_GEMM_WARMUP = "skip", NCCL_P2P_LEVEL = "PXB", NCCL_MIN_NCHANNELS = "32", LONG_PROMPTS = "12k" }
 
+# Every variant below also streams the weights and evicts loaded shards (dsv41-stream-load), and stops torch
+# rounding the pinned Engram slices up to a power of two: together about 318 GiB at peak instead of 762
+# against RunPod's 688 GiB stop (README.md, attempt 6).
 # The repro: the reporter's DSpark config with CUDA graphs on, booted with #59203's working geometry.
 [variants.a1-dspark-graphs]
-patches = ["pr60762-dsv41-block64"]
+patches = ["pr60762-dsv41-block64", "dsv41-stream-load"]
 flags = [
   "--block-size", "64", "--kv-cache-dtype", "fp8", "--attention-config", '{"indexer_kv_dtype":"fp8"}',
   "--speculative-config", '{"method":"dspark","num_speculative_tokens":5,"draft_sample_method":"probabilistic","rejection_sample_method":"block"}',
 ]
-env = { VLLM_DEEP_GEMM_WARMUP = "skip", NCCL_P2P_LEVEL = "PXB", NCCL_MIN_NCHANNELS = "32", LONG_PROMPTS = "12k,120k" }
+env = { VLLM_DEEP_GEMM_WARMUP = "skip", PYTORCH_ALLOC_CONF = "pinned_max_round_threshold_mb:64", NCCL_P2P_LEVEL = "PXB", NCCL_MIN_NCHANNELS = "32", LONG_PROMPTS = "12k,120k" }
 
 # Control without speculation; the 35K prompt is vllm#58910's case (TP4, graphs, no spec) on FlashInfer 0.7.2.
 [variants.a0-nospec-graphs]
-patches = ["pr60762-dsv41-block64"]
+patches = ["pr60762-dsv41-block64", "dsv41-stream-load"]
 flags = ["--block-size", "64", "--kv-cache-dtype", "fp8", "--attention-config", '{"indexer_kv_dtype":"fp8"}']
-env = { VLLM_DEEP_GEMM_WARMUP = "skip", NCCL_P2P_LEVEL = "PXB", NCCL_MIN_NCHANNELS = "32", LONG_PROMPTS = "12k,35k,120k" }
+env = { VLLM_DEEP_GEMM_WARMUP = "skip", PYTORCH_ALLOC_CONF = "pinned_max_round_threshold_mb:64", NCCL_P2P_LEVEL = "PXB", NCCL_MIN_NCHANNELS = "32", LONG_PROMPTS = "12k,35k,120k" }
 
 # Only if a1 crashes: the reporter's 09-17 A/B (graphs off, torch.compile on) on the new stack.
 [variants.a2-dspark-nograph]
-patches = ["pr60762-dsv41-block64"]
+patches = ["pr60762-dsv41-block64", "dsv41-stream-load"]
 flags = [
   "--block-size", "64", "--kv-cache-dtype", "fp8", "--attention-config", '{"indexer_kv_dtype":"fp8"}',
   "--speculative-config", '{"method":"dspark","num_speculative_tokens":5,"draft_sample_method":"probabilistic","rejection_sample_method":"block"}',
   "--compilation-config", '{"cudagraph_mode":"NONE"}',
 ]
-env = { VLLM_DEEP_GEMM_WARMUP = "skip", NCCL_P2P_LEVEL = "PXB", NCCL_MIN_NCHANNELS = "32", LONG_PROMPTS = "12k" }
+env = { VLLM_DEEP_GEMM_WARMUP = "skip", PYTORCH_ALLOC_CONF = "pinned_max_round_threshold_mb:64", NCCL_P2P_LEVEL = "PXB", NCCL_MIN_NCHANNELS = "32", LONG_PROMPTS = "12k" }
 
 # Only if a1 crashes: without image tokens the SWA prefill width is the plain window (he-yufeng's fork on 09-14).
 [variants.a3-dspark-graphs-lmo]
-patches = ["pr60762-dsv41-block64"]
+patches = ["pr60762-dsv41-block64", "dsv41-stream-load"]
 flags = [
   "--block-size", "64", "--kv-cache-dtype", "fp8", "--attention-config", '{"indexer_kv_dtype":"fp8"}',
   "--speculative-config", '{"method":"dspark","num_speculative_tokens":5,"draft_sample_method":"probabilistic","rejection_sample_method":"block"}',
   "--language-model-only",
 ]
-env = { VLLM_DEEP_GEMM_WARMUP = "skip", NCCL_P2P_LEVEL = "PXB", NCCL_MIN_NCHANNELS = "32", LONG_PROMPTS = "12k" }
+env = { VLLM_DEEP_GEMM_WARMUP = "skip", PYTORCH_ALLOC_CONF = "pinned_max_round_threshold_mb:64", NCCL_P2P_LEVEL = "PXB", NCCL_MIN_NCHANNELS = "32", LONG_PROMPTS = "12k" }
 
 # Only if a1 crashes: synchronous launches and a GPU core dump name the faulting kernel and block on this stack. The
 # dumps skip GPU memory, about 90 GB per rank otherwise, and go to container disk: a full /workspace would lose the
 # verdict.
 [variants.a4-dspark-graphs-dump]
-patches = ["pr60762-dsv41-block64"]
+patches = ["pr60762-dsv41-block64", "dsv41-stream-load"]
 flags = [
   "--block-size", "64", "--kv-cache-dtype", "fp8", "--attention-config", '{"indexer_kv_dtype":"fp8"}',
   "--speculative-config", '{"method":"dspark","num_speculative_tokens":5,"draft_sample_method":"probabilistic","rejection_sample_method":"block"}',
 ]
-env = { VLLM_DEEP_GEMM_WARMUP = "skip", NCCL_P2P_LEVEL = "PXB", NCCL_MIN_NCHANNELS = "32", LONG_PROMPTS = "12k", CUDA_LAUNCH_BLOCKING = "1", CUDA_ENABLE_COREDUMP_ON_EXCEPTION = "1", CUDA_COREDUMP_FILE = "/root/cores/core_%h_%p", CUDA_COREDUMP_GENERATION_FLAGS = "skip_global_memory,skip_shared_memory,skip_local_memory" }
+env = { VLLM_DEEP_GEMM_WARMUP = "skip", PYTORCH_ALLOC_CONF = "pinned_max_round_threshold_mb:64", NCCL_P2P_LEVEL = "PXB", NCCL_MIN_NCHANNELS = "32", LONG_PROMPTS = "12k", CUDA_LAUNCH_BLOCKING = "1", CUDA_ENABLE_COREDUMP_ON_EXCEPTION = "1", CUDA_COREDUMP_FILE = "/root/cores/core_%h_%p", CUDA_COREDUMP_GENERATION_FLAGS = "skip_global_memory,skip_shared_memory,skip_local_memory" }
 
 # Only if a1 serves: #60945's path (adaptive verification), in case LibertAI turns it on.
 [variants.a5-dspark-adaptive]
-patches = ["pr60762-dsv41-block64"]
+patches = ["pr60762-dsv41-block64", "dsv41-stream-load"]
 flags = [
   "--block-size", "64", "--kv-cache-dtype", "fp8", "--attention-config", '{"indexer_kv_dtype":"fp8"}',
   "--speculative-config", '{"method":"dspark","num_speculative_tokens":5,"draft_sample_method":"probabilistic","rejection_sample_method":"block","enable_adaptive_verification":true}',
 ]
-env = { VLLM_DEEP_GEMM_WARMUP = "skip", NCCL_P2P_LEVEL = "PXB", NCCL_MIN_NCHANNELS = "32", LONG_PROMPTS = "12k" }
+env = { VLLM_DEEP_GEMM_WARMUP = "skip", PYTORCH_ALLOC_CONF = "pinned_max_round_threshold_mb:64", NCCL_P2P_LEVEL = "PXB", NCCL_MIN_NCHANNELS = "32", LONG_PROMPTS = "12k" }
 smoke_concurrency = 16

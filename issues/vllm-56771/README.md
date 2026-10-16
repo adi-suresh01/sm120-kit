@@ -129,5 +129,18 @@ keeps the weights on container disk behind `$HF_HOME/hub`, drops them from the p
 then posix_fadvise DONTNEED), stops under a 500 MB/s cold read, and installs py-spy. Every variant runs the memory
 guard (`harness/README.md`), which logs memory.jsonl every 5 s and, at 93% of the limit, stops the server's process
 tree, writes memory_guard.txt, and kills it before RunPod's 98%; `exec` pulls the variant every 5 minutes and stops
-waiting on a pod RunPod reports EXITED. Total for this issue: $33.13 of $40, $6.87 left, not enough for another 4x
-boot.
+waiting on a pod RunPod reports EXITED.
+
+What filled it, from the source at 49cb2bbf (desk research, not yet measured): the DSV4.1 VL wrapper sorts the whole
+weight iterator (`vl_model.py:325`), so the 48 "loaded" shards are only lazy mmap views and the real copy runs after
+the progress bar, faulting the checkpoint into page cache that stays mapped, so neither fadvise nor easy reclaim can
+drop it. On top of that, torch rounds each pinned Engram slice up to a power of two (23.6 GiB pins 33 GiB, about 264
+GiB at TP4; vllm#59849). Estimated need: 264 + 468 cache + ~30 processes, about 762 GiB against the 688 GiB stop.
+vllm#57469 (4x H20, cgroup OOM while loading) looks like the same thing. `patches/dsv41-stream-load.diff` streams the
+language model in checkpoint order, loads the vision tensors after it, and evicts each shard once its last tensor is
+released, then every touched file after the load; `PYTORCH_ALLOC_CONF=pinned_max_round_threshold_mb:64` (torch 2.14.0,
+`AllocatorConfig.cpp:245-252`) pins exact sizes. Estimated peak with both: about 318 GiB (413 if a rank lags a whole
+Engram shard). Every patched variant now carries both; memory.jsonl will show whether the estimate holds.
+
+Total for this issue: $33.13 of $40 by the ledger ($32.61 billed), not enough for another 4x boot. Attempt 7 quote:
+4x Server Edition SECURE, $9.96/hr, planned 1.75 h (setup, a1, a0), worst case $17.43.
