@@ -11,6 +11,16 @@ patch_file=${2:?$usage}
 pkg=${3:?$usage}
 strip=${4:-1}
 
+# Both would otherwise surface as "does not apply cleanly", which sends the reader after the wrong problem.
+if ! command -v patch >/dev/null; then
+    echo "patch(1) is not installed; add patch to the image or to [pod] apt" >&2
+    exit 1
+fi
+if [[ ! -r $patch_file ]]; then
+    echo "cannot read patch file: $patch_file" >&2
+    exit 1
+fi
+
 # find_spec locates the package without importing it; importing vllm or sglang takes seconds.
 site_root=$(python3 - "$pkg" <<'EOF'
 import importlib.util, os, sys
@@ -27,9 +37,11 @@ is_applied() {
     patch -p"$strip" -R -f --dry-run --silent -d "$site_root" <"$patch_file" >/dev/null 2>&1
 }
 
-# A forward dry run first keeps apply all-or-nothing, so a package that drifted is never left half-patched.
+# A forward dry run first keeps apply all-or-nothing, so a package that drifted is never left half-patched. Its
+# output names the files and hunks that failed, the only clue to why.
+dry_run=""
 applies_cleanly() {
-    patch -p"$strip" -N --dry-run --silent -d "$site_root" <"$patch_file" >/dev/null 2>&1
+    dry_run=$(patch -p"$strip" -N --dry-run -d "$site_root" <"$patch_file" 2>&1)
 }
 
 case $action in
@@ -39,6 +51,7 @@ case $action in
         elif applies_cleanly; then
             patch -p"$strip" -N -d "$site_root" <"$patch_file"
         else
+            printf '%s\n' "$dry_run" >&2
             echo "patch does not apply cleanly (partly applied, or the package changed); reinstall the package" >&2
             exit 1
         fi
@@ -49,6 +62,7 @@ case $action in
         elif applies_cleanly; then
             echo "not applied"
         else
+            printf '%s\n' "$dry_run" >&2
             echo "patch is partly applied, or the package changed; reinstall the package" >&2
             exit 1
         fi
@@ -59,6 +73,7 @@ case $action in
         elif applies_cleanly; then
             echo "not applied"
         else
+            printf '%s\n' "$dry_run" >&2
             echo "partial"
             exit 1
         fi
