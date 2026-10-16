@@ -8,9 +8,11 @@ planned_hours = 1.45
 image = "vllm/vllm-openai:nightly-49cb2bbf71cfd36ee5aa33d1e184b1cddff55294@sha256:a8d84c552462d1c60da4d7fc97f8f8f48a8fbfbf6820f73477fa0efe2571bf9d"
 count = 4
 min_cuda = "13.0"
-container_disk_gb = 60
-# 510 GB of weights plus the prompt corpus and logs.
-volume_gb = 600
+# The image plus the 510 GB of weights, which setup.sh keeps on container disk: the FUSE volume read them too slowly to
+# boot (README.md, attempt 6).
+container_disk_gb = 600
+# HF_HOME's small files, the prompt corpus, logs, and core dumps.
+volume_gb = 30
 needs_hf_token = false
 # Its one 4x host reached HF at 15 MB/s on 10-16, so the 510 GB download could not finish (README.md).
 avoid_data_centers = ["EUR-IS-2"]
