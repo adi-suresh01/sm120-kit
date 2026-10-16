@@ -226,6 +226,9 @@ pub struct Offer {
     pub rate_usd_hr: f64,
     /// The in-stock data centers outside the avoid list, in catalog order; empty when nothing is avoided.
     pub data_centers: Vec<String>,
+    /// Avoided ids the catalog names for no data center of this GPU. The list filtered nothing for them, which a
+    /// data center without stock and an id RunPod does not use both explain, so `quote` and `up` say so.
+    pub unlisted_avoided: Vec<String>,
 }
 
 /// With nothing to avoid, the create sends no list and RunPod places the pod anywhere it has stock.
@@ -253,6 +256,11 @@ pub fn offer_for(choice: &GpuChoice, count: u32, avoid: &[String], catalog: &[Ca
         count,
         rate_usd_hr: price * f64::from(count),
         data_centers,
+        unlisted_avoided: avoid
+            .iter()
+            .filter(|id| gpu.data_centers.iter().all(|dc| dc.id != **id))
+            .cloned()
+            .collect(),
     })
 }
 
@@ -355,8 +363,8 @@ pub struct CreatePodRequest {
     pub disk: u32,
     pub mounts: Mounts,
     pub cloud: CloudTier,
-    /// RunPod reads this as a preference, not a rule, so `up` also checks where the pod landed. Left out when
-    /// empty, so an issue that avoids nothing sends the body it always did.
+    /// The v2 schema calls these "preferred data centers for placement", so `up` also checks where the pod landed.
+    /// Left out when empty, so an issue that avoids nothing sends the body it always did.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub data_center_ids: Vec<String>,
     pub gpu: GpuRequest,
@@ -836,10 +844,35 @@ mod tests {
             (offer.data_centers, offer.rate_usd_hr),
             (vec!["CA-MTL-3".to_string()], 2.49)
         );
-        // An id the catalog does not list takes nothing away, and the catalog's order stays.
-        let offer = secure_avoiding(&x1, SERVER, &["EUR-IS-2"]).unwrap();
-        assert_eq!(offer.data_centers, ["CA-MTL-3", "EU-CZ-1"]);
-        assert!(secure_avoiding(&x1, SERVER, &[]).unwrap().data_centers.is_empty());
+        assert!(offer.unlisted_avoided.is_empty());
+        let nothing_avoided = secure_avoiding(&x1, SERVER, &[]).unwrap();
+        assert!(nothing_avoided.data_centers.is_empty() && nothing_avoided.unlisted_avoided.is_empty());
+        let gpu: CatalogGpu = serde_json::from_value(json!({
+            "id": SERVER, "price": {"secure": 2.49}, "maxCount": {"secure": 8}, "availability": "HIGH",
+            "dataCenters": [
+                {"id": "US-NC-1", "availability": "HIGH"}, {"id": "EUR-IS-2", "availability": "LOW"},
+                {"id": "CA-MTL-3", "availability": "MEDIUM"},
+            ],
+        }))
+        .unwrap();
+        let offer = secure_avoiding(&[gpu], SERVER, &["EUR-IS-2"]).unwrap();
+        assert_eq!(offer.data_centers, ["US-NC-1", "CA-MTL-3"]);
+    }
+
+    #[test]
+    fn an_offer_names_the_avoided_ids_the_catalog_lists_for_no_data_center() {
+        let x1 = gpus(SECURE_X1);
+        let offer = secure_avoiding(&x1, SERVER, &["EUR-IS-3", "EU-CZ-1", "US-NC-1"]).unwrap();
+        assert_eq!(offer.data_centers, ["CA-MTL-3"]);
+        assert_eq!(offer.unlisted_avoided, ["EUR-IS-3", "US-NC-1"]);
+        let offer = secure_avoiding(&x1, WORKSTATION, &["EUR-IS-3"]).unwrap();
+        assert_eq!(
+            (offer.data_centers, offer.unlisted_avoided),
+            (
+                vec!["EU-CZ-1".to_string(), "EU-RO-1".to_string()],
+                vec!["EUR-IS-3".to_string()]
+            )
+        );
     }
 
     #[test]

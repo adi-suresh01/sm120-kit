@@ -354,7 +354,12 @@ impl PodSpec {
         }
         let mut seen = BTreeSet::new();
         for id in &self.avoid_data_centers {
-            ensure!(!id.is_empty(), "pod.avoid_data_centers entries must not be empty");
+            // Ids match exactly, so "eur-is-2" or a stray space would avoid nothing and the pod would land there.
+            ensure!(
+                is_data_center_id(id),
+                "pod.avoid_data_centers entry {id:?} is not a RunPod data center id: uppercase letters, digits, and \
+                 dashes, ending in a digit, such as EUR-IS-2"
+            );
             ensure!(seen.insert(id), "pod.avoid_data_centers lists {id:?} more than once");
         }
         // The catalog lists data centers for secure stock only, so a community choice would ignore the list unseen.
@@ -452,6 +457,15 @@ fn is_apt_name(s: &str) -> bool {
         .is_some_and(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
         && s.bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'+' | b'-'))
+}
+
+/// The shape of RunPod's data center ids: EUR-IS-2, US-NC-1, CA-MTL-3.
+fn is_data_center_id(s: &str) -> bool {
+    s.bytes().next().is_some_and(|b| b.is_ascii_uppercase())
+        && s.bytes().last().is_some_and(|b| b.is_ascii_digit())
+        && s.contains('-')
+        && s.bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'-')
 }
 
 fn is_major_minor(s: &str) -> bool {
@@ -728,8 +742,12 @@ smoke_concurrency = 13
     #[test]
     fn reads_the_data_centers_to_avoid() {
         assert!(parse(&example()).unwrap().pod.avoid_data_centers.is_empty());
-        let spec = parse(&avoiding("[\"EUR-IS-2\", \"EUR-IS-1\"]").replace(COMMUNITY_CHOICE, "")).unwrap();
-        assert_eq!(spec.pod.avoid_data_centers, ["EUR-IS-2", "EUR-IS-1"]);
+        let list = "[\"EUR-IS-2\", \"US-NC-1\", \"CA-MTL-3\", \"EU-RO-1\"]";
+        let spec = parse(&avoiding(list).replace(COMMUNITY_CHOICE, "")).unwrap();
+        assert_eq!(
+            spec.pod.avoid_data_centers,
+            ["EUR-IS-2", "US-NC-1", "CA-MTL-3", "EU-RO-1"]
+        );
         // An empty list constrains nothing, so a community choice may sit beside it.
         assert!(parse(&avoiding("[]")).unwrap().pod.avoid_data_centers.is_empty());
     }
@@ -737,8 +755,23 @@ smoke_concurrency = 13
     #[test]
     fn rejects_an_avoid_list_that_could_not_hold() {
         assert!(example().contains(COMMUNITY_CHOICE));
-        let err = error_of(&avoiding("[\"EUR-IS-2\", \"\"]").replace(COMMUNITY_CHOICE, ""));
-        assert!(err.contains("avoid_data_centers entries must not be empty"), "{err}");
+        for bad in [
+            "",
+            "eur-is-2",
+            "EUR-IS-2 ",
+            " EUR-IS-2",
+            "EUR_IS_2",
+            "EURIS2",
+            "EUR-IS-",
+            "-IS-2",
+            "Eur-IS-2",
+        ] {
+            let err = error_of(&avoiding(&format!("[\"EUR-IS-1\", \"{bad}\"]")).replace(COMMUNITY_CHOICE, ""));
+            assert!(
+                err.contains(&format!("entry {bad:?} is not a RunPod data center id")),
+                "{bad:?}: {err}"
+            );
+        }
         let err = error_of(&avoiding("[\"EUR-IS-2\", \"US-NC-2\", \"EUR-IS-2\"]").replace(COMMUNITY_CHOICE, ""));
         assert!(err.contains("lists \"EUR-IS-2\" more than once"), "{err}");
         let err = error_of(&avoiding("[\"EUR-IS-2\"]"));

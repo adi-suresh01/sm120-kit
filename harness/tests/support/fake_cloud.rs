@@ -28,6 +28,7 @@ pub struct FakePod {
     pub pod: Pod,
     pub env: BTreeMap<String, String>,
     boot: VecDeque<PodStatus>,
+    placement: VecDeque<Option<String>>,
     pulls_left: usize,
 }
 
@@ -42,9 +43,9 @@ pub struct State {
     pub proxy_only: bool,
     /// RUNNING reads before the container starts, as while an uncached image pulls; `usize::MAX` never starts it.
     pub pull_reads: usize,
-    /// Where the scheduler places every pod, whatever the request preferred; reads report it, the create reply
-    /// does not.
-    pub data_center: Option<String>,
+    /// The data center a new pod reports on successive reads, whatever the request preferred; the last one repeats.
+    /// The create reply reports none.
+    pub placement: Vec<Option<String>>,
     /// Every create body sent, in order.
     pub requests: Vec<CreatePodRequest>,
     pub pods: Vec<FakePod>,
@@ -105,7 +106,7 @@ impl Default for FakeCloud {
             cost: Some(2.49),
             proxy_only: false,
             pull_reads: 0,
-            data_center: Some("EU-CZ-1".into()),
+            placement: vec![Some("EU-CZ-1".into())],
             requests: Vec::new(),
             pods: Vec::new(),
             unlisted: Vec::new(),
@@ -169,6 +170,7 @@ impl FakeCloud {
             pod: pod.clone(),
             env: request.env.clone(),
             boot: state.boot.iter().copied().collect(),
+            placement: state.placement.iter().cloned().collect(),
             pulls_left: state.pull_reads,
         };
         if listed {
@@ -243,11 +245,15 @@ impl Cloud for FakeCloud {
             return Ok(None);
         }
         let proxy_only = state.proxy_only;
-        let data_center = state.data_center.clone();
         let Some(fake) = state.pods.iter_mut().find(|fake| fake.pod.id == id) else {
             return Ok(None);
         };
-        fake.pod.data_center_id = data_center;
+        let placed = if fake.placement.len() > 1 {
+            fake.placement.pop_front()
+        } else {
+            fake.placement.front().cloned()
+        };
+        fake.pod.data_center_id = placed.flatten();
         if fake.boot.len() > 1 {
             fake.boot.pop_front();
         }

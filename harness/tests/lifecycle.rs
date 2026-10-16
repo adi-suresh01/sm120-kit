@@ -336,7 +336,7 @@ fn an_issue_that_avoids_nothing_sends_no_data_centers() {
 #[test]
 fn each_choice_asks_for_its_in_stock_data_centers_outside_the_avoid_list() {
     let w = World::default();
-    w.cloud.0.borrow_mut().data_center = Some("EU-RO-1".into());
+    w.cloud.0.borrow_mut().placement = vec![Some("EU-RO-1".into())];
     w.cloud.script(&[Create::Refused(400), Create::Made]);
     let spec = avoiding("[\"EU-CZ-1\"]");
     w.with(|ctx| pod::up(ctx, &spec, true, AfterFailure::KeepPod)).unwrap();
@@ -354,6 +354,21 @@ fn each_choice_asks_for_its_in_stock_data_centers_outside_the_avoid_list() {
         events.contains("Workstation Edition SECURE $2.59/hr in EU-RO-1"),
         "{events}"
     );
+    assert!(!events.contains("names for no data center"), "{events}");
+}
+
+#[test]
+fn quote_warns_once_about_avoided_ids_the_catalog_does_not_list() {
+    let w = World::default();
+    let spec = avoiding("[\"EU-CZ-1\", \"EUR-IS-2\", \"US-NC-1\"]");
+    w.with(|ctx| budget::quote(ctx, &spec)).unwrap();
+    let events = w.events();
+    let warning = "pod.avoid_data_centers lists EUR-IS-2, US-NC-1, which the catalog names for no data center of 1x \
+                   NVIDIA RTX PRO 6000 Blackwell Server Edition";
+    assert_eq!(events.matches(warning).count(), 1, "{events}");
+    assert_eq!(events.matches("names for no data center").count(), 1, "{events}");
+    assert!(events.contains("\"data_centers\":[\"CA-MTL-3\"]"), "{events}");
+    assert!(w.ledger().pods.is_empty());
 }
 
 #[test]
@@ -381,14 +396,47 @@ fn a_pod_placed_in_an_avoided_data_center_is_terminated_before_setup() {
 }
 
 #[test]
-fn a_pod_that_reports_no_data_center_comes_up_with_a_warning() {
+fn a_pod_reported_in_an_avoided_data_center_only_on_a_later_read_is_terminated() {
     let w = World::default();
-    w.cloud.0.borrow_mut().data_center = None;
+    {
+        let mut state = w.cloud.0.borrow_mut();
+        state.pull_reads = PULL_READS;
+        state.placement = [vec![None; 10], vec![Some("EU-CZ-1".into())]].concat();
+    }
     let spec = avoiding("[\"EU-CZ-1\"]");
-    w.with(|ctx| pod::up(ctx, &spec, true, AfterFailure::KeepPod)).unwrap();
-    let events = w.events();
-    assert_eq!(events.matches("went unchecked after placement").count(), 1, "{events}");
-    assert_eq!(w.states(), [PodState::Live]);
+    let err = err_text(w.with(|ctx| pod::up(ctx, &spec, true, AfterFailure::KeepPod)));
+    assert!(
+        err.contains("in data center EU-CZ-1, which pod.avoid_data_centers excludes"),
+        "{err}"
+    );
+    // The 11th read named it, while the image still pulled.
+    assert_eq!(waited(&w), Duration::from_secs(110));
+    let entry = &w.ledger().pods[0];
+    assert_eq!(entry.state, PodState::Terminated);
+    assert!(entry.cost_usd.is_some_and(|cost| cost > 0.0), "{entry:?}");
+    assert!(w.cloud.billing_pods().is_empty());
+    assert!(w.remote.uploads.borrow().is_empty() && w.remote.jobs.borrow().is_empty());
+}
+
+#[test]
+fn a_pod_reported_in_no_data_center_on_any_read_comes_up_with_a_warning() {
+    for (placement, warnings) in [(vec![None], 1), (vec![Some("CA-MTL-3".to_string()), None], 0)] {
+        let w = World::default();
+        {
+            let mut state = w.cloud.0.borrow_mut();
+            state.placement = placement.clone();
+            state.pull_reads = 2;
+        }
+        let spec = avoiding("[\"EU-CZ-1\"]");
+        w.with(|ctx| pod::up(ctx, &spec, true, AfterFailure::KeepPod)).unwrap();
+        let events = w.events();
+        assert_eq!(
+            events.matches("went unchecked after placement").count(),
+            warnings,
+            "{placement:?}: {events}"
+        );
+        assert_eq!(w.states(), [PodState::Live]);
+    }
 }
 
 #[test]

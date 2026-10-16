@@ -114,5 +114,17 @@ pub fn emit_quote(ctx: &Ctx, spec: &IssueSpec, offers: &[Offer], remaining: Opti
         fields["data_centers"] = json!(first.data_centers);
     }
     ctx.events.emit(Some(&spec.issue), Kind::Quote, fields);
+    if !first.unlisted_avoided.is_empty() {
+        ctx.warn(
+            &spec.issue,
+            format!(
+                "pod.avoid_data_centers lists {}, which the catalog names for no data center of {}x {}: either it \
+                 has no stock there now, or RunPod uses no such id and the list does not avoid what was meant",
+                first.unlisted_avoided.join(", "),
+                first.count,
+                first.gpu
+            ),
+        );
+    }
     Ok(())
 }

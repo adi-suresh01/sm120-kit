@@ -480,6 +480,7 @@ mod tests {
             count: 1,
             rate_usd_hr: rate,
             data_centers: Vec::new(),
+            unlisted_avoided: Vec::new(),
         }
     }
 

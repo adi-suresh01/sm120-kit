@@ -227,6 +227,7 @@ mod tests {
             count: 1,
             rate_usd_hr: 2.0,
             data_centers: Vec::new(),
+            unlisted_avoided: Vec::new(),
         };
         ledger
             .reserve("sm120-vllm-47990-aaaaaa", &offer, 1.0, at("2026-10-16T17:00:00Z"))

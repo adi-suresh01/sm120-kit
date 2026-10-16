@@ -585,8 +585,8 @@ fn check_rate(ctx: &Ctx, issue: &str, entry: &PodEntry, pod: &Pod, warned: &mut 
     }
 }
 
-/// RunPod takes `dataCenterIds` as a preference only, so a pod can still land where the issue's setup cannot
-/// finish; ending it before setup costs minutes instead of the whole budget.
+/// The v2 schema calls `dataCenterIds` preferred data centers, so the placement is checked too: a pod in an avoided
+/// data center, where setup may never finish, ends before setup at a cost of minutes instead of the whole budget.
 fn check_placement(entry: &PodEntry, pod: &Pod, avoid: &[String]) -> Result<()> {
     match &pod.data_center_id {
         Some(dc) if avoid.contains(dc) => bail!(
@@ -602,9 +602,11 @@ fn wait_ready(ctx: &Ctx, issue: &str, entry: &PodEntry, mut pod: Pod, avoid: &[S
     let mut warned_no_cost = false;
     let mut warned_no_container = false;
     let mut proxy_only_since = None;
+    let mut placed = false;
     loop {
         check_rate(ctx, issue, entry, &pod, &mut warned_no_cost)?;
         check_placement(entry, &pod, avoid)?;
+        placed |= pod.data_center_id.is_some();
         let now = ctx.clock.now();
         match pod.status {
             PodStatus::Exited | PodStatus::Error | PodStatus::Terminated => {
@@ -615,12 +617,12 @@ fn wait_ready(ctx: &Ctx, issue: &str, entry: &PodEntry, mut pod: Pod, avoid: &[S
                     proxy_only_since = None;
                     let target = ctx.target(issue, &entry.name, endpoint);
                     if ctx.remote.reachable(&target) {
-                        if !avoid.is_empty() && pod.data_center_id.is_none() {
+                        if !avoid.is_empty() && !placed {
                             ctx.warn(
                                 issue,
                                 format!(
-                                    "RunPod reports no data center for pod {}, so pod.avoid_data_centers went \
-                                     unchecked after placement",
+                                    "RunPod reported no data center for pod {} on any read, so \
+                                     pod.avoid_data_centers went unchecked after placement",
                                     entry.name
                                 ),
                             );
