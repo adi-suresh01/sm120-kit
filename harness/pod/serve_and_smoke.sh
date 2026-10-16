@@ -62,6 +62,9 @@ stop_post() {
 # The post group goes first: the outer timeout kills this script 30 s after its TERM, and stop_server can take
 # longer than that.
 trap 'stop_post; stop_server' EXIT
+# GNU timeout sends TERM to this script and then to its group; bash dying of that second signal often skips the EXIT
+# trap, which would leave the post group running. Exiting on the signal makes the EXIT trap run.
+trap 'exit 143' TERM INT HUP
 
 fatal_in_log() {
     [[ -n ${FAIL_PATTERN:-} ]] && grep -qE "$FAIL_PATTERN" "$log_file"

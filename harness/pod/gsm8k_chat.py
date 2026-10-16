@@ -8,7 +8,8 @@ template instead of as a raw prompt, it stops only on "Question:" (eval_offline.
 max_tokens follows max_model_len (see max_tokens) instead of a fixed 512.
 Each reply goes to <out_dir>/gsm8k_responses.jsonl as it lands, so a run cut short keeps what it got. Then a line of
 counts, and "Score: <accuracy>", the line verdict.sh also reads from sglang's run_eval. A request that timed out
-scores as a wrong answer; one that failed fails the run, with no Score line (see main for why).
+scores as a wrong answer; one that failed, or a run where every request timed out, fails with no Score line (see
+main for why).
 Usage: gsm8k_chat.py <port> <model> <questions> <out_dir>
   GSM8K_DIR (default /workspace/gsm8k) caches the data; GSM8K_MAX_TOKENS (default 4096) caps each reply;
   GSM8K_TIMEOUT_S replaces the per-request timeout that request_timeout derives from max_tokens.
@@ -265,13 +266,15 @@ def main():
         "retried": sum(row["attempts"] > 1 for row in rows),
     }
     print("gsm8k: " + " ".join(f"{key}={value}" for key, value in counts.items()), flush=True)
-    # A timed-out request scores as wrong and the run still scores. On a server that is still up, a reply that does
-    # not finish in time is a model that does not stop, which is what garbage does; failing the run would turn that
-    # into a run with no score. A server that died, faulted, or went quiet is for the watchdog to report. A failed
-    # request is different: the server refused or dropped it, so a score would count the server's errors as the
-    # model's answers.
+    # A model that never stops ends on max_tokens, not on a timeout, so a timeout means a slow or partly stuck server
+    # that still logs enough to dodge the stall watchdog. A few of those score as wrong and the run still scores,
+    # with timed_out above to read next to it. With no reply at all, a 0.000 would read exactly like garbage output,
+    # so there is no score. A failed request is different: the server refused or dropped it, so a score would count
+    # the server's errors as the model's answers.
     if failed:
         sys.exit(f"gsm8k: {len(failed)}/{count} requests failed against the server; first: {failed[0]['error']}")
+    if not answered:
+        sys.exit(f"gsm8k: none of {count} requests got a reply before timing out")
     print(f"Score: {counts['correct'] / count:.3f}", flush=True)
 
 

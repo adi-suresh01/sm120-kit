@@ -88,8 +88,9 @@ bench = [[1, 8], [16, 64], [64, 256]]
   `max_model_len - 2048` from `/v1/models`, and under 256 fails the run: vLLM refuses a prompt plus `max_tokens`
   over `max_model_len`, and a model generating garbage runs every reply to the cap. Each reply is written as it
   lands. A request that times out (after 600 s plus 0.25 s per `max_tokens`, or `GSM8K_TIMEOUT_S`) scores as wrong
-  and is counted, since a model that does not stop is what garbage looks like; one that fails (a 5xx or dropped
-  connection after 3 tries, any other error at once) fails the run. The verdict's `gsm8k_counts` carries the
+  and is counted (a model that never stops ends on `max_tokens`, so a timeout means a slow server; read
+  `timed_out` next to the score), and a run where every request timed out has no score; one that fails (a 5xx or
+  dropped connection after 3 tries, any other error at once) fails the run. The verdict's `gsm8k_counts` carries the
   counts behind the score: `hit_max_tokens` (with the stop on `Question:` a healthy reply ends on its own, so this
   flags garbage even after a right answer), `no_number`, `empty_content` (a reasoning model cut off mid-thought;
   its reasoning is kept in the row but never scored), `timed_out`, `failed`, and `retried`. `gsm8k` is at most
