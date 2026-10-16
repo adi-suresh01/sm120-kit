@@ -5,5 +5,81 @@
     "approved_at": "2026-10-16T12:40:25Z",
     "note": "Aditya approved 2026-10-16: 4x RTX PRO 6000 Server Edition SECURE, 9.96/hr, planned 3.5h, quote 38.35 worst case, expected 20-26"
   },
-  "pods": []
+  "pods": [
+    {
+      "name": "sm120-vllm-56771-e501f7",
+      "id": "og6dvhj27y38ax",
+      "state": "terminated",
+      "gpu": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+      "count": 4,
+      "cloud": "SECURE",
+      "rate_usd_hr": 9.96,
+      "reserved_usd": 38.346,
+      "reserved_at": "2026-10-16T13:23:14Z",
+      "deadline": "2026-10-16T16:53:14Z",
+      "terminated_at": "2026-10-16T13:26:17Z",
+      "cost_usd": 0.5183490449562669,
+      "cost_source": "billing"
+    },
+    {
+      "name": "sm120-vllm-56771-fdb916",
+      "id": "5d32n8403t7f03",
+      "state": "terminated",
+      "gpu": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+      "count": 4,
+      "cloud": "SECURE",
+      "rate_usd_hr": 9.96,
+      "reserved_usd": 38.346,
+      "reserved_at": "2026-10-16T13:26:34Z",
+      "deadline": "2026-10-16T16:56:34Z",
+      "terminated_at": "2026-10-16T13:29:38Z",
+      "cost_usd": 0.5276285563595593,
+      "cost_source": "billing"
+    },
+    {
+      "name": "sm120-vllm-56771-4f142b",
+      "id": "0jh3l576aj9dk5",
+      "state": "terminated",
+      "gpu": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+      "count": 4,
+      "cloud": "SECURE",
+      "rate_usd_hr": 9.96,
+      "reserved_usd": 38.346,
+      "reserved_at": "2026-10-16T13:38:16Z",
+      "deadline": "2026-10-16T17:08:16Z",
+      "terminated_at": "2026-10-16T15:55:28Z",
+      "cost_usd": 22.7752,
+      "cost_source": "estimate"
+    },
+    {
+      "name": "sm120-vllm-56771-032d83",
+      "id": "9na18p5qk18n04",
+      "state": "terminated",
+      "gpu": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+      "count": 4,
+      "cloud": "SECURE",
+      "rate_usd_hr": 9.96,
+      "reserved_usd": 16.17836,
+      "reserved_at": "2026-10-16T15:56:53Z",
+      "deadline": "2026-10-16T17:25:29Z",
+      "terminated_at": "2026-10-16T16:02:02Z",
+      "cost_usd": 0.8549000000000001,
+      "cost_source": "estimate"
+    },
+    {
+      "name": "sm120-vllm-56771-6cf612",
+      "id": "px9mcxm9t3yv5i",
+      "state": "terminated",
+      "gpu": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+      "count": 4,
+      "cloud": "SECURE",
+      "rate_usd_hr": 9.96,
+      "reserved_usd": 15.323183333333334,
+      "reserved_at": "2026-10-16T16:03:01Z",
+      "deadline": "2026-10-16T17:26:56Z",
+      "terminated_at": "2026-10-16T16:06:04Z",
+      "cost_usd": 0.5063,
+      "cost_source": "estimate"
+    }
+  ]
 }

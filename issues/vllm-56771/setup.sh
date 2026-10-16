@@ -36,8 +36,8 @@ before=$(du -sb "$HF_HOME" | cut -f1)
 start=$(date +%s)
 HF_XET_HIGH_PERFORMANCE=1 python3 -c "from huggingface_hub import snapshot_download; print(snapshot_download('$model', revision='$revision', max_workers=16))" &
 dl=$!
-# A host whose /workspace is a network mount (MooseFS on EUR-IS-2, 10-16) took 1h48m for 60 of the 510 GB, two
-# hours of a 4-GPU pod for nothing; under min_mb_s the download cannot finish inside the budget, so stop at 3 min.
+# The EUR-IS-2 host (10-16) reached HF at 15 MB/s and took 1h48m for 60 of the 510 GB, two hours of a 4-GPU pod for
+# nothing; under min_mb_s the download cannot finish inside the budget, so stop at 3 min.
 min_mb_s=400
 for _ in $(seq 36); do
     kill -0 "$dl" 2>/dev/null || break

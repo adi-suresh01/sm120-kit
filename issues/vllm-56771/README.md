@@ -90,10 +90,16 @@ Host RAM must be at least 256 GB for the pinned Engram tables; `setup.sh` stops 
 
 ## Results
 
-### Attempts 1-3 (2026-10-16, no run, $23.82)
+### Attempts 1-5 (2026-10-16, no run, $25.19)
 
-Two pods ended as "proxy-only" while the uncached 9.6 GB nightly image pulled (a harness bug, fixed in 2f34e1b),
-$0.52 and $0.53. The third (sm120-vllm-56771-4f142b, EUR-IS-2) waited 25 min for the image, then sat in
-`setup.sh` for 1h52m: its /workspace was a MooseFS network mount (`mfs#eur-is-2.runpod.net`) and the weights came
-down at 6-9 MB/s, 60 of 510 GB. Terminated by hand at 15:55Z, $22.78. `setup.sh` now measures the download for 3
-min and stops under 400 MB/s, and the retry fits the $16.18 left: `planned_hours = 1.6`, a1 then a0, g0 dropped.
+- Pods 1 and 2 ended as "proxy-only" while the uncached 9.6 GB nightly image pulled (a harness bug, fixed in
+  2f34e1b), $0.52 and $0.53.
+- Pod 3 (sm120-vllm-56771-4f142b, EUR-IS-2, host 81.27.69.177) waited 25 min for the image, then sat in
+  `setup.sh` for 1h52m: the weights came down at 6-9 MB/s, 60 of 510 GB. Terminated by hand at 15:55Z, $22.78.
+- Pod 4 landed on the same host. `setup.sh` now times the first 3 min of the download and stops under 400 MB/s;
+  it stopped there, $0.85.
+- Pod 5 (no setup, $0.51) measured the host: container disk writes 1.2 GB/s, /workspace (a MooseFS fuse mount)
+  130 MB/s, and one HF shard downloads at 15 MB/s. The host's network is the limit, not the disk: 510 GB would
+  take over 9 h. The host has 728 GB of RAM.
+- The live catalog (count 4, CUDA >= 13.0) lists 4x Server Edition stock only in EUR-IS-2, SECURE; community has
+  none. Waiting for stock elsewhere, with the harness told to avoid EUR-IS-2.
