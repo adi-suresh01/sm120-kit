@@ -35,8 +35,13 @@ pub struct State {
     pub pods: Vec<FakePod>,
     pub unlisted: Vec<FakePod>,
     pub get_error: Option<u16>,
+    /// GET answers 404 for every pod, as RunPod does for a pod the key cannot see.
+    pub get_not_found: bool,
+    /// The pod list leaves out every pod while GET still finds them.
+    pub list_omits_all: bool,
     pub delete_error: Option<u16>,
     pub delete_ignored: bool,
+    pub account: Option<String>,
     pub billing: Option<f64>,
     pub interrupt_on_create: Option<Rc<AtomicBool>>,
     pub create_calls: usize,
@@ -69,8 +74,11 @@ impl Default for FakeCloud {
             pods: Vec::new(),
             unlisted: Vec::new(),
             get_error: None,
+            get_not_found: false,
+            list_omits_all: false,
             delete_error: None,
             delete_ignored: false,
+            account: Some("org-sm120".into()),
             billing: None,
             interrupt_on_create: None,
             create_calls: 0,
@@ -169,13 +177,20 @@ impl Cloud for FakeCloud {
     }
 
     fn list_pods(&self) -> Result<Vec<Pod>, CloudError> {
-        Ok(self.0.borrow().pods.iter().map(|fake| fake.pod.clone()).collect())
+        let state = self.0.borrow();
+        if state.list_omits_all {
+            return Ok(Vec::new());
+        }
+        Ok(state.pods.iter().map(|fake| fake.pod.clone()).collect())
     }
 
     fn get_pod(&self, id: &str) -> Result<Option<Pod>, CloudError> {
         let mut state = self.0.borrow_mut();
         if let Some(status) = state.get_error {
             return Err(http(status));
+        }
+        if state.get_not_found {
+            return Ok(None);
         }
         let Some(fake) = state.pods.iter_mut().find(|fake| fake.pod.id == id) else {
             return Ok(None);
@@ -208,5 +223,9 @@ impl Cloud for FakeCloud {
 
     fn pod_billing_usd(&self, _: &str) -> Result<Option<f64>, CloudError> {
         Ok(self.0.borrow().billing)
+    }
+
+    fn account(&self) -> Result<Option<String>, CloudError> {
+        Ok(self.0.borrow().account.clone())
     }
 }

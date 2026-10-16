@@ -90,13 +90,29 @@ pub fn reap(ctx: &Ctx) -> Result<()> {
     for action in decide(&ledgers, &pods, ctx.clock.now()) {
         if let Err(e) = apply(ctx, &action) {
             ctx.events.emit(
-                None,
+                action_issue(ctx, &action),
                 Kind::Error,
                 json!({"detail": format!("reaper action {action:?} failed: {e:#}")}),
             );
         }
     }
     Ok(())
+}
+
+/// Where the action's events go: its ledger's issue, or for an untracked pod the issue its name points at, so
+/// a monitor tailing one issue's events sees everything about that issue's pods.
+fn action_issue<'a>(ctx: &Ctx, action: &'a Action) -> Option<&'a str> {
+    match action {
+        Action::Terminate { issue, .. }
+        | Action::MarkGone { issue, .. }
+        | Action::Adopt { issue, .. }
+        | Action::Release { issue, .. } => Some(issue),
+        Action::WarnUntracked { name, .. } => name
+            .strip_prefix("sm120-")
+            .and_then(|rest| rest.rsplit_once('-'))
+            .map(|(issue, _)| issue)
+            .filter(|issue| pod::is_pod_of(issue, name) && ctx.repo.join("issues").join(issue).is_dir()),
+    }
 }
 
 /// Each change re-checks the entry under the ledger lock, since another harness process may have moved it on.
@@ -115,8 +131,8 @@ fn apply(ctx: &Ctx, action: &Action) -> Result<()> {
             }
         }
         Action::MarkGone { issue, name } => {
-            ctx.events.emit(Some(issue), Kind::Reap, json!({"pod": name, "action": "mark_gone"}));
             pod::mark_gone(ctx, issue, name)?;
+            ctx.events.emit(Some(issue), Kind::Reap, json!({"pod": name, "action": "mark_gone"}));
         }
         Action::Adopt { issue, name, id } => {
             ctx.ledger(issue).update(|ledger| {
@@ -139,7 +155,7 @@ fn apply(ctx: &Ctx, action: &Action) -> Result<()> {
             ctx.events.emit(Some(issue), Kind::Reap, json!({"pod": name, "action": "release"}));
         }
         Action::WarnUntracked { name, id } => ctx.events.emit(
-            None,
+            action_issue(ctx, action),
             Kind::Warn,
             json!({"pod": name, "id": id, "detail": "sm120 pod that no ledger tracks; not terminated, check it by hand"}),
         ),

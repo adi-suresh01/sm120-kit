@@ -8,9 +8,9 @@ use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand};
 use serde_json::json;
 use sm120_harness::clock::SystemClock;
-use sm120_harness::cloud::{API_BASE, RunpodRest};
+use sm120_harness::cloud::{API_BASE, Cloud, RunpodRest};
 use sm120_harness::events::{Events, Kind};
-use sm120_harness::ledger::Budget;
+use sm120_harness::ledger::{Budget, check_accounts};
 use sm120_harness::pod::{self, Ctx, cents};
 use sm120_harness::session::{Remote, SshRemote};
 use sm120_harness::spec::{IssueSpec, is_slug};
@@ -116,6 +116,8 @@ fn run(cli: Cli) -> Result<()> {
     let clock = SystemClock;
     let cloud = RunpodRest::new(API_BASE, &api_key, &clock);
     let events = Events::new(&repo.join("results"), &clock, true);
+    let account = cloud.account().context("reading the key's RunPod organization")?;
+    check_accounts(&repo, account.as_deref())?;
     let ctx = Ctx {
         repo: &repo,
         cloud: &cloud,
@@ -123,6 +125,7 @@ fn run(cli: Cli) -> Result<()> {
         clock: &clock,
         events: &events,
         interrupted: &interrupted,
+        account: account.as_deref(),
     };
     let reaped = reap::reap(&ctx);
     if let Command::Reap = cli.command {

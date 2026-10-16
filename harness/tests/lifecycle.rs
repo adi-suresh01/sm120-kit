@@ -7,10 +7,10 @@ use std::rc::Rc;
 use std::sync::atomic::AtomicBool;
 
 use jiff::SignedDuration;
-use sm120_harness::cloud::PodStatus;
+use sm120_harness::cloud::{Cloud, PodStatus};
 use sm120_harness::events::Events;
 use sm120_harness::exec;
-use sm120_harness::ledger::{Budget, CostSource, Ledger, LedgerStore, PodState};
+use sm120_harness::ledger::{Budget, CostSource, Ledger, LedgerStore, PodState, check_accounts};
 use sm120_harness::pod::{self, Ctx};
 use sm120_harness::reap;
 use sm120_harness::spec::IssueSpec;
@@ -79,6 +79,8 @@ impl World {
     /// Another checkout of the repo against the same RunPod account.
     fn with_repo<T>(&self, repo: &Path, f: impl FnOnce(&Ctx) -> T) -> T {
         let events = Events::new(&repo.join("results"), &self.clock, false);
+        // As main does: the key's account once per command.
+        let account = self.cloud.account().unwrap();
         let ctx = Ctx {
             repo,
             cloud: &self.cloud,
@@ -86,6 +88,7 @@ impl World {
             clock: &self.clock,
             events: &events,
             interrupted: &self.interrupted,
+            account: account.as_deref(),
         };
         f(&ctx)
     }
@@ -379,7 +382,10 @@ fn a_reverted_ledger_cannot_free_the_live_pod_budget() {
     // `git restore issues/` while the pod runs.
     fs::write(&path, committed).unwrap();
     let err = err_text(w.up());
-    assert!(err.contains("does not track it") && err.contains("its deadline"), "{err}");
+    assert!(
+        err.contains("does not track it") && err.contains("its deadline"),
+        "{err}"
+    );
     assert_eq!(w.cloud.0.borrow().create_calls, 1);
     assert!(w.ledger().pods.is_empty());
 }
@@ -389,7 +395,12 @@ fn pods_of_another_issue_or_already_ended_do_not_block_up() {
     let w = World::default();
     let stage2 = "vllm-47990-stage2";
     fs::create_dir_all(w.repo.path().join("issues").join(stage2)).unwrap();
-    let other = IssueSpec::parse(&SPEC.replace("\"vllm-47990\"", &format!("\"{stage2}\"")), stage2, |_| true).unwrap();
+    let other = IssueSpec::parse(
+        &SPEC.replace("\"vllm-47990\"", &format!("\"{stage2}\"")),
+        stage2,
+        |_| true,
+    )
+    .unwrap();
     LedgerStore::new(w.repo.path(), stage2)
         .update(|ledger| {
             ledger.budget = w.ledger().budget;
@@ -461,6 +472,67 @@ fn a_delete_that_does_not_take_keeps_the_pod_live_in_the_ledger() {
 
 fn run_reaper(w: &World) {
     w.with(reap::reap).unwrap();
+}
+
+#[test]
+fn a_404_that_the_pod_list_contradicts_keeps_the_pod_live() {
+    let w = World::default();
+    w.up().unwrap();
+    {
+        let mut state = w.cloud.0.borrow_mut();
+        state.get_not_found = true;
+        state.delete_ignored = true;
+    }
+    let err = err_text(w.with(|ctx| pod::down(ctx, ISSUE)));
+    assert!(err.contains("the pod list shows it Running"), "{err}");
+    assert_eq!(w.states(), [PodState::Live]);
+    w.assert_every_billing_pod_is_tracked();
+}
+
+#[test]
+fn the_reaper_confirms_a_missing_pod_with_a_get_before_booking_it() {
+    let w = World::default();
+    w.up().unwrap();
+    w.cloud.0.borrow_mut().list_omits_all = true;
+    run_reaper(&w);
+    assert_eq!(w.states(), [PodState::Live]);
+    assert!(w.events().contains("GET shows it Running"), "{}", w.events());
+    w.assert_every_billing_pod_is_tracked();
+    w.cloud.0.borrow_mut().list_omits_all = false;
+    let id = w.ledger().pods[0].id.clone().unwrap();
+    w.cloud.remove_outside_harness(&id);
+    run_reaper(&w);
+    assert_eq!(w.states(), [PodState::Terminated]);
+}
+
+#[test]
+fn the_ledger_records_the_account_and_refuses_another() {
+    let w = World::default();
+    w.up().unwrap();
+    assert_eq!(w.ledger().account.as_deref(), Some("org-sm120"));
+    w.with(|ctx| check_accounts(ctx.repo, ctx.account)).unwrap();
+    w.cloud.0.borrow_mut().account = Some("org-other".into());
+    let err = err_text(w.with(|ctx| check_accounts(ctx.repo, ctx.account)));
+    assert!(
+        err.contains("belongs to RunPod organization org-sm120") && err.contains("org-other"),
+        "{err}"
+    );
+    let err = err_text(w.with(|ctx| pod::down(ctx, ISSUE)));
+    assert!(err.contains("org-other"), "{err}");
+    w.cloud.0.borrow_mut().account = None;
+    let err = err_text(w.with(|ctx| check_accounts(ctx.repo, ctx.account)));
+    assert!(err.contains("cannot tell it is the same account"), "{err}");
+    assert_eq!(w.states(), [PodState::Live]);
+}
+
+#[test]
+fn a_key_without_an_organization_records_nothing() {
+    let w = World::default();
+    w.cloud.0.borrow_mut().account = None;
+    w.up().unwrap();
+    assert_eq!(w.ledger().account, None);
+    w.cloud.0.borrow_mut().account = Some("org-sm120".into());
+    w.with(|ctx| check_accounts(ctx.repo, ctx.account)).unwrap();
 }
 
 #[test]
@@ -553,18 +625,18 @@ fn the_reaper_books_a_vanished_pod_up_to_its_deadline() {
 fn the_reaper_never_deletes_an_untracked_pod() {
     let w = World::default();
     w.up().unwrap();
-    let ledger = LedgerStore::new(w.repo.path(), ISSUE);
-    ledger
-        .update(|l| {
+    w.with(|ctx| {
+        ctx.ledger(ISSUE).update(|l| {
             l.pods.clear();
             Ok(())
         })
-        .unwrap();
+    })
+    .unwrap();
     w.clock.advance(SignedDuration::from_hours(5));
     run_reaper(&w);
     assert_eq!(w.cloud.billing_pods().len(), 1);
-    let general = fs::read_to_string(w.repo.path().join("results/harness-events.jsonl")).unwrap();
-    assert!(general.contains("no ledger tracks"), "{general}");
+    // The name points at this issue, so the warning lands where a monitor of the issue looks.
+    assert!(w.events().contains("no ledger tracks"), "{}", w.events());
 }
 
 fn run(w: &World, variants: &[&str]) -> anyhow::Result<()> {

@@ -41,11 +41,13 @@ pub struct Ctx<'a> {
     pub clock: &'a dyn Clock,
     pub events: &'a Events<'a>,
     pub interrupted: &'a AtomicBool,
+    /// From `Cloud::account`, read once per command.
+    pub account: Option<&'a str>,
 }
 
 impl Ctx<'_> {
     pub fn ledger(&self, issue: &str) -> LedgerStore {
-        LedgerStore::new(self.repo, issue)
+        LedgerStore::new(self.repo, issue).with_account(self.account)
     }
 
     pub fn check_interrupted(&self) -> Result<()> {
@@ -544,22 +546,45 @@ pub fn terminate(ctx: &Ctx, issue: &str, entry: &PodEntry) -> Result<()> {
     Ok(())
 }
 
+fn still_billing(pod: Option<Pod>) -> Option<PodStatus> {
+    pod.map(|pod| pod.status)
+        .filter(|status| *status != PodStatus::Terminated)
+}
+
+/// RunPod answers 404 both for a deleted pod and for one this key cannot see, so a GET that says gone counts only
+/// when the full pod list agrees.
 fn confirm_gone(ctx: &Ctx, id: &str) -> Result<()> {
+    let mut seen = String::new();
     for check in 0..GONE_CHECKS {
         if check > 0 {
             ctx.clock.sleep(POLL);
         }
-        match ctx.cloud.get_pod(id)? {
+        if let Some(status) = still_billing(ctx.cloud.get_pod(id)?) {
+            seen = format!("GET shows it {status:?}");
+            continue;
+        }
+        let pods = ctx.cloud.list_pods()?;
+        match still_billing(pods.into_iter().find(|pod| pod.id == id)) {
+            Some(status) => seen = format!("GET finds no pod, but the pod list shows it {status:?}"),
             None => return Ok(()),
-            Some(pod) if pod.status == PodStatus::Terminated => return Ok(()),
-            Some(_) => {}
         }
     }
-    bail!("pod {id} is still listed after delete and may still bill")
+    bail!("pod {id} may still bill after delete ({seen}); it stays live in the ledger")
 }
 
-/// The reaper's path for a live pod that RunPod no longer lists.
+/// The reaper's path for a live pod missing from a complete pod list. A GET must agree, so a list that briefly
+/// drops a pod never books one that still bills.
 pub fn mark_gone(ctx: &Ctx, issue: &str, name: &str) -> Result<()> {
+    let ledger = ctx.ledger(issue).load()?;
+    let Some(entry) = ledger.pods.iter().find(|entry| entry.name == name) else {
+        bail!("ledger for {issue} has no pod named {name}");
+    };
+    let id = entry.id.as_deref().context("live pod without an id")?;
+    if let Some(status) = still_billing(ctx.cloud.get_pod(id)?) {
+        bail!(
+            "pod {name} ({id}) is missing from the pod list but GET shows it {status:?}; it stays live in the ledger"
+        );
+    }
     let now = ctx.clock.now();
     let entry = ctx.ledger(issue).update(|ledger| {
         let entry = ledger.entry_mut(name)?;

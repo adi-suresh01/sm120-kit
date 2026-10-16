@@ -20,6 +20,10 @@ pub const BILLING_SETTLE: SignedDuration = SignedDuration::from_hours(24);
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Ledger {
     pub issue: String,
+    /// The RunPod organization whose key wrote the ledger, when the key can tell. Another account's key gets 404
+    /// for these pods, which must never be read as "terminated".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
     pub budget: Option<Budget>,
     pub pods: Vec<PodEntry>,
 }
@@ -107,8 +111,28 @@ impl Ledger {
     pub fn new(issue: &str) -> Self {
         Self {
             issue: issue.to_string(),
+            account: None,
             budget: None,
             pods: Vec::new(),
+        }
+    }
+
+    /// A key that cannot name its organization is refused only once the ledger has recorded one: it might belong
+    /// to another account, and the fingerprint exists to stop exactly that.
+    pub fn check_account(&self, current: Option<&str>) -> Result<()> {
+        match (self.account.as_deref(), current) {
+            (Some(recorded), Some(current)) if recorded != current => bail!(
+                "issues/{}/harness-ledger.json belongs to RunPod organization {recorded}, but RUNPOD_API_KEY belongs to \
+                 {current}; that key gets 404 for this ledger's pods, so the harness stops before reading one as gone",
+                self.issue
+            ),
+            (Some(recorded), None) => bail!(
+                "issues/{}/harness-ledger.json belongs to RunPod organization {recorded}, and RUNPOD_API_KEY cannot \
+                 read GET /v2/organization, so the harness cannot tell it is the same account; use a key with \
+                 membership read",
+                self.issue
+            ),
+            _ => Ok(()),
         }
     }
 
@@ -324,6 +348,18 @@ pub struct LedgerStore {
     issue: String,
     path: PathBuf,
     lock_path: PathBuf,
+    account: Option<String>,
+}
+
+/// Run before anything reads a 404 as "gone": every ledger that loads must match the key's account. A ledger that
+/// does not load is left to the reaper, which reports it.
+pub fn check_accounts(repo: &Path, current: Option<&str>) -> Result<()> {
+    for store in LedgerStore::all(repo)? {
+        if let Ok(ledger) = store.load() {
+            ledger.check_account(current)?;
+        }
+    }
+    Ok(())
 }
 
 impl LedgerStore {
@@ -333,7 +369,14 @@ impl LedgerStore {
             issue: issue.to_string(),
             path: dir.join("harness-ledger.json"),
             lock_path: dir.join(".harness-ledger.lock"),
+            account: None,
         }
+    }
+
+    /// Writes refuse a ledger of another account and record this one on a ledger that has none yet.
+    pub fn with_account(mut self, account: Option<&str>) -> Self {
+        self.account = account.map(str::to_string);
+        self
     }
 
     /// Every issue that has a ledger, in name order.
@@ -393,9 +436,13 @@ impl LedgerStore {
         lock.lock()
             .with_context(|| format!("locking {}", self.lock_path.display()))?;
         let before = self.load()?;
+        before.check_account(self.account.as_deref())?;
         let mut ledger = before.clone();
         let out = change(&mut ledger)?;
         if ledger != before {
+            if ledger.account.is_none() {
+                ledger.account.clone_from(&self.account);
+            }
             ledger.check()?;
             self.write(&ledger)?;
         }
@@ -564,6 +611,20 @@ mod tests {
         ledger.check().unwrap();
         ledger.pods.push(ledger.pods[0].clone());
         assert!(ledger.check().is_err());
+    }
+
+    #[test]
+    fn an_account_is_checked_only_once_recorded() {
+        let mut ledger = funded(20.0);
+        ledger.check_account(Some("org-a")).unwrap();
+        ledger.check_account(None).unwrap();
+        ledger.account = Some("org-a".into());
+        ledger.check_account(Some("org-a")).unwrap();
+        assert!(ledger.check_account(Some("org-b")).is_err());
+        assert!(ledger.check_account(None).is_err());
+        let json = serde_json::to_value(&ledger).unwrap();
+        assert_eq!(json["account"], "org-a");
+        assert!(serde_json::to_value(funded(1.0)).unwrap().get("account").is_none());
     }
 
     #[test]

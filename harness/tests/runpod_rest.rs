@@ -308,6 +308,23 @@ fn delete_succeeds_on_204_and_on_404() {
 }
 
 #[test]
+fn the_account_is_the_organization_id_or_unknown() {
+    let forbidden = r#"{"title":"Forbidden","status":403,"detail":"access denied"}"#;
+    let server = FixtureServer::start(vec![
+        Step::Reply(200, r#"{"id": "org_id_abc_123", "name": "my-org"}"#),
+        Step::Reply(403, forbidden),
+        Step::Reply(404, NOT_FOUND),
+    ]);
+    let clock = FakeClock::at("2026-10-16T17:03:00Z");
+    let api = RunpodRest::new(&server.base, "k", &clock);
+    assert_eq!(api.account().unwrap().as_deref(), Some("org_id_abc_123"));
+    assert_eq!(api.account().unwrap(), None);
+    assert_eq!(api.account().unwrap(), None);
+    let seen = server.seen();
+    assert!(seen.iter().all(|s| s.target == "/v2/organization"), "{seen:?}");
+}
+
+#[test]
 fn billing_total_comes_from_the_recorded_metadata() {
     let server = FixtureServer::start(vec![
         Step::Reply(200, include_str!("fixtures/billing_pod.json")),

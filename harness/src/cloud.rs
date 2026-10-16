@@ -96,11 +96,16 @@ pub fn with_retry<T>(
 pub trait Cloud {
     fn gpu_catalog(&self, cloud: CloudTier, count: u32, min_cuda: &str) -> Result<Vec<CatalogGpu>, CloudError>;
     fn create_pod(&self, request: &CreatePodRequest) -> Result<Pod, CloudError>;
+    /// Every page: an error rather than a partial list, since callers read absence as "gone".
     fn list_pods(&self) -> Result<Vec<Pod>, CloudError>;
+    /// `None` on 404, which RunPod also answers for a pod this key cannot see: never proof on its own.
     fn get_pod(&self, id: &str) -> Result<Option<Pod>, CloudError>;
-    /// Succeeds when the pod is gone, including when it was already gone.
+    /// Also succeeds on 404, for the same reason not proof that the pod is gone.
     fn delete_pod(&self, id: &str) -> Result<(), CloudError>;
     fn pod_billing_usd(&self, id: &str) -> Result<Option<f64>, CloudError>;
+    /// The RunPod organization the key belongs to, or `None` when the key cannot tell (no organization, or no
+    /// membership scope).
+    fn account(&self) -> Result<Option<String>, CloudError>;
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -314,6 +319,11 @@ struct BillingTotals {
 }
 
 #[derive(Deserialize)]
+struct Organization {
+    id: String,
+}
+
+#[derive(Deserialize)]
 struct Problem {
     title: Option<String>,
     detail: Option<String>,
@@ -479,6 +489,16 @@ impl Cloud for RunpodRest<'_> {
     fn pod_billing_usd(&self, id: &str) -> Result<Option<f64>, CloudError> {
         let page: BillingPage = self.get_json("/v2/billing/pods", &[("podId", id), ("bucketSize", "day")])?;
         Ok((!page.records.is_empty()).then_some(page.metadata.totals.total_amount))
+    }
+
+    /// The OpenAPI spec answers 404 for a caller outside any organization and 403 for a key without
+    /// `membership:read`; both mean the account cannot be fingerprinted, not that something failed.
+    fn account(&self) -> Result<Option<String>, CloudError> {
+        match self.get_json::<Organization>("/v2/organization", &[]) {
+            Ok(org) => Ok(Some(org.id)),
+            Err(e) if matches!(e.status(), Some(401 | 403 | 404)) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 }
 
