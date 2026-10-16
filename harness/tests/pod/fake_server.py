@@ -13,6 +13,8 @@ Usage: fake_server.py ok|fatal|hang|smoke_fail|post_die [--fake-mode <mode>] [--
     garbage   with commas until max_tokens, the way vllm#61100's server answers
     error     with 500, every try
     flaky     with 500 on the first try of each question, then the reference answer
+    rambling  with the reference answer, then digit-free garbage until max_tokens
+    thinking  with null content and the reference answer as reasoning, cut off at max_tokens
     slow      like correct, but the second question gets no reply for 3 s, longer than the tests' client timeout
     fault     like correct, but the second question logs a CUDA fault after 0.5 s and never answers
     A GSM8K request that is not greedy and 5-shot gets 400, so a run that scores also checks the prompt. Requests are
@@ -34,7 +36,9 @@ parser = argparse.ArgumentParser()
 modes = ["ok", "fatal", "hang", "smoke_fail", "post_die"]
 parser.add_argument("mode", choices=modes)
 parser.add_argument("--fake-mode", choices=modes)
-parser.add_argument("--fake-gsm8k", choices=["correct", "garbage", "error", "flaky", "slow", "fault"])
+parser.add_argument(
+    "--fake-gsm8k", choices=["correct", "garbage", "error", "flaky", "rambling", "thinking", "slow", "fault"]
+)
 parser.add_argument("--served-model-name", default="fake/model")
 parser.add_argument("--max-model-len", type=int, default=8192)
 parser.add_argument("--port", type=int, required=True)
@@ -120,11 +124,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
             time.sleep(0.5)
             print("torch.AcceleratorError: CUDA error: an illegal memory access was encountered", flush=True)
             time.sleep(600)
+        garbage = "The,,,,,,,,,, and,,, ,,,,"
+        message = {"role": "assistant", "content": answers[question]}
+        finish, tokens = "stop", len(answers[question].split())
+        if args.fake_gsm8k in ("garbage", "rambling", "thinking"):
+            finish, tokens = "length", request["max_tokens"]
         if args.fake_gsm8k == "garbage":
-            text, finish, tokens = "The,,,,,,,,,, and,,, ,,,,", "length", request["max_tokens"]
-        else:
-            text, finish, tokens = answers[question], "stop", len(answers[question].split())
-        message = {"role": "assistant", "content": text}
+            message["content"] = garbage
+        if args.fake_gsm8k == "rambling":
+            message["content"] += " " + garbage
+        if args.fake_gsm8k == "thinking":
+            message.update(content=None, reasoning=answers[question])
         self._reply(200, {
             "choices": [{"index": 0, "message": message, "finish_reason": finish}],
             "usage": {"completion_tokens": tokens},

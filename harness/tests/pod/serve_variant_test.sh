@@ -3,8 +3,9 @@
 # healthy boot with the quality protocol and a patch to each package, a fatal log line, a hung boot, a failed smoke
 # test, and a server that dies mid-evaluation. Also checks restores between runs, the hooks, and progress.jsonl.
 # Then vllm variants with quality, through gsm8k_chat.py on a fixture and fake_vllm.py: right answers, garbage
-# answers, HTTP 500s, a retried failure, a max_model_len too short to answer in, a fixture hash mismatch, and a bench
-# run that drops a request. Last, an issue whose hooks.sh defines post_smoke: alone, failing, after quality, under
+# answers, HTTP 500s, a retried failure, a timeout, right answers that run on as garbage, a reasoning model cut off
+# mid-thought, a fault mid-GSM8K, a max_model_len too short to answer in, a fixture hash mismatch, and a bench run
+# that drops a request. Last, an issue whose hooks.sh defines post_smoke: alone, failing, after quality, under
 # a server that dies, and leaving a process running behind it.
 set -euo pipefail
 
@@ -158,6 +159,7 @@ field healthy gsm8k 0.97
 field healthy accept 2.9374
 field healthy tok_s "{'1': 100.0, '16': 1600.0}"
 field healthy verdict_error None
+field healthy gsm8k_counts None
 grep -q 'patched' "$work/site/sglang/core.py" || fail "sglang patch not applied"
 grep -q 'patched' "$work/site/fakeinfer/core.py" || fail "fakeinfer patch not applied at -p2"
 grep -q "^$work/results/healthy|from the variant|" "$work/pre.txt" || fail "pre_launch did not see the run dir and env"
@@ -238,6 +240,22 @@ for row in rows:
 EOF
 }
 
+# Checks a run's verdict gsm8k_counts: zero but for the counts a Python dict literal gives. Args: variant counts
+counts() {
+    python3 -I - "$work/results/$1/verdict.json" "$2" <<'EOF' || fail "$1: gsm8k_counts"
+import ast
+import json
+import sys
+
+path, given = sys.argv[1:]
+names = ["answered", "correct", "hit_max_tokens", "no_number", "empty_content", "timed_out", "failed", "retried"]
+want = {**dict.fromkeys(names, 0), **ast.literal_eval(given)}
+got = json.load(open(path))["gsm8k_counts"]
+if got != want:
+    sys.exit(f"gsm8k_counts: got {got}, want {want}")
+EOF
+}
+
 # Checks the fields of one gsm8k_responses.jsonl row against a Python dict literal. Args: variant index fields
 row() {
     python3 -I - "$work/results/$1/gsm8k_responses.jsonl" "$2" "$3" <<'EOF' || fail "$1: row $2"
@@ -260,6 +278,7 @@ field vllm-correct gsm8k 1.0
 field vllm-correct accept None
 field vllm-correct tok_s "{'1': 100.0, '16': 1600.0}"
 field vllm-correct verdict_error None
+counts vllm-correct "{'answered': 3, 'correct': 3}"
 # The fixture's references include a thousands comma and a negative number.
 responses vllm-correct "{'correct': True, 'finish_reason': 'stop', 'error': None}"
 grep -q 'max_tokens 4096 (max_model_len 8192)' "$work/results/vllm-correct/gsm8k.txt" || fail "default max_tokens"
@@ -273,6 +292,7 @@ write_variant vllm-garbage "ok --fake-gsm8k garbage --max-model-len 3000" 3 ""
 serve vllm-garbage
 field vllm-garbage verdict "'OK'"
 field vllm-garbage gsm8k 0.0
+counts vllm-garbage "{'answered': 3, 'hit_max_tokens': 3, 'no_number': 3}"
 responses vllm-garbage "{'correct': False, 'parsed': None, 'finish_reason': 'length', 'completion_tokens': 952}"
 echo "ok: a server answering in commas completes with 0.0, each reply capped at max_model_len 3000 - 2048 tokens"
 
@@ -291,18 +311,34 @@ serve vllm-flaky
 field vllm-flaky verdict "'OK'"
 field vllm-flaky gsm8k 1.0
 responses vllm-flaky "{'outcome': 'answered', 'attempts': 2, 'correct': True}"
-grep -q '^gsm8k: answered=3 .* retried=3$' "$work/results/vllm-flaky/gsm8k.txt" || fail "vllm-flaky: retries not shown"
+counts vllm-flaky "{'answered': 3, 'correct': 3, 'retried': 3}"
 echo "ok: a request that fails once is retried, and the retries show"
 
 write_variant vllm-slow "ok --fake-gsm8k slow" 3 "GSM8K_TIMEOUT_S=1"
 serve vllm-slow
 field vllm-slow verdict "'OK'"
 field vllm-slow gsm8k 0.667
-grep -q '^gsm8k: answered=2 correct=2 .* timed_out=1 failed=0 retried=0$' "$work/results/vllm-slow/gsm8k.txt" \
-    || fail "vllm-slow: summary"
+counts vllm-slow "{'answered': 2, 'correct': 2, 'timed_out': 1}"
 row vllm-slow 1 "{'outcome': 'timeout', 'attempts': 1, 'correct': False}"
 row vllm-slow 2 "{'outcome': 'answered', 'correct': True}"
 echo "ok: a request that times out is scored wrong once, not retried, and the run still scores"
+
+write_variant vllm-rambling "ok --fake-gsm8k rambling" 3 ""
+serve vllm-rambling
+field vllm-rambling verdict "'OK'"
+field vllm-rambling gsm8k 1.0
+counts vllm-rambling "{'answered': 3, 'correct': 3, 'hit_max_tokens': 3}"
+echo "ok: replies that are right and then run on as garbage to max_tokens score, and the verdict shows they ran on"
+
+write_variant vllm-thinking "ok --fake-gsm8k thinking" 3 ""
+serve vllm-thinking
+field vllm-thinking verdict "'OK'"
+field vllm-thinking gsm8k 0.0
+counts vllm-thinking "{'answered': 3, 'hit_max_tokens': 3, 'no_number': 3, 'empty_content': 3}"
+responses vllm-thinking "{'response': '', 'parsed': None}"
+grep -qF '"reasoning": "3 boxes hold 3 * 12' "$work/results/vllm-thinking/gsm8k_responses.jsonl" \
+    || fail "vllm-thinking: reasoning not kept"
+echo "ok: a reasoning model cut off mid-thought scores on its empty content, counted apart, with its reasoning kept"
 
 write_variant vllm-fault "ok --fake-gsm8k fault" 3 ""
 serve vllm-fault
@@ -414,13 +450,13 @@ if pgrep -fx 'sleep 28.456' >/dev/null; then
 fi
 echo "ok: a process post_smoke leaves running behind it is ended with the run"
 
-[[ $(wc -l <"$work/results/verdicts.jsonl") -eq 20 ]] || fail "verdicts.jsonl should hold one line per run"
+[[ $(wc -l <"$work/results/verdicts.jsonl") -eq 22 ]] || fail "verdicts.jsonl should hold one line per run"
 cmp -s <(tail -n 1 "$work/results/verdicts.jsonl") "$work/results/hook-bg/verdict.json" || fail "verdict.json differs"
 if pgrep -f "$here/fake_server.py" >/dev/null; then
     fail "a fake server outlived its run"
 fi
 [[ $(grep -cxF -- '-9 -f [s]glang[.]launch_server|[s]glang::' "$work/pkill.log") -eq 5 ]] \
     || fail "each sglang run should clean up the server pattern once"
-[[ $(grep -cxF -- '-9 -f [v]llm serve|[V]LLM::' "$work/pkill.log") -eq 15 ]] \
+[[ $(grep -cxF -- '-9 -f [v]llm serve|[V]LLM::' "$work/pkill.log") -eq 17 ]] \
     || fail "each vllm run should clean up the server pattern once"
 echo "ok: one verdict line per run, one cleanup per run, and no server left behind"

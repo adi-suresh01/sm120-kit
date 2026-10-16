@@ -46,7 +46,8 @@ mkdir -p "$work/clean"
 printf 'Score: 0.950\nSpeculative accept length (per-request, from meta_info): n=50 mean=2.5 min=2 max=3\n' \
     >"$work/clean/gsm8k.txt"
 printf '{"max_concurrency": 1, "completed": 8, "output_throughput": 99.94}\n' >"$work/clean/bench.jsonl"
-check clean "{'verdict': 'OK', 'boot_s': 42, 'gsm8k': 0.95, 'accept': 2.5, 'tok_s': {'1': 99.9}}" ""
+check clean "{'verdict': 'OK', 'boot_s': 42, 'gsm8k': 0.95, 'gsm8k_counts': None, 'accept': 2.5, \
+'tok_s': {'1': 99.9}}" ""
 echo "ok: a clean run has a null verdict_error"
 
 mkdir -p "$work/torn"
@@ -67,6 +68,19 @@ echo "ok: a bench line that is not an object"
 mkdir -p "$work/dirbench/bench.jsonl"
 check dirbench "{'tok_s': None}" "bench.jsonl:"
 echo "ok: a directory where bench.jsonl should be"
+
+mkdir -p "$work/counted"
+printf 'gsm8k: 3 questions, max_tokens 4096 (max_model_len 8192), timeout 1624 s\n%s\nScore: 0.667\n' \
+    'gsm8k: answered=3 correct=2 hit_max_tokens=1 no_number=0 empty_content=0 timed_out=0 failed=0 retried=1' \
+    >"$work/counted/gsm8k.txt"
+check counted "{'gsm8k': 0.667, 'accept': None, 'gsm8k_counts': {'answered': 3, 'correct': 2, 'hit_max_tokens': 1, \
+'no_number': 0, 'empty_content': 0, 'timed_out': 0, 'failed': 0, 'retried': 1}}" ""
+echo "ok: gsm8k_chat.py's counts land in the verdict"
+
+mkdir -p "$work/badcounts"
+printf 'gsm8k: answered=3 correct=two\nScore: 0.667\n' >"$work/badcounts/gsm8k.txt"
+check badcounts "{'gsm8k': 0.667, 'gsm8k_counts': None}" "gsm8k.txt counts:"
+echo "ok: a counts line that is not numbers"
 
 mkdir -p "$work/badscore"
 printf 'Score: 0.9.1\nSpeculative accept length (per-request, from meta_info): n=50 mean=. min=2 max=3\n' \

@@ -89,9 +89,12 @@ bench = [[1, 8], [16, 64], [64, 256]]
   over `max_model_len`, and a model generating garbage runs every reply to the cap. Each reply is written as it
   lands. A request that times out (after 600 s plus 0.25 s per `max_tokens`, or `GSM8K_TIMEOUT_S`) scores as wrong
   and is counted, since a model that does not stop is what garbage looks like; one that fails (a 5xx or dropped
-  connection after 3 tries, any other error at once) fails the run. `gsm8k` is at most 1319, and
-  the benchmark loads its tokenizer from `server.model`, so that has to be the checkpoint's id or path, not a
-  `--served-model-name` alias.
+  connection after 3 tries, any other error at once) fails the run. The verdict's `gsm8k_counts` carries the
+  counts behind the score: `hit_max_tokens` (with the stop on `Question:` a healthy reply ends on its own, so this
+  flags garbage even after a right answer), `no_number`, `empty_content` (a reasoning model cut off mid-thought;
+  its reasoning is kept in the row but never scored), `timed_out`, `failed`, and `retried`. `gsm8k` is at most
+  1319, and the benchmark loads its tokenizer from `server.model`, so that has to be the checkpoint's id or path,
+  not a `--served-model-name` alias.
 
 Either way a GSM8K request that failed, or a benchmark that completed fewer requests than it sent, is `POST_FAIL`,
 not a low score or a slow run.
@@ -174,8 +177,8 @@ tail -F results/vllm-47990/events.jsonl | grep --line-buffered -oE '"kind":"(pha
 
 Kinds: `budget, quote, reserve, create, ready, setup, variant_start, phase, verdict, pull, terminate, reap, warn,
 error`. A `phase` line carries `variant, phase, detail, t` as `serve_variant.sh` reports each step. A verdict line
-carries `variant, verdict (OK|BOOT_FAIL|SMOKE_FAIL|POST_FAIL|TIMEOUT), boot_s, fault, where, gsm8k, accept,
-tok_s, result`. An `error` line for a pod that is still up adds `pod, id, deadline, deadline_local, next`.
+carries `variant, verdict (OK|BOOT_FAIL|SMOKE_FAIL|POST_FAIL|TIMEOUT), boot_s, fault, where, gsm8k, gsm8k_counts,
+accept, tok_s, result`. An `error` line for a pod that is still up adds `pod, id, deadline, deadline_local, next`.
 
 ## On the pod
 

@@ -160,9 +160,13 @@ def last_number(text):
 def answer(base, body, timeout):
     reply = call(f"{base}/v1/chat/completions", body, timeout)
     choice = reply["choices"][0]
+    message = choice["message"]
     return {
-        # A reasoning parser leaves content null when the budget runs out mid-thought; that scores as no answer.
-        "response": choice["message"]["content"] or "",
+        # A reasoning parser leaves content null when the budget runs out mid-thought. That scores as no answer,
+        # never from the reasoning, and the reasoning is kept so the row shows which of the two it was.
+        "response": message["content"] or "",
+        # vLLM names it reasoning; older vLLM and sglang, reasoning_content.
+        "reasoning": (message.get("reasoning") or message.get("reasoning_content") or "")[:2000],
         "finish_reason": choice["finish_reason"],
         "completion_tokens": (reply.get("usage") or {}).get("completion_tokens"),
     }
@@ -200,7 +204,7 @@ def main():
         if error is None:
             return {"outcome": "answered", **reply, **spent, "error": None}
         outcome = "timeout" if timed_out(error) else "failed"
-        none = {"response": None, "finish_reason": None, "completion_tokens": None}
+        none = {"response": None, "reasoning": None, "finish_reason": None, "completion_tokens": None}
         return {"outcome": outcome, **none, **spent, "error": describe(error)}
 
     os.makedirs(out_dir, exist_ok=True)
@@ -234,9 +238,14 @@ def main():
     counts = {
         "answered": len(answered),
         "correct": sum(row["correct"] for row in rows),
-        # Garbage reads as replies that ran to max_tokens, replies with no number, and requests that timed out.
+        # Garbage reads as replies that ran to max_tokens, replies with no number, and requests that timed out. With
+        # the stop on "Question:" a healthy reply ends on its own, so running to max_tokens is the tell even when the
+        # last number before the garbage was right.
         "hit_max_tokens": sum(row["finish_reason"] == "length" for row in answered),
         "no_number": sum(row["parsed"] is None for row in answered),
+        # Empty content is most often a reasoning model cut off mid-thought rather than garbage. It counts under
+        # no_number too; this keeps the two apart.
+        "empty_content": sum(row["response"] == "" for row in answered),
         "timed_out": sum(row["outcome"] == "timeout" for row in rows),
         "failed": len(failed),
         # Retries recover from a server that errs now and then, which is worth seeing, not hiding.
