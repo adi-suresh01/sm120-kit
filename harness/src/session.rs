@@ -573,7 +573,9 @@ pub fn wait_job(
 
 /// A container RunPod stopped (as it does at about 98% of the container's memory limit) never answers again, so a
 /// failed poll asks RunPod about the pod before it waits out POLL_FAILURES. RunPod failing to answer is no evidence
-/// either way. One attempt, no retries: a check that retried for minutes would hold up the failure limit and Ctrl-C.
+/// either way. The GET is one attempt without retries, since one that retried for minutes on every failed poll would
+/// hold up the failure limit and Ctrl-C. Only a 404 leads on to the pod list, which keeps its retries: it is rare, and
+/// it decides whether the run ends.
 fn check_pod_up(ctx: &Ctx, issue: &str, entry: &PodEntry, job: &str) -> Result<()> {
     let Some(id) = entry.id.as_deref() else {
         return Ok(());
