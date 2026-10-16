@@ -51,6 +51,12 @@ writes, but the network was the limit). For weights over about 100 GB, `setup.sh
 of the download and stop under a floor (see `issues/vllm-56771/setup.sh`); `harness up` keeps the pod when setup
 fails, so the driver command ends with `harness down`.
 
+RunPod stops a container itself at about 98% of its memory limit (system log: `WARN: very high memory
+utilization`, then `stop container`), and the pod goes to EXITED. The limit is RunPod's allotment (754 GB for 4x
+PRO 6000 on EU-CZ-1, shown as 702.2 GiB), not the host RAM that `free -g` prints inside the container; read
+`/sys/fs/cgroup/memory.max`. `mcp__runpod__stream-pod-logs` with source `system` shows these lines after the
+container is gone.
+
 ## Rules
 
 - Each issue's GPU budget needs Aditya's explicit approval (GPU, count, $/hr, hours, total), recorded with

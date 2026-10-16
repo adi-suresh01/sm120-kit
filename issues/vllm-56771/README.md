@@ -90,7 +90,7 @@ Host RAM must be at least 256 GB for the pinned Engram tables; `setup.sh` stops 
 
 ## Results
 
-### Attempts 1-5 (2026-10-16, no run, $25.19)
+### Attempts 1-5 (2026-10-16, no run, $25.43)
 
 - Pods 1 and 2 ended as "proxy-only" while the uncached 9.6 GB nightly image pulled (a harness bug, fixed in
   2f34e1b), $0.52 and $0.53.
@@ -103,3 +103,25 @@ Host RAM must be at least 256 GB for the pinned Engram tables; `setup.sh` stops 
   take over 9 h. The host has 728 GB of RAM.
 - The live catalog (count 4, CUDA >= 13.0) lists 4x Server Edition stock only in EUR-IS-2, SECURE; community has
   none. Waiting for stock elsewhere, with the harness told to avoid EUR-IS-2.
+
+### Attempt 6 (2026-10-16, EU-CZ-1, a1 never finished booting, $7.70)
+
+The harness now takes `avoid_data_centers` (0ba8c45); 4x stock showed up in EU-CZ-1 at 17:23Z.
+
+- Pod sm120-vllm-56771-21e503 (EU-CZ-1, host 213.192.2.101): container up in 2 min, 1604 MB/s download, 510 GB in
+  313 s, setup done at 17:31Z. RunPod allotted 754 GB of RAM (the container limit RunPod's monitor reports is
+  702.2 GiB); `free -g` inside shows the host's 1511 GB, so the setup RAM gate read the wrong number.
+- a1 (patch pr60762, DSpark k=5, CUDA graphs) launched 17:32Z. vLLM logged `Filesystem type for checkpoints: FUSE.
+  Checkpoint size: 475.25 GiB. Available RAM: 198.03 GiB`, offloaded the Engram table (23.60 GiB per rank to
+  pinned host memory), and loaded 48 shards in 7m35s (17:40:52Z). Nothing more reached server.log.
+- After that the 4 workers sat in D state at 600-800% CPU each (load average 77), GPUs at 82.7 GB used and 0%
+  util. RunPod's system log shows container memory climbing about 9 GiB/min, 538.3 GiB at 17:49Z to 695.1 GiB at
+  18:06Z; at 98% RunPod stopped and removed the container (18:06:42Z). The pod went to EXITED and the harness
+  polled a dead SSH endpoint until I stopped it; server.log was not pulled.
+- What filled the memory is not in the log. The 198 GiB "Available RAM" right after setup suggests the page cache
+  from the 510 GB download counted against the container. Not a result about the reporter's bug: the server
+  never reached the first prompt.
+
+Before the next attempt: drop the downloaded blobs from the page cache in `setup.sh` (posix_fadvise DONTNEED),
+gate on the cgroup's `memory.max` instead of `free -g`, and stream server.log back while it boots. Total for
+this issue: $33.13 of $40, $6.87 left, not enough for another 4x boot.

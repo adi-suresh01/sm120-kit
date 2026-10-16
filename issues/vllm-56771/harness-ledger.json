@@ -48,8 +48,8 @@
       "reserved_at": "2026-10-16T13:38:16Z",
       "deadline": "2026-10-16T17:08:16Z",
       "terminated_at": "2026-10-16T15:55:28Z",
-      "cost_usd": 22.7752,
-      "cost_source": "estimate"
+      "cost_usd": 22.99249480338767,
+      "cost_source": "billing"
     },
     {
       "name": "sm120-vllm-56771-032d83",
@@ -63,8 +63,8 @@
       "reserved_at": "2026-10-16T15:56:53Z",
       "deadline": "2026-10-16T17:25:29Z",
       "terminated_at": "2026-10-16T16:02:02Z",
-      "cost_usd": 0.8549000000000001,
-      "cost_source": "estimate"
+      "cost_usd": 0.8720038565807045,
+      "cost_source": "billing"
     },
     {
       "name": "sm120-vllm-56771-6cf612",
@@ -78,7 +78,22 @@
       "reserved_at": "2026-10-16T16:03:01Z",
       "deadline": "2026-10-16T17:26:56Z",
       "terminated_at": "2026-10-16T16:06:04Z",
-      "cost_usd": 0.5063,
+      "cost_usd": 0.517997675575316,
+      "cost_source": "billing"
+    },
+    {
+      "name": "sm120-vllm-56771-21e503",
+      "id": "wrjs8936t0ir3j",
+      "state": "terminated",
+      "gpu": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+      "count": 4,
+      "cloud": "SECURE",
+      "rate_usd_hr": 9.96,
+      "reserved_usd": 14.814946666666668,
+      "reserved_at": "2026-10-16T17:23:48Z",
+      "deadline": "2026-10-16T18:44:56Z",
+      "terminated_at": "2026-10-16T18:10:11Z",
+      "cost_usd": 7.699633333333335,
       "cost_source": "estimate"
     }
   ]
