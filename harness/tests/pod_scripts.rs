@@ -55,8 +55,23 @@ fn pkg_snapshot() {
 }
 
 #[test]
+fn patch_pkg() {
+    run_bash_test("patch_pkg_test.sh");
+}
+
+#[test]
 fn verdict_replays_stage_2() {
     run_bash_test("verdict_replay_test.sh");
+}
+
+#[test]
+fn verdict_survives_unexpected_files() {
+    run_bash_test("verdict_errors_test.sh");
+}
+
+#[test]
+fn nvidia_smi_calls_are_bounded() {
+    run_bash_test("gpu_tools_test.sh");
 }
 
 #[test]
