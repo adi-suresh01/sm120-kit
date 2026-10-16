@@ -1,17 +1,22 @@
 """GSM8K accuracy of a running OpenAI-compatible server, through /v1/chat/completions, for a package that ships no eval
 client of its own (vLLM). quality.sh runs it on the server that just passed the smoke test.
 
-5-shot from the first 5 train examples, in the prompt format of issues/vllm-47990/eval_offline.py sent as one user
-message, greedy, over the first <questions> test questions, scored on the last number in the reply against the number
-after "####" in the reference. Prints "Score: <accuracy>", the line verdict.sh also reads from sglang's run_eval, and
-writes every reply to <out_dir>/gsm8k_responses.jsonl. Exits non-zero, with no Score line, if any request still
-failed after its retries.
+5-shot from the first 5 train examples, greedy, over the first <questions> test questions, scored on the last number
+in the reply against the number after "####" in the reference. The few-shot text is that of
+issues/vllm-47990/eval_offline.py, but the protocol differs: it goes as one user message through the server's chat
+template instead of as a raw prompt, it stops only on "Question:" (eval_offline.py also stops on three newlines), and
+max_tokens follows max_model_len (see max_tokens) instead of a fixed 512.
+Each reply goes to <out_dir>/gsm8k_responses.jsonl as it lands, so a run cut short keeps what it got. Then a line of
+counts, and "Score: <accuracy>", the line verdict.sh also reads from sglang's run_eval. A request that timed out
+scores as a wrong answer; one that failed fails the run, with no Score line (see main for why).
 Usage: gsm8k_chat.py <port> <model> <questions> <out_dir>
-  GSM8K_DIR (default /workspace/gsm8k) caches the data; GSM8K_MAX_TOKENS (default 4096) caps each reply.
+  GSM8K_DIR (default /workspace/gsm8k) caches the data; GSM8K_MAX_TOKENS (default 4096) caps each reply;
+  GSM8K_TIMEOUT_S replaces the per-request timeout that request_timeout derives from max_tokens.
 """
 
 import concurrent.futures
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -24,9 +29,6 @@ SHOTS = 5
 # Enough client threads that the server's running-request cap, not the client, is the limit, as in sglang's runs.
 THREADS = 64
 ATTEMPTS = 3
-# A reply that runs to max_tokens on a large model at full batch takes minutes. A server that hangs outright is left
-# to serve_and_smoke.sh's stall check.
-REQUEST_TIMEOUT_S = 1200
 PROMPT_RESERVE = 2048
 MIN_MAX_TOKENS = 256
 COMMIT = "3101c7d5072418e28b9008a6636bde82a006892c"
@@ -39,15 +41,32 @@ SHA256 = {
 }
 
 
-def retried(call):
-    """call(), tried ATTEMPTS times in all; the last try's error propagates."""
-    for attempt in range(1, ATTEMPTS):
-        # A dropped connection, a timeout, an HTTP error, and a reply of the wrong shape are all a failed try.
+def attempt(call, retry_if):
+    """(call()'s result, None, tries), or (None, the last error, tries) once retry_if(error) is false or the tries
+    run out. Any error counts, a reply of the wrong shape included."""
+    for tries in range(1, ATTEMPTS + 1):
         try:
-            return call()
-        except Exception:
-            time.sleep(attempt)
-    return call()
+            return call(), None, tries
+        except Exception as e:
+            if tries == ATTEMPTS or not retry_if(e):
+                return None, e, tries
+            time.sleep(tries)
+
+
+def transient(error):
+    """A refused or dropped connection, or a 5xx: what a second try can get past. Not a timeout: a request that ran
+    out its time once would run it out again, and three of them would outlast serve_variant.sh's hour."""
+    if isinstance(error, urllib.error.HTTPError):
+        return error.code >= 500
+    if isinstance(error, urllib.error.URLError):
+        error = error.reason
+    return isinstance(error, (ConnectionError, http.client.HTTPException))
+
+
+def timed_out(error):
+    if isinstance(error, urllib.error.URLError):
+        error = error.reason
+    return isinstance(error, TimeoutError)
 
 
 def describe(error):
@@ -74,14 +93,16 @@ def dataset(data_dir, split):
     path = os.path.join(data_dir, f"{split}.jsonl")
     fresh = not os.path.exists(path)
     source = URL.format(split) if fresh else path
-    try:
-        if fresh:
-            raw = retried(lambda: fetch(source))
-        else:
+    if fresh:
+        raw, error, _ = attempt(lambda: fetch(source), lambda _: True)
+    else:
+        try:
             with open(path, "rb") as f:
-                raw = f.read()
-    except Exception as e:
-        sys.exit(f"gsm8k: reading {source}: {describe(e)}")
+                raw, error = f.read(), None
+        except OSError as e:
+            error = e
+    if error is not None:
+        sys.exit(f"gsm8k: reading {source}: {describe(error)}")
     digest = hashlib.sha256(raw).hexdigest()
     if digest != SHA256[split]:
         sys.exit(f"gsm8k: {source} has sha256 {digest}, want {SHA256[split]}")
@@ -95,11 +116,10 @@ def dataset(data_dir, split):
 
 
 def max_tokens(base, model):
-    try:
-        cards = retried(lambda: call(f"{base}/v1/models"))["data"]
-    except Exception as e:
-        sys.exit(f"gsm8k: GET /v1/models: {describe(e)}")
-    lengths = {card.get("id"): card.get("max_model_len") for card in cards}
+    reply, error, _ = attempt(lambda: call(f"{base}/v1/models")["data"], transient)
+    if error is not None:
+        sys.exit(f"gsm8k: GET /v1/models: {describe(error)}")
+    lengths = {card.get("id"): card.get("max_model_len") for card in reply}
     if model not in lengths:
         sys.exit(f"gsm8k: /v1/models does not list {model!r}, only {sorted(map(str, lengths))}")
     model_len = lengths[model]
@@ -120,6 +140,13 @@ def max_tokens(base, model):
     return tokens, model_len
 
 
+def request_timeout(tokens):
+    # Long enough for a reply of max_tokens at 4 tok/s, slower than a large model at full batch should decode, after
+    # 10 minutes queued behind the other requests. Short enough that a reply that never ends costs a known slice of
+    # serve_variant.sh's hour, not all of it.
+    return float(os.environ.get("GSM8K_TIMEOUT_S", 600 + tokens / 4))
+
+
 def last_number(text):
     found = re.findall(r"-?\d[\d,]*\.?\d*", text)
     if not found:
@@ -130,8 +157,8 @@ def last_number(text):
         return None
 
 
-def answer(base, body):
-    reply = call(f"{base}/v1/chat/completions", body, REQUEST_TIMEOUT_S)
+def answer(base, body, timeout):
+    reply = call(f"{base}/v1/chat/completions", body, timeout)
     choice = reply["choices"][0]
     return {
         # A reasoning parser leaves content null when the budget runs out mid-thought; that scores as no answer.
@@ -153,7 +180,9 @@ def main():
     test = test[:count]
     base = f"http://127.0.0.1:{port}"
     tokens, model_len = max_tokens(base, model)
-    print(f"gsm8k: {count} questions, max_tokens {tokens} (max_model_len {model_len})", flush=True)
+    timeout = request_timeout(tokens)
+    print(f"gsm8k: {count} questions, max_tokens {tokens} (max_model_len {model_len}), timeout {timeout:g} s",
+          flush=True)
     shots = "".join(f"Question: {row['question']}\nAnswer: {row['answer']}\n\n" for row in train)
 
     def ask(row):
@@ -165,44 +194,63 @@ def main():
             # A model that goes on to write the next few-shot question would be scored on that question's numbers.
             "stop": ["Question:"],
         }
-        try:
-            return {**retried(lambda: answer(base, body)), "error": None}
-        except Exception as e:
-            return {"response": None, "finish_reason": None, "completion_tokens": None, "error": describe(e)}
+        started = time.monotonic()
+        reply, error, tries = attempt(lambda: answer(base, body, timeout), transient)
+        spent = {"attempts": tries, "seconds": round(time.monotonic() - started, 1)}
+        if error is None:
+            return {"outcome": "answered", **reply, **spent, "error": None}
+        outcome = "timeout" if timed_out(error) else "failed"
+        none = {"response": None, "finish_reason": None, "completion_tokens": None}
+        return {"outcome": outcome, **none, **spent, "error": describe(error)}
 
-    with concurrent.futures.ThreadPoolExecutor(THREADS) as pool:
-        replies = list(pool.map(ask, test))
-    rows = []
-    for index, (row, reply) in enumerate(zip(test, replies)):
-        got = last_number(reply["response"] or "")
-        want = last_number(row["answer"].split("####")[-1])
-        rows.append({
-            "index": index,
-            "question": row["question"],
-            "response": reply["response"],
-            "finish_reason": reply["finish_reason"],
-            "completion_tokens": reply["completion_tokens"],
-            "parsed": got,
-            "reference": want,
-            "correct": got is not None and want is not None and abs(got - want) < 1e-6,
-            "error": reply["error"],
-        })
     os.makedirs(out_dir, exist_ok=True)
-    with open(os.path.join(out_dir, "gsm8k_responses.jsonl"), "w", encoding="utf-8") as f:
-        f.writelines(json.dumps(row) + "\n" for row in rows)
+    rows = []
+    with (
+        concurrent.futures.ThreadPoolExecutor(THREADS) as pool,
+        open(os.path.join(out_dir, "gsm8k_responses.jsonl"), "w", encoding="utf-8") as f,
+    ):
+        futures = {pool.submit(ask, row): index for index, row in enumerate(test)}
+        for future in concurrent.futures.as_completed(futures):
+            index = futures[future]
+            reply = future.result()
+            got = last_number(reply["response"] or "")
+            want = last_number(test[index]["answer"].split("####")[-1])
+            row = {
+                "index": index,
+                "question": test[index]["question"],
+                **reply,
+                "parsed": got,
+                "reference": want,
+                "correct": got is not None and want is not None and abs(got - want) < 1e-6,
+            }
+            # One line per reply as it lands, in landing order: a run the watchdog or the outer limit ends keeps
+            # every reply it got, which for a model generating garbage is the evidence.
+            f.write(json.dumps(row) + "\n")
+            f.flush()
+            rows.append(row)
 
-    correct = sum(row["correct"] for row in rows)
-    failed = [row for row in rows if row["error"]]
-    # Garbage output reads as replies with no number that ran to max_tokens.
-    print(
-        f"gsm8k: correct={correct} no_number={sum(row['parsed'] is None for row in rows)} "
-        f"hit_max_tokens={sum(row['finish_reason'] == 'length' for row in rows)} failed={len(failed)}",
-        flush=True,
-    )
+    answered = [row for row in rows if row["outcome"] == "answered"]
+    failed = [row for row in rows if row["outcome"] == "failed"]
+    counts = {
+        "answered": len(answered),
+        "correct": sum(row["correct"] for row in rows),
+        # Garbage reads as replies that ran to max_tokens, replies with no number, and requests that timed out.
+        "hit_max_tokens": sum(row["finish_reason"] == "length" for row in answered),
+        "no_number": sum(row["parsed"] is None for row in answered),
+        "timed_out": sum(row["outcome"] == "timeout" for row in rows),
+        "failed": len(failed),
+        # Retries recover from a server that errs now and then, which is worth seeing, not hiding.
+        "retried": sum(row["attempts"] > 1 for row in rows),
+    }
+    print("gsm8k: " + " ".join(f"{key}={value}" for key, value in counts.items()), flush=True)
+    # A timed-out request scores as wrong and the run still scores. On a server that is still up, a reply that does
+    # not finish in time is a model that does not stop, which is what garbage does; failing the run would turn that
+    # into a run with no score. A server that died, faulted, or went quiet is for the watchdog to report. A failed
+    # request is different: the server refused or dropped it, so a score would count the server's errors as the
+    # model's answers.
     if failed:
-        # Scored as wrong answers, failed requests would pass a broken server as a weak model.
         sys.exit(f"gsm8k: {len(failed)}/{count} requests failed against the server; first: {failed[0]['error']}")
-    print(f"Score: {correct / count:.3f}", flush=True)
+    print(f"Score: {counts['correct'] / count:.3f}", flush=True)
 
 
 if __name__ == "__main__":

@@ -86,7 +86,10 @@ bench = [[1, 8], [16, 64], [64, 256]]
   `<variant>/gsm8k_responses.jsonl`; the data is openai/grade-school-math at a pinned commit, checked against pinned
   sha256s and cached in `/workspace/gsm8k`. `max_tokens` is the smaller of `GSM8K_MAX_TOKENS` (default 4096) and
   `max_model_len - 2048` from `/v1/models`, and under 256 fails the run: vLLM refuses a prompt plus `max_tokens`
-  over `max_model_len`, and a model generating garbage runs every reply to the cap. `gsm8k` is at most 1319, and
+  over `max_model_len`, and a model generating garbage runs every reply to the cap. Each reply is written as it
+  lands. A request that times out (after 600 s plus 0.25 s per `max_tokens`, or `GSM8K_TIMEOUT_S`) scores as wrong
+  and is counted, since a model that does not stop is what garbage looks like; one that fails (a 5xx or dropped
+  connection after 3 tries, any other error at once) fails the run. `gsm8k` is at most 1319, and
   the benchmark loads its tokenizer from `server.model`, so that has to be the checkpoint's id or path, not a
   `--served-model-name` alias.
 

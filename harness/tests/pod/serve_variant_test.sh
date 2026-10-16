@@ -215,23 +215,41 @@ GSM8K_TRAIN_SHA256=$(sha256 "$work/gsm8k/train.jsonl")
 GSM8K_TEST_SHA256=$(sha256 "$work/gsm8k/test.jsonl")
 export GSM8K_DIR="$work/gsm8k" GSM8K_TRAIN_SHA256 GSM8K_TEST_SHA256
 
-# Checks a run's gsm8k_responses.jsonl: one row per question asked, in the fixture's order, and in every row the
-# fields of a Python dict literal. Args: variant fields
+# Checks a run's gsm8k_responses.jsonl: one row for each of the given fixture questions (default the 3 asked), in
+# any order, since rows land as replies do, and in every row the fields of a Python dict literal.
+# Args: variant fields [indices]
 responses() {
-    python3 -I - "$work/results/$1/gsm8k_responses.jsonl" "$GSM8K_DIR/test.jsonl" "$2" <<'EOF' || fail "$1: responses"
+    python3 -I - "$work/results/$1/gsm8k_responses.jsonl" "$GSM8K_DIR/test.jsonl" "$2" "${3:-0 1 2}" <<'EOF' \
+        || fail "$1: responses"
 import ast
 import json
 import sys
 
-path, fixture, want = sys.argv[1:]
-rows = [json.loads(line) for line in open(path, encoding="utf-8")]
-questions = [json.loads(line)["question"] for line in open(fixture, encoding="utf-8")][:3]
-if [(row["index"], row["question"]) for row in rows] != list(enumerate(questions)):
-    sys.exit(f"want the first 3 fixture questions in order, got {rows}")
+path, fixture, want, indices = sys.argv[1:]
+rows = sorted((json.loads(line) for line in open(path, encoding="utf-8")), key=lambda row: row["index"])
+questions = [json.loads(line)["question"] for line in open(fixture, encoding="utf-8")]
+expected = [(int(index), questions[int(index)]) for index in indices.split()]
+if [(row["index"], row["question"]) for row in rows] != expected:
+    sys.exit(f"want rows for fixture questions {indices}, got {rows}")
 for row in rows:
     bad = {key: row[key] for key, value in ast.literal_eval(want).items() if row[key] != value}
     if bad:
         sys.exit(f"row {row['index']}: {bad}")
+EOF
+}
+
+# Checks the fields of one gsm8k_responses.jsonl row against a Python dict literal. Args: variant index fields
+row() {
+    python3 -I - "$work/results/$1/gsm8k_responses.jsonl" "$2" "$3" <<'EOF' || fail "$1: row $2"
+import ast
+import json
+import sys
+
+path, index, want = sys.argv[1:]
+row = next(row for row in map(json.loads, open(path, encoding="utf-8")) if row["index"] == int(index))
+bad = {key: row[key] for key, value in ast.literal_eval(want).items() if row[key] != value}
+if bad:
+    sys.exit(f"row {index}: {bad}")
 EOF
 }
 
@@ -264,14 +282,35 @@ field vllm-error verdict "'POST_FAIL'"
 field vllm-error gsm8k None
 grep -q '3/3 requests failed against the server; first: HTTP 500' "$work/results/vllm-error/gsm8k.txt" \
     || fail "vllm-error: no failure line"
+responses vllm-error "{'outcome': 'failed', 'attempts': 3, 'response': None}"
 [[ ! -e $work/results/vllm-error/bench.jsonl ]] || fail "vllm-error: bench ran after GSM8K failed"
-echo "ok: GSM8K requests that keep failing with 500 fail the quality run, with no score"
+echo "ok: GSM8K requests that keep failing with 500 fail the quality run after 3 tries each, with no score"
 
 write_variant vllm-flaky "ok --fake-gsm8k flaky" 3 ""
 serve vllm-flaky
 field vllm-flaky verdict "'OK'"
 field vllm-flaky gsm8k 1.0
-echo "ok: a request that fails once is retried"
+responses vllm-flaky "{'outcome': 'answered', 'attempts': 2, 'correct': True}"
+grep -q '^gsm8k: answered=3 .* retried=3$' "$work/results/vllm-flaky/gsm8k.txt" || fail "vllm-flaky: retries not shown"
+echo "ok: a request that fails once is retried, and the retries show"
+
+write_variant vllm-slow "ok --fake-gsm8k slow" 3 "GSM8K_TIMEOUT_S=1"
+serve vllm-slow
+field vllm-slow verdict "'OK'"
+field vllm-slow gsm8k 0.667
+grep -q '^gsm8k: answered=2 correct=2 .* timed_out=1 failed=0 retried=0$' "$work/results/vllm-slow/gsm8k.txt" \
+    || fail "vllm-slow: summary"
+row vllm-slow 1 "{'outcome': 'timeout', 'attempts': 1, 'correct': False}"
+row vllm-slow 2 "{'outcome': 'answered', 'correct': True}"
+echo "ok: a request that times out is scored wrong once, not retried, and the run still scores"
+
+write_variant vllm-fault "ok --fake-gsm8k fault" 3 ""
+serve vllm-fault
+field vllm-fault verdict "'POST_FAIL'"
+field vllm-fault gsm8k None
+grep -q 'post_exit=pattern' "$work/results/vllm-fault/verdict.json" || fail "vllm-fault: not stopped for the pattern"
+responses vllm-fault "{'outcome': 'answered', 'correct': True}" "0 2"
+echo "ok: a server that faults mid-GSM8K ends as POST_FAIL with every reply it gave already on disk"
 
 write_variant vllm-short "ok --fake-gsm8k correct --max-model-len 2200" 3 ""
 serve vllm-short
@@ -375,13 +414,13 @@ if pgrep -fx 'sleep 28.456' >/dev/null; then
 fi
 echo "ok: a process post_smoke leaves running behind it is ended with the run"
 
-[[ $(wc -l <"$work/results/verdicts.jsonl") -eq 18 ]] || fail "verdicts.jsonl should hold one line per run"
+[[ $(wc -l <"$work/results/verdicts.jsonl") -eq 20 ]] || fail "verdicts.jsonl should hold one line per run"
 cmp -s <(tail -n 1 "$work/results/verdicts.jsonl") "$work/results/hook-bg/verdict.json" || fail "verdict.json differs"
 if pgrep -f "$here/fake_server.py" >/dev/null; then
     fail "a fake server outlived its run"
 fi
 [[ $(grep -cxF -- '-9 -f [s]glang[.]launch_server|[s]glang::' "$work/pkill.log") -eq 5 ]] \
     || fail "each sglang run should clean up the server pattern once"
-[[ $(grep -cxF -- '-9 -f [v]llm serve|[V]LLM::' "$work/pkill.log") -eq 13 ]] \
+[[ $(grep -cxF -- '-9 -f [v]llm serve|[V]LLM::' "$work/pkill.log") -eq 15 ]] \
     || fail "each vllm run should clean up the server pattern once"
 echo "ok: one verdict line per run, one cleanup per run, and no server left behind"

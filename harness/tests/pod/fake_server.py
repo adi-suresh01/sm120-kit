@@ -13,7 +13,10 @@ Usage: fake_server.py ok|fatal|hang|smoke_fail|post_die [--fake-mode <mode>] [--
     garbage   with commas until max_tokens, the way vllm#61100's server answers
     error     with 500, every try
     flaky     with 500 on the first try of each question, then the reference answer
-    A GSM8K request that is not greedy and 5-shot gets 400, so a run that scores also checks the prompt.
+    slow      like correct, but the second question gets no reply for 3 s, longer than the tests' client timeout
+    fault     like correct, but the second question logs a CUDA fault after 0.5 s and never answers
+    A GSM8K request that is not greedy and 5-shot gets 400, so a run that scores also checks the prompt. Requests are
+    served on threads, so one that waits holds up no other.
 GET /v1/models lists --served-model-name (default fake/model) with --max-model-len (default 8192), as vLLM does.
 FAKE_SERVER_RECORD=<file> appends one JSON line per start: the full argv, every CONTRACT_* variable, and what the
 fake sglang and fakeinfer packages hold, so a test sees exactly what reached the server.
@@ -31,7 +34,7 @@ parser = argparse.ArgumentParser()
 modes = ["ok", "fatal", "hang", "smoke_fail", "post_die"]
 parser.add_argument("mode", choices=modes)
 parser.add_argument("--fake-mode", choices=modes)
-parser.add_argument("--fake-gsm8k", choices=["correct", "garbage", "error", "flaky"])
+parser.add_argument("--fake-gsm8k", choices=["correct", "garbage", "error", "flaky", "slow", "fault"])
 parser.add_argument("--served-model-name", default="fake/model")
 parser.add_argument("--max-model-len", type=int, default=8192)
 parser.add_argument("--port", type=int, required=True)
@@ -64,6 +67,7 @@ if args.mode in ("fatal", "hang"):
     time.sleep(600)
 
 death = threading.Timer(1.0, os._exit, [3])
+lock = threading.Lock()
 answers = {}
 if args.fake_gsm8k:
     with open(os.path.join(os.environ["GSM8K_DIR"], "test.jsonl"), encoding="utf-8") as f:
@@ -94,18 +98,28 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._gsm8k(request, prompt)
                 return
         self._reply(500 if args.mode == "smoke_fail" else 200)
-        if args.mode == "post_die" and not death.is_alive():
-            death.start()
+        with lock:
+            if args.mode == "post_die" and not death.is_alive():
+                death.start()
 
     def _gsm8k(self, request, prompt):
         if request.get("temperature") != 0 or prompt.count("Question: ") != 6:
             self._reply(400, {"error": "want greedy 5-shot"})
             return
         question = prompt.rsplit("Question: ", 1)[1].removesuffix("\nAnswer:")
-        tries[question] = tries.get(question, 0) + 1
+        with lock:
+            tries[question] = tries.get(question, 0) + 1
         if args.fake_gsm8k == "error" or (args.fake_gsm8k == "flaky" and tries[question] == 1):
             self._reply(500, {"error": "fake failure"})
             return
+        # Writing a reply to a client that has hung up would only put a traceback in the server log.
+        if question == list(answers)[1] and args.fake_gsm8k == "slow":
+            time.sleep(3)
+            return
+        if question == list(answers)[1] and args.fake_gsm8k == "fault":
+            time.sleep(0.5)
+            print("torch.AcceleratorError: CUDA error: an illegal memory access was encountered", flush=True)
+            time.sleep(600)
         if args.fake_gsm8k == "garbage":
             text, finish, tokens = "The,,,,,,,,,, and,,, ,,,,", "length", request["max_tokens"]
         else:
@@ -120,4 +134,4 @@ class Handler(http.server.BaseHTTPRequestHandler):
         pass
 
 
-http.server.HTTPServer(("127.0.0.1", args.port), Handler).serve_forever()
+http.server.ThreadingHTTPServer(("127.0.0.1", args.port), Handler).serve_forever()
