@@ -34,10 +34,10 @@ MIN_MAX_TOKENS = 256
 COMMIT = "3101c7d5072418e28b9008a6636bde82a006892c"
 URL = f"https://raw.githubusercontent.com/openai/grade-school-math/{COMMIT}/grade_school_math/data/{{}}.jsonl"
 # A truncated download, or another copy left in GSM8K_DIR by an issue's setup.sh, would change the score without
-# failing anything. The tests point these at a small fixture.
-SHA256 = {
-    "train": os.environ.get("GSM8K_TRAIN_SHA256", "17f347dc51477c50d4efb83959dbb7c56297aba886e5544ee2aaed3024813465"),
-    "test": os.environ.get("GSM8K_TEST_SHA256", "3730d312f6e3440559ace48831e51066acaca737f6eabec99bccb9e4b3c39d14"),
+# failing anything.
+PINNED_SHA256 = {
+    "train": "17f347dc51477c50d4efb83959dbb7c56297aba886e5544ee2aaed3024813465",
+    "test": "3730d312f6e3440559ace48831e51066acaca737f6eabec99bccb9e4b3c39d14",
 }
 
 
@@ -88,8 +88,20 @@ def fetch(url):
         return response.read()
 
 
-def dataset(data_dir, split):
-    """The split's rows, downloaded into data_dir once and checked against the pinned hash on every use."""
+def expected_sha256(data_dir):
+    """The pinned hashes, or GSM8K_TRAIN_SHA256 and GSM8K_TEST_SHA256 for the tests' fixture. Those only count for a
+    data dir outside /workspace, where a pod keeps nothing of its own, so a variant env that sets one by mistake
+    fails the run instead of scoring against data nobody pinned."""
+    overrides = {split: os.environ.get(f"GSM8K_{split.upper()}_SHA256") for split in PINNED_SHA256}
+    if not any(overrides.values()):
+        return PINNED_SHA256
+    if os.path.commonpath([os.path.realpath(data_dir), "/workspace"]) == "/workspace":
+        sys.exit(f"gsm8k: GSM8K_*_SHA256 are for a test fixture, and {data_dir} is pod data under /workspace")
+    return {split: overrides[split] or pinned for split, pinned in PINNED_SHA256.items()}
+
+
+def dataset(data_dir, split, want):
+    """The split's rows, downloaded into data_dir once and checked against its hash on every use."""
     path = os.path.join(data_dir, f"{split}.jsonl")
     fresh = not os.path.exists(path)
     source = URL.format(split) if fresh else path
@@ -104,8 +116,8 @@ def dataset(data_dir, split):
     if error is not None:
         sys.exit(f"gsm8k: reading {source}: {describe(error)}")
     digest = hashlib.sha256(raw).hexdigest()
-    if digest != SHA256[split]:
-        sys.exit(f"gsm8k: {source} has sha256 {digest}, want {SHA256[split]}")
+    if digest != want:
+        sys.exit(f"gsm8k: {source} has sha256 {digest}, want {want}")
     if fresh:
         os.makedirs(data_dir, exist_ok=True)
         # Renamed into place whole, so a run killed mid-write leaves no file that fails every later run.
@@ -177,8 +189,9 @@ def main():
         sys.exit("usage: gsm8k_chat.py <port> <model> <questions> <out_dir>")
     port, model, count, out_dir = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
     data_dir = os.environ.get("GSM8K_DIR", "/workspace/gsm8k")
-    train = dataset(data_dir, "train")[:SHOTS]
-    test = dataset(data_dir, "test")
+    hashes = expected_sha256(data_dir)
+    train = dataset(data_dir, "train", hashes["train"])[:SHOTS]
+    test = dataset(data_dir, "test", hashes["test"])
     if not 1 <= count <= len(test):
         sys.exit(f"gsm8k: asked for {count} questions; the test split has {len(test)}")
     test = test[:count]
