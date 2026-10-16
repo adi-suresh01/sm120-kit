@@ -9,19 +9,12 @@ entrypoint="$here/../../pod/entrypoint.sh"
 work=$(mktemp -d)
 declare -A pod_pid=()
 
-# Stops a pod and everything under it; the fakes' sleeps must not outlive the test.
-kill_tree() {
-    local child
-    kill -STOP "$1" 2>/dev/null || true
-    for child in $(pgrep -P "$1" 2>/dev/null || true); do
-        kill_tree "$child"
-    done
-    kill -9 "$1" 2>/dev/null || true
-}
+# Each pod leads its own process group, which also holds the subshells it orphans (a log write stuck on a FIFO
+# outlives the setup shell that started it), so killing the group leaves nothing behind.
 cleanup() {
     local pid
     for pid in "${pod_pid[@]}"; do
-        kill_tree "$pid"
+        kill -9 -- "-$pid" 2>/dev/null || true
     done
     rm -rf "$work"
 }
@@ -86,10 +79,12 @@ EOF
 chmod +x "$work/bin/"*
 
 entrypoint_text=$(cat "$entrypoint")
-# A background job inherits SIGINT ignored, but a pod's PID 1 starts with it at the default.
+# A background job inherits SIGINT ignored, but a pod's PID 1 starts with it at the default. setsid makes the pod
+# a process group leader for cleanup.
 default_signals='import os, signal, sys
 signal.signal(signal.SIGINT, signal.SIG_DFL)
 signal.signal(signal.SIGQUIT, signal.SIG_DFL)
+os.setsid()
 os.execvp(sys.argv[1], sys.argv[1:])'
 key='rpa_TESTKEY"quote\slash'
 
@@ -97,7 +92,8 @@ key='rpa_TESTKEY"quote\slash'
 start_pod() {
     local name=$1 deadline=$2 dir=$work/$1
     shift 2
-    mkdir -p "$dir/root/workspace" "$dir/root/root" "$dir/root/usr/sbin"
+    [[ -e $dir/root/workspace ]] || mkdir -p "$dir/root/workspace"
+    mkdir -p "$dir/root/root" "$dir/root/usr/sbin"
     ln -s "$work/bin/sshd" "$dir/root/usr/sbin/sshd"
     (
         export PATH="$work/bin:$PATH" FAKE_DIR=$dir HARNESS_TEST_ROOT=$dir/root HARNESS_WATCHDOG_NAP_S=1 \
@@ -130,7 +126,14 @@ start_pod notfound "$past" FAKE_CURL_CODE=404
 start_pod fallback "$past" FAKE_CURL_CODE=401 FAKE_RUNPODCTL=stop-only
 start_pod nokey "$past" RUNPOD_API_KEY=
 start_pod hungctl "$past" FAKE_CURL_CODE=500 FAKE_RUNPODCTL=hang
+# A file where /workspace should be makes the watchdog log unopenable.
+mkdir -p "$work/badlog/root"
+touch "$work/badlog/root/workspace"
 start_pod badlog "$past"
+# Opening a FIFO that no one reads blocks, like a write to a hung network volume.
+mkdir -p "$work/hunglog/root/workspace"
+mkfifo "$work/hunglog/root/workspace/harness-watchdog.log"
+start_pod hunglog "$past"
 start_pod hungapt "$past" FAKE_APT=hang
 start_pod garbled "not-a-number"
 start_pod future "$soon"
@@ -138,9 +141,6 @@ start_pod sleepkill "$soon"
 start_pod signals "$soon" FAKE_APT=hang
 start_pod subshell "$soon" FAKE_APT=hang
 start_pod setup "$((now + 600))"
-# A file where /workspace should be makes the watchdog log unopenable.
-rm -rf "$work/badlog/root/workspace"
-touch "$work/badlog/root/workspace"
 
 # Until just before the deadline: kill the naps of one pod, signal another together with its naps (what a
 # `pkill -f` matching both does), and SIGKILL a third pod's background setup shell.
@@ -210,6 +210,9 @@ echo "ok: a hung runpodctl is cut off and the next round runs"
 (( $(count badlog 'curl ') >= 2 )) || fail "an unopenable log stopped the delete"
 grep -q 'curl DELETE /v2/pods/pod123: http 204' "$work/badlog/pod.out" || fail "the log should fall back to stderr"
 echo "ok: an unopenable log path does not stop the watchdog"
+
+(( $(count hunglog 'curl ') >= 2 )) || fail "a log write that blocks stopped the watchdog"
+echo "ok: a log write that blocks does not stop the watchdog"
 
 [[ -z $leaked ]] || fail "the API key showed up in a process's argv"
 if grep -l TESTKEY "$work"/*/calls.log; then

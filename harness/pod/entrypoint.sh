@@ -12,15 +12,19 @@ set -o pipefail
 root=${HARNESS_TEST_ROOT:-}
 watchdog_log=$root/workspace/harness-watchdog.log
 nap_s=${HARNESS_WATCHDOG_NAP_S:-30}
-[[ $nap_s =~ ^[1-9][0-9]*$ ]] || nap_s=30
+# Longer naps would space out the attempts past the deadline.
+[[ $nap_s =~ ^[1-9][0-9]?$ ]] && (( nap_s <= 30 )) || nap_s=30
 
-# Writes to the log file and to stderr (the container log), and cannot fail: an unwritable /workspace, a full
-# disk, or a closed stderr must never stop the caller from acting.
+# Writes to the log file and to stderr (the container log), and cannot fail or block the caller: an unwritable
+# /workspace, a full disk, or a closed stderr fails only the write, and a write stuck on a hung volume or a stalled
+# container log is stuck in a subshell, not in the watchdog.
 log() {
     local line
     line="$(date -u +%FT%TZ 2>/dev/null) $*"
-    { printf '%s\n' "$line" >>"$watchdog_log"; } 2>/dev/null
-    { printf 'harness: %s\n' "$line" >&3; } 3>&2 2>/dev/null
+    {
+        { printf '%s\n' "$line" >>"$watchdog_log"; } 2>/dev/null
+        { printf 'harness: %s\n' "$line" >&3; } 3>&2 2>/dev/null
+    } &
     return 0
 }
 
