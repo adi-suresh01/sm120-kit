@@ -285,6 +285,26 @@ fn list_pods_stops_on_a_repeated_cursor_or_too_many_pages() {
 }
 
 #[test]
+fn list_pods_refuses_a_page_that_promises_more_without_a_cursor() {
+    let first = include_str!("fixtures/pods_page1.json");
+    for pagination in [
+        r#"{"hasNextPage": true, "nextCursor": null}"#,
+        r#"{"hasNextPage": true}"#,
+    ] {
+        let page = first.replace(r#"{"hasNextPage": true, "nextCursor": "cGFnZTI"}"#, pagination);
+        assert!(page.contains(pagination), "the fixture's pagination changed");
+        let page: &'static str = Box::leak(page.into_boxed_str());
+        let server = FixtureServer::start(vec![Step::Reply(200, page)]);
+        let clock = FakeClock::at("2026-10-16T17:03:00Z");
+        let err = RunpodRest::new(&server.base, "k", &clock).list_pods().unwrap_err();
+        assert!(
+            matches!(err, CloudError::Protocol(_)) && err.to_string().contains("no cursor"),
+            "{err}"
+        );
+    }
+}
+
+#[test]
 fn never_resends_a_create_after_a_5xx() {
     let server = FixtureServer::start(vec![Step::Reply(502, BAD_GATEWAY)]);
     let clock = FakeClock::at("2026-10-16T17:03:00Z");

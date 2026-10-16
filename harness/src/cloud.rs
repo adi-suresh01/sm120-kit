@@ -549,6 +549,14 @@ impl Cloud for RunpodRest<'_> {
                     }
                     cursor = Some(next);
                 }
+                Some(Pagination {
+                    has_next_page: true,
+                    next_cursor: None,
+                }) => {
+                    return Err(CloudError::Protocol(
+                        "pod list says more pages follow but gives no cursor".into(),
+                    ));
+                }
                 _ => return Ok(pods),
             }
         }
