@@ -78,7 +78,7 @@ echo "ok: a score that is not a number"
 mkdir -p "$work/binary"
 printf 'boot\0\0\n  File "/x/driver.py", line 3, in launch\nRuntimeError: CUDA error: bad \xff\xfe byte. more\n' \
     >"$work/binary/server.log"
-check binary "{'fault': 'CUDA error: bad �� byte', 'where': 'driver.py\", line 3, in launch'}" ""
+check binary "{'fault': 'CUDA error: bad \ufffd\ufffd byte', 'where': 'driver.py\", line 3, in launch'}" ""
 echo "ok: a binary log with bytes that are not UTF-8"
 
 # No python3 on PATH: the fallback line, built in bash.
