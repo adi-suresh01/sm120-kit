@@ -7,10 +7,13 @@ it needs and the spend rules it enforces.
 
 1. Create an account at runpod.io and add prepaid credit ($50 to start; prepaid credit is the spend cap).
 2. Settings -> SSH Public Keys: paste `~/.ssh/id_rsa.pub`. Load the key into ssh-agent with `ssh-add`: the
-   harness runs ssh in batch mode and cannot answer a passphrase prompt.
+   harness runs ssh in batch mode and cannot answer a passphrase prompt. With several keys in the agent, set
+   `HARNESS_SSH_KEY=~/.ssh/id_rsa` in `~/.zshrc` so ssh offers only that one.
 3. Settings -> API Keys: create a Restricted key with the management API (`api.runpod.io`) on read/write and
-   `api.runpod.ai` on none. In a normal terminal (not an AI chat, so the key never lands in a transcript),
-   store it in the Keychain; `-w` given last makes `security` prompt for the value:
+   `api.runpod.ai` on none. Read access covers `GET /v2/organization`, which the harness records in each ledger
+   so a key of another account is refused (skipped for an account outside any organization). In a normal
+   terminal (not an AI chat, so the key never lands in a transcript), store it in the Keychain; `-w` given
+   last makes `security` prompt for the value:
    ```
    security add-generic-password -a "$USER" -s runpod-api-key -w
    ```
@@ -20,7 +23,8 @@ it needs and the spend rules it enforces.
    ```
 5. For issues with gated models: Settings -> Secrets, create `hf_token` holding the Hugging Face token. A
    `harness.toml` with `needs_hf_token = true` passes it to the pod as a secret reference, never as a value.
-6. Verify in a new shell: `cd ~/Desktop/sm120-kit/harness && cargo run --release -- reap` exits 0.
+6. Install and verify in a new shell: `cd ~/Desktop/sm120-kit && cargo install --path harness --locked`, then
+   `harness reap` exits 0.
 7. Optional, for looking at pods by hand: `brew install runpod/runpodctl/runpodctl`.
 
 ## Pod choices
