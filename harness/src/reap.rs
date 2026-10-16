@@ -60,13 +60,7 @@ pub fn decide(ledgers: &[Ledger], pods: &[Pod], now: Timestamp) -> Vec<Action> {
             }
         }
     }
-    let tracked = |pod: &Pod| {
-        ledgers.iter().flat_map(|l| &l.pods).any(|entry| match entry.state {
-            PodState::Live => entry.id.as_deref() == Some(pod.id.as_str()),
-            PodState::Reserved => entry.name == pod.name,
-            PodState::Terminated | PodState::CreateFailed => false,
-        })
-    };
+    let tracked = |pod: &Pod| ledgers.iter().any(|ledger| ledger.tracks(&pod.id, &pod.name));
     for pod in pods {
         if pod.name.starts_with("sm120-") && pod.status != PodStatus::Terminated && !tracked(pod) {
             actions.push(Action::WarnUntracked {

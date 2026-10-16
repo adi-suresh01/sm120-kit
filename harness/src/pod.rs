@@ -15,7 +15,7 @@ use crate::cloud::{
     Cloud, CloudError, CreatePodRequest, GpuRequest, Mounts, PersistentMount, Pod, PodStatus, SshEndpoint, find_offers,
 };
 use crate::events::{Events, Kind};
-use crate::ledger::{ADOPT_WINDOW, LedgerStore, Offer, PodEntry, PodState, plan_reservation};
+use crate::ledger::{ADOPT_WINDOW, Ledger, LedgerStore, Offer, PodEntry, PodState, plan_reservation};
 use crate::session::{Remote, Target, poll_job, start_job};
 use crate::spec::IssueSpec;
 
@@ -93,6 +93,34 @@ pub fn pod_name(issue: &str) -> Result<String> {
         "sm120-{issue}-{:02x}{:02x}{:02x}",
         bytes[0], bytes[1], bytes[2]
     ))
+}
+
+/// True only for names `pod_name(issue)` makes, so issue `sglang-44291` never claims `sglang-44291-stage2`'s pods.
+pub fn is_pod_of(issue: &str, name: &str) -> bool {
+    name.strip_prefix("sm120-")
+        .and_then(|rest| rest.strip_prefix(issue))
+        .and_then(|rest| rest.strip_prefix('-'))
+        .is_some_and(|suffix| suffix.len() == 6 && suffix.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
+}
+
+/// A pod of this issue that the ledger does not track was made by another checkout or before a git revert of the
+/// ledger. Its reservation lives in a ledger this process cannot see, so reserving beside it would spend the
+/// budget twice.
+fn refuse_untracked(issue: &str, ledger: &Ledger, pods: &[Pod]) -> Result<()> {
+    let untracked = pods.iter().find(|pod| {
+        pod.status != PodStatus::Terminated && is_pod_of(issue, &pod.name) && !ledger.tracks(&pod.id, &pod.name)
+    });
+    if let Some(pod) = untracked {
+        bail!(
+            "RunPod lists pod {} (id {}, {:?}) for issue {issue}, but issues/{issue}/harness-ledger.json does not \
+             track it; most likely another checkout made it or the ledger was reverted. Nothing was reserved. Its \
+             watchdog ends it at its deadline; restore the ledger that holds it, or wait for that, before `up`",
+            pod.name,
+            pod.id,
+            pod.status
+        );
+    }
+    Ok(())
 }
 
 pub fn create_request(spec: &IssueSpec, entry: &PodEntry) -> CreatePodRequest {
@@ -179,7 +207,8 @@ pub fn quote(ctx: &Ctx, spec: &IssueSpec) -> Result<()> {
 
 pub fn up(ctx: &Ctx, spec: &IssueSpec, run_setup: bool) -> Result<LivePod> {
     let issue = spec.issue.as_str();
-    if let Some(active) = ctx.ledger(issue).load()?.active() {
+    let ledger = ctx.ledger(issue).load()?;
+    if let Some(active) = ledger.active() {
         bail!(
             "issue {issue} already has pod {} ({:?}); run `harness down {issue}` first",
             active.name,
@@ -192,6 +221,7 @@ pub fn up(ctx: &Ctx, spec: &IssueSpec, run_setup: bool) -> Result<LivePod> {
         !offers.is_empty(),
         "nothing in the preference list of issues/{issue}/harness.toml is in stock"
     );
+    refuse_untracked(issue, &ledger, &ctx.cloud.list_pods()?)?;
     let (entry, pod) = create_first_available(ctx, spec, &offers)?;
     let ready =
         wait_ready(ctx, issue, &entry, pod).and_then(|target| gate_and_copy(ctx, spec, &target).map(|()| target));
@@ -608,5 +638,22 @@ mod tests {
         assert_ne!(a, b);
         let suffix = a.strip_prefix("sm120-vllm-47990-").unwrap();
         assert!(suffix.len() == 6 && suffix.bytes().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert!(is_pod_of("vllm-47990", &a));
+    }
+
+    #[test]
+    fn a_pod_belongs_to_one_issue_only() {
+        assert!(is_pod_of("sglang-44291", "sm120-sglang-44291-0a9f3c"));
+        for name in [
+            "sm120-sglang-44291-stage2-0a9f3c",
+            "sm120-sglang-44291-0A9F3C",
+            "sm120-sglang-44291-0a9f3",
+            "sm120-sglang-44291-0a9f3c1",
+            "sm120-sglang-4429-10a9f3c",
+            "sm120-sglang-44291-0a9f3g",
+            "sglang-44291-0a9f3c",
+        ] {
+            assert!(!is_pod_of("sglang-44291", name), "{name}");
+        }
     }
 }

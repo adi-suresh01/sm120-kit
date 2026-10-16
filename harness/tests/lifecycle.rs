@@ -2,6 +2,7 @@ mod support;
 
 use std::fs;
 use std::panic::{self, AssertUnwindSafe};
+use std::path::Path;
 use std::rc::Rc;
 use std::sync::atomic::AtomicBool;
 
@@ -52,19 +53,8 @@ struct World {
 
 impl Default for World {
     fn default() -> Self {
-        let repo = repo_with_issue(ISSUE, &[("setup.sh", "echo setup\n")]);
-        LedgerStore::new(repo.path(), ISSUE)
-            .update(|ledger| {
-                ledger.budget = Some(Budget {
-                    usd: 20.0,
-                    approved_at: "2026-10-16T16:00:00Z".parse().unwrap(),
-                    note: "approved in chat".into(),
-                });
-                Ok(())
-            })
-            .unwrap();
         Self {
-            repo,
+            repo: funded_checkout(20.0),
             clock: FakeClock::at("2026-10-16T17:00:00Z"),
             cloud: FakeCloud::default(),
             remote: FakeRemote::default(),
@@ -83,9 +73,14 @@ impl World {
     }
 
     fn with<T>(&self, f: impl FnOnce(&Ctx) -> T) -> T {
-        let events = Events::new(&self.repo.path().join("results"), &self.clock, false);
+        self.with_repo(self.repo.path(), f)
+    }
+
+    /// Another checkout of the repo against the same RunPod account.
+    fn with_repo<T>(&self, repo: &Path, f: impl FnOnce(&Ctx) -> T) -> T {
+        let events = Events::new(&repo.join("results"), &self.clock, false);
         let ctx = Ctx {
-            repo: self.repo.path(),
+            repo,
             cloud: &self.cloud,
             remote: &self.remote,
             clock: &self.clock,
@@ -344,6 +339,68 @@ fn a_second_up_is_refused_while_a_pod_is_live() {
     w.up().unwrap();
     assert!(err_text(w.up()).contains("already has pod"));
     assert_eq!(w.cloud.0.borrow().create_calls, 1);
+}
+
+fn funded_checkout(usd: f64) -> TempDir {
+    let repo = repo_with_issue(ISSUE, &[("setup.sh", "echo setup\n")]);
+    LedgerStore::new(repo.path(), ISSUE)
+        .update(|ledger| {
+            ledger.budget = Some(Budget {
+                usd,
+                approved_at: "2026-10-16T16:00:00Z".parse().unwrap(),
+                note: "approved in chat".into(),
+            });
+            Ok(())
+        })
+        .unwrap();
+    repo
+}
+
+#[test]
+fn a_second_checkout_cannot_spend_the_budget_again() {
+    let w = World::default();
+    w.up().unwrap();
+    let other = funded_checkout(20.0);
+    let spec = w.spec();
+    let err = err_text(w.with_repo(other.path(), |ctx| pod::up(ctx, &spec, false)));
+    assert!(err.contains("does not track it"), "{err}");
+    assert!(err.contains("fakepod0001") && err.contains("another checkout"), "{err}");
+    assert_eq!(w.cloud.0.borrow().create_calls, 1);
+    assert!(LedgerStore::new(other.path(), ISSUE).load().unwrap().pods.is_empty());
+    w.assert_every_billing_pod_is_tracked();
+}
+
+#[test]
+fn a_reverted_ledger_cannot_free_the_live_pod_budget() {
+    let w = World::default();
+    let path = LedgerStore::new(w.repo.path(), ISSUE).path().to_path_buf();
+    let committed = fs::read_to_string(&path).unwrap();
+    w.up().unwrap();
+    // `git restore issues/` while the pod runs.
+    fs::write(&path, committed).unwrap();
+    let err = err_text(w.up());
+    assert!(err.contains("does not track it") && err.contains("its deadline"), "{err}");
+    assert_eq!(w.cloud.0.borrow().create_calls, 1);
+    assert!(w.ledger().pods.is_empty());
+}
+
+#[test]
+fn pods_of_another_issue_or_already_ended_do_not_block_up() {
+    let w = World::default();
+    let stage2 = "vllm-47990-stage2";
+    fs::create_dir_all(w.repo.path().join("issues").join(stage2)).unwrap();
+    let other = IssueSpec::parse(&SPEC.replace("\"vllm-47990\"", &format!("\"{stage2}\"")), stage2, |_| true).unwrap();
+    LedgerStore::new(w.repo.path(), stage2)
+        .update(|ledger| {
+            ledger.budget = w.ledger().budget;
+            Ok(())
+        })
+        .unwrap();
+    w.with(|ctx| pod::up(ctx, &other, false)).unwrap();
+    w.up().unwrap();
+    w.with(|ctx| pod::down(ctx, ISSUE)).unwrap();
+    w.up().unwrap();
+    assert_eq!(w.cloud.0.borrow().create_calls, 3);
 }
 
 #[test]

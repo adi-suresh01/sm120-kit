@@ -138,6 +138,16 @@ impl Ledger {
         Ok(budget.usd - self.spent_usd() - self.reserved_usd())
     }
 
+    /// Whether a RunPod pod is accounted for here: a live entry by id, or a reservation (whose id is not known yet)
+    /// by name. A terminated entry does not count, because a pod still listed after it was booked keeps billing.
+    pub fn tracks(&self, id: &str, name: &str) -> bool {
+        self.pods.iter().any(|entry| match entry.state {
+            PodState::Live => entry.id.as_deref() == Some(id),
+            PodState::Reserved => entry.name == name,
+            PodState::Terminated | PodState::CreateFailed => false,
+        })
+    }
+
     /// The pod that is reserved or live, if any. v0 allows one per issue.
     pub fn active(&self) -> Option<&PodEntry> {
         self.pods
