@@ -1,0 +1,9 @@
+{
+  "issue": "vllm-56771",
+  "budget": {
+    "usd": 40.0,
+    "approved_at": "2026-10-16T12:40:25Z",
+    "note": "Aditya approved 2026-10-16: 4x RTX PRO 6000 Server Edition SECURE, 9.96/hr, planned 3.5h, quote 38.35 worst case, expected 20-26"
+  },
+  "pods": []
+}

@@ -1,0 +1,9 @@
+{
+  "issue": "vllm-61100",
+  "budget": {
+    "usd": 6.0,
+    "approved_at": "2026-10-16T13:23:00Z",
+    "note": "Aditya approved 2026-10-16 (batch approval for 61100 + 56771): 1x RTX PRO 6000 Server Edition SECURE, 2.49/hr, planned 2h, quote 5.48 worst case"
+  },
+  "pods": []
+}
