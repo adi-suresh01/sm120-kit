@@ -1316,13 +1316,15 @@ fn a_pod_runpod_no_longer_lists_ends_the_wait_on_the_first_failed_poll() {
 
 #[test]
 fn failed_polls_of_a_pod_runpod_shows_running_or_cannot_read_wait_out_the_limit() {
-    for cloud_fails in [false, true] {
+    // Running, a GET that fails, and a GET that answers 404 for a pod the list still shows.
+    for (cloud_fails, get_not_found) in [(false, false), (true, false), (false, true)] {
         let w = World::default();
         let live = w.up().unwrap();
         w.remote.die_after(0);
         if cloud_fails {
             w.cloud.0.borrow_mut().get_error = Some(503);
         }
+        w.cloud.0.borrow_mut().get_not_found = get_not_found;
         let err = err_text(exec_baseline(&w, &live));
         assert!(
             err.contains("lost contact with the pod while variant-baseline ran"),

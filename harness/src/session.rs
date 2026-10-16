@@ -3,6 +3,7 @@ use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -305,30 +306,66 @@ impl Remote for SshRemote {
     }
 
     fn download(&self, target: &Target, paths: &[&str], local_root: &Path, limit: Duration) -> Result<()> {
-        let mut ssh = self
-            .ssh(target)?
-            .arg(download_command(paths))
-            .stdout(Stdio::piped())
-            .spawn()
-            .context("starting ssh")?;
-        let archive = ssh.stdout.take().context("ssh stdout")?;
-        fs::create_dir_all(local_root)?;
-        let mut tar = Command::new("tar")
-            .args(["-xzf", "-", "-C"])
-            .arg(local_root)
-            .stdin(Stdio::from(archive))
-            .spawn()
-            .context("starting tar")?;
-        let what = format!("pulling {paths:?}");
-        let statuses = wait_within(&mut [&mut ssh, &mut tar], limit, &what)?;
-        ensure!(
-            statuses.iter().all(ExitStatus::success),
-            "{what} failed (ssh {}, tar {})",
-            statuses[0],
-            statuses[1]
-        );
-        Ok(())
+        let mut ssh = self.ssh(target)?;
+        ssh.arg(download_command(paths));
+        extract(ssh, paths, local_root, limit)
     }
+}
+
+/// Unpacks the gzipped tar that `source` writes to stdout under `local_root`. It lands in a staging directory beside
+/// the first path and moves into place file by file only once the archive is whole, so a source that dies mid-stream
+/// (a container RunPod stopped) leaves the earlier copy as it was, not truncated files over it.
+fn extract(mut source: Command, paths: &[&str], local_root: &Path, limit: Duration) -> Result<()> {
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let beside = paths
+        .first()
+        .and_then(|path| Path::new(path).parent())
+        .unwrap_or(Path::new(""));
+    let staging = local_root.join(beside).join(format!(
+        ".pull-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::SeqCst)
+    ));
+    fs::create_dir_all(&staging).with_context(|| format!("creating {}", staging.display()))?;
+    let what = format!("pulling {paths:?}");
+    let result = unpack(&mut source, &staging, limit, &what).and_then(|()| move_into(&staging, local_root));
+    let _ = fs::remove_dir_all(&staging);
+    result
+}
+
+fn unpack(source: &mut Command, into: &Path, limit: Duration, what: &str) -> Result<()> {
+    let mut source = source.stdout(Stdio::piped()).spawn().context("starting ssh")?;
+    let archive = source.stdout.take().context("ssh stdout")?;
+    let mut tar = Command::new("tar")
+        .args(["-xzf", "-", "-C"])
+        .arg(into)
+        .stdin(Stdio::from(archive))
+        .spawn()
+        .context("starting tar")?;
+    let statuses = wait_within(&mut [&mut source, &mut tar], limit, what)?;
+    ensure!(
+        statuses.iter().all(ExitStatus::success),
+        "{what} failed (ssh {}, tar {})",
+        statuses[0],
+        statuses[1]
+    );
+    Ok(())
+}
+
+/// Moves every file under `from` to the same place under `to`, replacing what is there and keeping everything else,
+/// such as the events the harness writes beside the pulled results.
+fn move_into(from: &Path, to: &Path) -> Result<()> {
+    for entry in fs::read_dir(from).with_context(|| format!("reading {}", from.display()))? {
+        let entry = entry?;
+        let dest = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            fs::create_dir_all(&dest).with_context(|| format!("creating {}", dest.display()))?;
+            move_into(&entry.path(), &dest)?;
+        } else {
+            fs::rename(entry.path(), &dest).with_context(|| format!("moving a pulled file to {}", dest.display()))?;
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -536,12 +573,20 @@ pub fn wait_job(
 
 /// A container RunPod stopped (as it does at about 98% of the container's memory limit) never answers again, so a
 /// failed poll asks RunPod about the pod before it waits out POLL_FAILURES. RunPod failing to answer is no evidence
-/// either way.
+/// either way. One attempt, no retries: a check that retried for minutes would hold up the failure limit and Ctrl-C.
 fn check_pod_up(ctx: &Ctx, issue: &str, entry: &PodEntry, job: &str) -> Result<()> {
     let Some(id) = entry.id.as_deref() else {
         return Ok(());
     };
-    let what = match ctx.cloud.get_pod(id) {
+    let read = ctx.cloud.get_pod_once(id).and_then(|pod| match pod {
+        Some(pod) => Ok(Some(pod)),
+        // RunPod also answers 404 for a pod this key cannot see, so only the pod list agreeing makes it gone.
+        None => ctx
+            .cloud
+            .list_pods()
+            .map(|pods| pods.into_iter().find(|pod| pod.id == id)),
+    });
+    let what = match read {
         Ok(Some(pod)) if matches!(pod.status, PodStatus::Exited | PodStatus::Error | PodStatus::Terminated) => {
             format!("RunPod reports pod {} (id {id}) {:?}", entry.name, pod.status)
         }
@@ -781,6 +826,58 @@ mod tests {
             "{command}"
         );
         assert!(command.ends_with("[ \"$rc\" -le 1 ]"), "{command}");
+    }
+
+    #[test]
+    fn a_pull_cut_off_mid_stream_leaves_the_earlier_copy_whole() {
+        let dir = std::env::temp_dir().join(format!("sm120-extract-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let (pod, laptop) = (dir.join("pod"), dir.join("laptop"));
+        let run = |root: &Path| root.join("results/x/a1");
+        fs::create_dir_all(run(&pod)).unwrap();
+        fs::create_dir_all(run(&laptop)).unwrap();
+        fs::write(run(&pod).join("server.log"), "the whole log\n").unwrap();
+        fs::write(run(&pod).join("memory.jsonl"), "{}\n").unwrap();
+        fs::write(run(&laptop).join("server.log"), "an earlier pull\n").unwrap();
+        fs::write(laptop.join("results/x/events.jsonl"), "{}\n").unwrap();
+        let archive = |tail: &str| sh(&format!("cd '{}' && tar -czf - results/x/a1{tail}", pod.display()));
+        let leftovers = || {
+            fs::read_dir(laptop.join("results/x"))
+                .unwrap()
+                .filter(|entry| {
+                    entry
+                        .as_ref()
+                        .unwrap()
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".pull-")
+                })
+                .count()
+        };
+
+        extract(archive(""), &["results/x/a1"], &laptop, Duration::from_secs(10)).unwrap();
+        assert_eq!(
+            fs::read_to_string(run(&laptop).join("server.log")).unwrap(),
+            "the whole log\n"
+        );
+        assert!(run(&laptop).join("memory.jsonl").is_file());
+        assert!(laptop.join("results/x/events.jsonl").is_file());
+        assert_eq!(leftovers(), 0);
+
+        fs::write(run(&pod).join("server.log"), "x".repeat(1 << 20)).unwrap();
+        let cut = extract(
+            archive(" | head -c 300; exit 1"),
+            &["results/x/a1"],
+            &laptop,
+            Duration::from_secs(10),
+        );
+        assert!(cut.is_err());
+        assert_eq!(
+            fs::read_to_string(run(&laptop).join("server.log")).unwrap(),
+            "the whole log\n"
+        );
+        assert_eq!(leftovers(), 0);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
