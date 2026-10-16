@@ -1,0 +1,144 @@
+diff --git a/vllm/model_executor/model_loader/weight_utils.py b/vllm/model_executor/model_loader/weight_utils.py
+index 3262e9408846..56b342d4eba7 100644
+--- a/vllm/model_executor/model_loader/weight_utils.py
++++ b/vllm/model_executor/model_loader/weight_utils.py
+@@ -12,6 +12,7 @@ import os
+ import tempfile
+ import threading
+ import time
++import weakref
+ from collections.abc import Callable, Generator, Iterable
+ from contextlib import contextmanager, suppress
+ from pathlib import Path
+@@ -898,6 +899,8 @@ def drop_checkpoint_cache(
+     revision: str | None = None,
+     cache_dir: str | None = None,
+ ) -> None:
++    if not hasattr(os, "posix_fadvise"):
++        return
+     checkpoint_dir: Path | None = None
+     if os.path.isdir(model_name_or_path):
+         checkpoint_dir = Path(model_name_or_path)
+@@ -918,13 +921,15 @@ def drop_checkpoint_cache(
+         )
+         return
+     for path in checkpoint_dir.glob("*.safetensors"):
+-        try:
+-            with path.open("rb") as file:
+-                os.posix_fadvise(file.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
+-        except OSError as exc:
+-            logger.warning(
+-                "Could not release checkpoint page cache for %s: %s", path, exc
+-            )
++        _drop_page_cache(path)
++
++
++def _drop_page_cache(path: str | Path) -> None:
++    try:
++        with open(path, "rb") as file:
++            os.posix_fadvise(file.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
++    except OSError as exc:
++        logger.warning("Could not release checkpoint page cache for %s: %s", path, exc)
+ 
+ 
+ def _get_checkpoints_size_bytes(files: list[str]) -> int:
+@@ -1165,6 +1170,14 @@ def safetensors_weights_iterator(
+             block_size=safetensors_prefetch_block_size,
+         )
+ 
++    # Page cache counts against a container's memory limit, and some runtimes
++    # kill the container on that count before the kernel reclaims any. The
++    # available RAM above is read while other ranks may still be pinning host
++    # memory, so it cannot decide this; evict each shard once it is loaded.
++    drop_finished_files = hasattr(os, "posix_fadvise")
++    if drop_finished_files:
++        logger.info_once("Evicting each checkpoint shard from page cache once loaded")
++    finished_files: dict[str, weakref.ref[torch.Tensor]] = {}
+     leftover_state_dict: dict[str, torch.Tensor] = {}
+     for st_file in tqdm(
+         sorted_files,
+@@ -1209,12 +1222,24 @@ def safetensors_weights_iterator(
+                 )
+             yield from unflattened_state_dict.items()
+         else:
++            last_tensor: weakref.ref[torch.Tensor] | None = None
+             with safe_open(st_file, framework="pt") as f:
+                 for name in f.keys():  # noqa: SIM118
+                     if should_skip_weight(name, local_expert_ids):
+                         continue
+                     param = f.get_tensor(name)
++                    last_tensor = weakref.ref(param)
+                     yield name, param
++                    # A shard stays mapped, so its pages cannot be evicted,
++                    # while any of its tensors is alive. Callers let go of
++                    # one only once a later tensor reaches them, which can be
++                    # several shards on if they filter some out.
++                    for path, last in list(finished_files.items()):
++                        if last() is None:
++                            del finished_files[path]
++                            _drop_page_cache(path)
++            if drop_finished_files and last_tensor is not None:
++                finished_files[st_file] = last_tensor
+ 
+ 
+ def multi_thread_safetensors_weights_iterator(
+diff --git a/vllm/models/deepseek_v41/nvidia/vl_model.py b/vllm/models/deepseek_v41/nvidia/vl_model.py
+index d67753405ad5..1f94aa4429cb 100644
+--- a/vllm/models/deepseek_v41/nvidia/vl_model.py
++++ b/vllm/models/deepseek_v41/nvidia/vl_model.py
+@@ -23,6 +23,7 @@ import torch
+ from torch import nn
+ 
+ from vllm.distributed import get_tensor_model_parallel_world_size
++from vllm.model_executor.model_loader.weight_utils import drop_checkpoint_cache
+ from vllm.model_executor.models.interfaces import (
+     MultiModalEmbeddings,
+     SupportsEagle3,
+@@ -148,6 +149,7 @@ class DeepseekV41ForCausalLM(
+         model_config = vllm_config.model_config
+         config = model_config.hf_config
+         self.config = config
++        self.vllm_config = vllm_config
+         self.multimodal_config = model_config.multimodal_config
+         assert self.multimodal_config is not None
+ 
+@@ -317,14 +319,32 @@ class DeepseekV41ForCausalLM(
+         return self.language_model.get_mtp_target_hidden_states()
+ 
+     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+-        # Map HF names into this wrapper's namespace up front and sort, so
+-        # the "language_model." group reaches the child loader as one
+-        # contiguous block (AutoWeightsLoader delegates per contiguous group,
+-        # and the child's load_weights finalizes fused expert weights, which
+-        # must not run on a partially loaded model).
+-        mapped = sorted(self.hf_to_vllm_mapper.apply(weights), key=lambda x: x[0])
++        # The "language_model." group must reach the child loader as one
++        # contiguous block: AutoWeightsLoader delegates per contiguous group,
++        # and the child's load_weights runs its post-load finalization on each
++        # call. Sorting the checkpoint would keep every shard mapped, and its
++        # page cache resident, until loading ends, so stream the language
++        # model and load the small vision tower after it.
++        def language_model_first() -> Iterable[tuple[str, torch.Tensor]]:
++            deferred: list[tuple[str, torch.Tensor]] = []
++            for name, weight in self.hf_to_vllm_mapper.apply(weights):
++                if name.startswith("language_model."):
++                    yield name, weight
++                else:
++                    deferred.append((name, weight))
++            yield from deferred
++
+         loader = AutoWeightsLoader(self)
+-        loaded_params = loader.load_weights(mapped)
++        loaded_params = loader.load_weights(language_model_first())
++        # The streaming loader evicts a shard only when a later one arrives, so
++        # the last shard (an Engram table) and the vision shards are still
++        # cached; nothing maps them any more.
++        model_config = self.vllm_config.model_config
++        drop_checkpoint_cache(
++            model_config.model_weights or model_config.model,
++            revision=model_config.revision,
++            cache_dir=self.vllm_config.load_config.download_dir,
++        )
+         # The child's load_weights already ran its post-load finalization.
+         self._weights_finalized = True
+         return loaded_params
