@@ -70,6 +70,13 @@ env = { MEM_BUDGET_GIB = "31.45" }               # exported for the hooks and th
 smoke_concurrency = 13                           # parallel smoke requests
 ```
 
+`avoid_data_centers = ["EUR-IS-2"]` under `[pod]` keeps the issue's pods out of the named RunPod data centers, for
+hosts where `setup.sh` cannot finish (see `docs/runpod.md` on slow network volumes). Every `gpus` choice must then be
+SECURE, since the catalog lists data centers for secure stock only. A choice counts as in stock only where a data
+center outside the list has it, and the create names those data centers in `dataCenterIds`. RunPod treats that list
+as a preference, so `up` also terminates, before setup, a pod that RunPod reports in an avoided data center. `quote`
+shows the data centers each choice may use. Empty, the default, sends no list and leaves placement to RunPod.
+
 A variant can also measure quality and speed on the live server: GSM8K on the first `gsm8k` test questions, then one
 benchmark run per `[concurrency, prompts]` pair, random prompts of 1024 tokens in and 512 out:
 

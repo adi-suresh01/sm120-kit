@@ -76,6 +76,10 @@ pub struct PodSpec {
     #[serde(default)]
     pub needs_hf_token: bool,
     pub gpus: Vec<GpuChoice>,
+    /// RunPod data centers this issue's pods must not land in, such as one whose hosts download the weights too
+    /// slowly for setup to finish.
+    #[serde(default)]
+    pub avoid_data_centers: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -348,6 +352,17 @@ impl PodSpec {
         for package in &self.apt {
             ensure!(is_apt_name(package), "pod.apt entry {package:?} is not a package name");
         }
+        let mut seen = BTreeSet::new();
+        for id in &self.avoid_data_centers {
+            ensure!(!id.is_empty(), "pod.avoid_data_centers entries must not be empty");
+            ensure!(seen.insert(id), "pod.avoid_data_centers lists {id:?} more than once");
+        }
+        // The catalog lists data centers for secure stock only, so a community choice would ignore the list unseen.
+        ensure!(
+            self.avoid_data_centers.is_empty() || self.gpus.iter().all(|choice| choice.cloud == CloudTier::Secure),
+            "pod.avoid_data_centers needs every pod.gpus choice to be SECURE: community hosts sit outside RunPod's \
+             data centers"
+        );
         Ok(())
     }
 }
@@ -698,6 +713,36 @@ smoke_concurrency = 13
         let spec = parse(&text).unwrap();
         let quality = spec.variant("baseline-graphs").unwrap().quality.as_ref().unwrap();
         assert_eq!(quality.bench, [(1, 8), (16, 64)]);
+    }
+
+    const COMMUNITY_CHOICE: &str =
+        "  { id = \"NVIDIA RTX PRO 6000 Blackwell Workstation Edition\", cloud = \"COMMUNITY\" },\n";
+
+    fn avoiding(list: &str) -> String {
+        example().replace(
+            "volume_gb = 80",
+            &format!("volume_gb = 80\navoid_data_centers = {list}"),
+        )
+    }
+
+    #[test]
+    fn reads_the_data_centers_to_avoid() {
+        assert!(parse(&example()).unwrap().pod.avoid_data_centers.is_empty());
+        let spec = parse(&avoiding("[\"EUR-IS-2\", \"EUR-IS-1\"]").replace(COMMUNITY_CHOICE, "")).unwrap();
+        assert_eq!(spec.pod.avoid_data_centers, ["EUR-IS-2", "EUR-IS-1"]);
+        // An empty list constrains nothing, so a community choice may sit beside it.
+        assert!(parse(&avoiding("[]")).unwrap().pod.avoid_data_centers.is_empty());
+    }
+
+    #[test]
+    fn rejects_an_avoid_list_that_could_not_hold() {
+        assert!(example().contains(COMMUNITY_CHOICE));
+        let err = error_of(&avoiding("[\"EUR-IS-2\", \"\"]").replace(COMMUNITY_CHOICE, ""));
+        assert!(err.contains("avoid_data_centers entries must not be empty"), "{err}");
+        let err = error_of(&avoiding("[\"EUR-IS-2\", \"US-NC-2\", \"EUR-IS-2\"]").replace(COMMUNITY_CHOICE, ""));
+        assert!(err.contains("lists \"EUR-IS-2\" more than once"), "{err}");
+        let err = error_of(&avoiding("[\"EUR-IS-2\"]"));
+        assert!(err.contains("needs every pod.gpus choice to be SECURE"), "{err}");
     }
 
     #[test]

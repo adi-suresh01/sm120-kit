@@ -224,17 +224,35 @@ pub struct Offer {
     pub cloud: CloudTier,
     pub count: u32,
     pub rate_usd_hr: f64,
+    /// The in-stock data centers outside the avoid list, in catalog order; empty when nothing is avoided.
+    pub data_centers: Vec<String>,
 }
 
-pub fn offer_for(choice: &GpuChoice, count: u32, catalog: &[CatalogGpu]) -> Option<Offer> {
+/// With nothing to avoid, the create sends no list and RunPod places the pod anywhere it has stock.
+fn allowed_data_centers(gpu: &CatalogGpu, avoid: &[String]) -> Vec<String> {
+    if avoid.is_empty() {
+        return Vec::new();
+    }
+    gpu.data_centers
+        .iter()
+        .filter(|dc| dc.availability.in_stock() && !avoid.contains(&dc.id))
+        .map(|dc| dc.id.clone())
+        .collect()
+}
+
+pub fn offer_for(choice: &GpuChoice, count: u32, avoid: &[String], catalog: &[CatalogGpu]) -> Option<Offer> {
     let gpu = catalog.iter().find(|gpu| gpu.id == choice.id)?;
     let price = gpu.price.get(choice.cloud).filter(|price| *price > 0.0)?;
     let max_count = gpu.max_count.get(choice.cloud)?;
-    (max_count >= count && in_stock(gpu, choice.cloud)).then(|| Offer {
+    let data_centers = allowed_data_centers(gpu, avoid);
+    // Stock that sits only in avoided data centers is no stock for this issue.
+    let placeable = avoid.is_empty() || !data_centers.is_empty();
+    (max_count >= count && in_stock(gpu, choice.cloud) && placeable).then(|| Offer {
         gpu: choice.id.clone(),
         cloud: choice.cloud,
         count,
         rate_usd_hr: price * f64::from(count),
+        data_centers,
     })
 }
 
@@ -257,7 +275,7 @@ pub fn find_offers(api: &dyn Cloud, pod: &PodSpec) -> Result<Vec<Offer>, CloudEr
                 CloudTier::Secure => &secure,
                 CloudTier::Community => &community,
             };
-            offer_for(choice, pod.count, catalog)
+            offer_for(choice, pod.count, &pod.avoid_data_centers, catalog)
         })
         .collect())
 }
@@ -276,6 +294,7 @@ pub enum PodStatus {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Pod {
     pub id: String,
     pub name: String,
@@ -286,6 +305,9 @@ pub struct Pod {
     pub ssh: Option<PodSsh>,
     #[serde(default)]
     pub runtime: Option<PodRuntime>,
+    /// Null until the scheduler places the pod, as in the reply to a create.
+    #[serde(default)]
+    pub data_center_id: Option<String>,
 }
 
 impl Pod {
@@ -333,6 +355,10 @@ pub struct CreatePodRequest {
     pub disk: u32,
     pub mounts: Mounts,
     pub cloud: CloudTier,
+    /// RunPod reads this as a preference, not a rule, so `up` also checks where the pod landed. Left out when
+    /// empty, so an issue that avoids nothing sends the body it always did.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub data_center_ids: Vec<String>,
     pub gpu: GpuRequest,
     pub start_ssh: bool,
 }
@@ -769,11 +795,51 @@ mod tests {
     const SERVER: &str = "NVIDIA RTX PRO 6000 Blackwell Server Edition";
     const WORKSTATION: &str = "NVIDIA RTX PRO 6000 Blackwell Workstation Edition";
 
-    fn offer(catalog: &str, id: &str, cloud: CloudTier, count: u32) -> Option<Offer> {
+    fn gpus(catalog: &str) -> Vec<CatalogGpu> {
         let page: serde_json::Value = serde_json::from_str(catalog).unwrap();
-        let gpus: Vec<CatalogGpu> = serde_json::from_value(page["gpus"].clone()).unwrap();
+        serde_json::from_value(page["gpus"].clone()).unwrap()
+    }
+
+    fn offer(catalog: &str, id: &str, cloud: CloudTier, count: u32) -> Option<Offer> {
         let choice = GpuChoice { id: id.into(), cloud };
-        offer_for(&choice, count, &gpus)
+        offer_for(&choice, count, &[], &gpus(catalog))
+    }
+
+    fn secure_avoiding(gpus: &[CatalogGpu], id: &str, avoid: &[&str]) -> Option<Offer> {
+        let choice = GpuChoice {
+            id: id.into(),
+            cloud: CloudTier::Secure,
+        };
+        let avoid: Vec<String> = avoid.iter().map(|dc| dc.to_string()).collect();
+        offer_for(&choice, 1, &avoid, gpus)
+    }
+
+    #[test]
+    fn stock_only_in_avoided_data_centers_is_no_offer() {
+        let gpu: CatalogGpu = serde_json::from_value(json!({
+            "id": SERVER, "price": {"secure": 2.49}, "maxCount": {"secure": 8}, "availability": "HIGH",
+            "dataCenters": [{"id": "EUR-IS-2", "availability": "HIGH"}, {"id": "US-NC-2", "availability": "NONE"}],
+        }))
+        .unwrap();
+        // US-NC-2 is listed but has none free, so EUR-IS-2 is the only stock.
+        let one = [gpu];
+        assert!(secure_avoiding(&one, SERVER, &["EUR-IS-2"]).is_none());
+        assert_eq!(secure_avoiding(&one, SERVER, &[]).unwrap().rate_usd_hr, 2.49);
+        assert!(secure_avoiding(&gpus(SECURE_X1), SERVER, &["CA-MTL-3", "EU-CZ-1"]).is_none());
+    }
+
+    #[test]
+    fn an_offer_carries_the_in_stock_data_centers_left_after_the_avoid_list() {
+        let x1 = gpus(SECURE_X1);
+        let offer = secure_avoiding(&x1, SERVER, &["EU-CZ-1"]).unwrap();
+        assert_eq!(
+            (offer.data_centers, offer.rate_usd_hr),
+            (vec!["CA-MTL-3".to_string()], 2.49)
+        );
+        // An id the catalog does not list takes nothing away, and the catalog's order stays.
+        let offer = secure_avoiding(&x1, SERVER, &["EUR-IS-2"]).unwrap();
+        assert_eq!(offer.data_centers, ["CA-MTL-3", "EU-CZ-1"]);
+        assert!(secure_avoiding(&x1, SERVER, &[]).unwrap().data_centers.is_empty());
     }
 
     #[test]

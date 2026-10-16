@@ -479,6 +479,7 @@ mod tests {
             cloud: CloudTier::Secure,
             count: 1,
             rate_usd_hr: rate,
+            data_centers: Vec::new(),
         }
     }
 

@@ -42,6 +42,11 @@ pub struct State {
     pub proxy_only: bool,
     /// RUNNING reads before the container starts, as while an uncached image pulls; `usize::MAX` never starts it.
     pub pull_reads: usize,
+    /// Where the scheduler places every pod, whatever the request preferred; reads report it, the create reply
+    /// does not.
+    pub data_center: Option<String>,
+    /// Every create body sent, in order.
+    pub requests: Vec<CreatePodRequest>,
     pub pods: Vec<FakePod>,
     pub unlisted: Vec<FakePod>,
     pub get_error: Option<u16>,
@@ -100,6 +105,8 @@ impl Default for FakeCloud {
             cost: Some(2.49),
             proxy_only: false,
             pull_reads: 0,
+            data_center: Some("EU-CZ-1".into()),
+            requests: Vec::new(),
             pods: Vec::new(),
             unlisted: Vec::new(),
             get_error: None,
@@ -156,6 +163,7 @@ impl FakeCloud {
             cost: state.cost,
             ssh: Some(PodSsh { direct: None }),
             runtime: None,
+            data_center_id: None,
         };
         let fake = FakePod {
             pod: pod.clone(),
@@ -188,6 +196,7 @@ impl Cloud for FakeCloud {
         let outcome = {
             let mut state = self.0.borrow_mut();
             state.create_calls += 1;
+            state.requests.push(request.clone());
             if let Some(flag) = &state.interrupt_on_create {
                 flag.store(true, Ordering::SeqCst);
             }
@@ -234,9 +243,11 @@ impl Cloud for FakeCloud {
             return Ok(None);
         }
         let proxy_only = state.proxy_only;
+        let data_center = state.data_center.clone();
         let Some(fake) = state.pods.iter_mut().find(|fake| fake.pod.id == id) else {
             return Ok(None);
         };
+        fake.pod.data_center_id = data_center;
         if fake.boot.len() > 1 {
             fake.boot.pop_front();
         }

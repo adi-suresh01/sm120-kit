@@ -305,6 +305,92 @@ fn a_refused_create_falls_through_to_the_next_choice() {
     w.assert_every_billing_pod_is_tracked();
 }
 
+/// The recorded secure catalog has the Server Edition in CA-MTL-3 and EU-CZ-1, the Workstation in EU-CZ-1 and
+/// EU-RO-1.
+fn avoiding(list: &str) -> IssueSpec {
+    let text = SPEC.replace(
+        "volume_gb = 80",
+        &format!("volume_gb = 80\navoid_data_centers = {list}"),
+    );
+    IssueSpec::parse(&text, ISSUE, |_| true).unwrap()
+}
+
+fn sent_data_centers(w: &World) -> Vec<Option<serde_json::Value>> {
+    w.cloud
+        .0
+        .borrow()
+        .requests
+        .iter()
+        .map(|request| serde_json::to_value(request).unwrap().get("dataCenterIds").cloned())
+        .collect()
+}
+
+#[test]
+fn an_issue_that_avoids_nothing_sends_no_data_centers() {
+    let w = World::default();
+    w.up().unwrap();
+    assert_eq!(sent_data_centers(&w), [None]);
+    assert!(!w.events().contains("data_centers"), "{}", w.events());
+}
+
+#[test]
+fn each_choice_asks_for_its_in_stock_data_centers_outside_the_avoid_list() {
+    let w = World::default();
+    w.cloud.0.borrow_mut().data_center = Some("EU-RO-1".into());
+    w.cloud.script(&[Create::Refused(400), Create::Made]);
+    let spec = avoiding("[\"EU-CZ-1\"]");
+    w.with(|ctx| pod::up(ctx, &spec, true, AfterFailure::KeepPod)).unwrap();
+    assert_eq!(
+        sent_data_centers(&w),
+        [
+            Some(serde_json::json!(["CA-MTL-3"])),
+            Some(serde_json::json!(["EU-RO-1"]))
+        ]
+    );
+    assert_eq!(w.states(), [PodState::CreateFailed, PodState::Live]);
+    let events = w.events();
+    assert!(events.contains("\"data_centers\":[\"CA-MTL-3\"]"), "{events}");
+    assert!(
+        events.contains("Workstation Edition SECURE $2.59/hr in EU-RO-1"),
+        "{events}"
+    );
+}
+
+#[test]
+fn stock_only_in_avoided_data_centers_reserves_nothing() {
+    let w = World::default();
+    let spec = avoiding("[\"CA-MTL-3\", \"EU-CZ-1\", \"EU-RO-1\"]");
+    let err = err_text(w.with(|ctx| pod::up(ctx, &spec, true, AfterFailure::KeepPod)));
+    assert!(err.contains("is in stock"), "{err}");
+    assert!(w.ledger().pods.is_empty());
+    assert_eq!(w.cloud.0.borrow().create_calls, 0);
+}
+
+#[test]
+fn a_pod_placed_in_an_avoided_data_center_is_terminated_before_setup() {
+    let w = World::default();
+    let spec = avoiding("[\"EU-CZ-1\"]");
+    let err = err_text(w.with(|ctx| pod::up(ctx, &spec, true, AfterFailure::KeepPod)));
+    assert!(
+        err.contains("in data center EU-CZ-1, which pod.avoid_data_centers excludes"),
+        "{err}"
+    );
+    assert_eq!(w.states(), [PodState::Terminated]);
+    assert!(w.cloud.billing_pods().is_empty());
+    assert!(w.remote.uploads.borrow().is_empty() && w.remote.jobs.borrow().is_empty());
+}
+
+#[test]
+fn a_pod_that_reports_no_data_center_comes_up_with_a_warning() {
+    let w = World::default();
+    w.cloud.0.borrow_mut().data_center = None;
+    let spec = avoiding("[\"EU-CZ-1\"]");
+    w.with(|ctx| pod::up(ctx, &spec, true, AfterFailure::KeepPod)).unwrap();
+    let events = w.events();
+    assert_eq!(events.matches("went unchecked after placement").count(), 1, "{events}");
+    assert_eq!(w.states(), [PodState::Live]);
+}
+
 #[test]
 fn an_auth_failure_on_create_stops_at_once() {
     for status in [401, 403, 422] {

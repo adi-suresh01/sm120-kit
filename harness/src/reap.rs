@@ -209,6 +209,7 @@ mod tests {
             cost: Some(2.49),
             ssh: None,
             runtime: None,
+            data_center_id: None,
         }
     }
 
@@ -225,6 +226,7 @@ mod tests {
             cloud: CloudTier::Secure,
             count: 1,
             rate_usd_hr: 2.0,
+            data_centers: Vec::new(),
         };
         ledger
             .reserve("sm120-vllm-47990-aaaaaa", &offer, 1.0, at("2026-10-16T17:00:00Z"))
