@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Runs mem_guard.py against fake cgroup and /proc directories with a 0.1 s poll: logging under the trim line; a trim
 # over it with a capped memory.reclaim request; the fire over the kill line, which stops, reports on, and kills the
-# server's process tree (stand-in processes) and nothing else; the pkill sweep when server.pid holds no pid; a limit
-# of max; cgroup v1 names; a container cgroup found through /proc/self/cgroup, and --limit; a cgroup it cannot read; a
-# guard whose parent dies; --drop-cache through a hub kept behind a link. Then the trim and kill decisions, driven
-# poll by poll. A fake py-spy records its calls.
+# server's process tree (stand-in processes) and nothing else; a SIGTERM mid-fire, which still kills and records; no
+# fire while server.pid holds no pid; a limit of max; cgroup v1 names; a container cgroup found through
+# /proc/self/cgroup, and --limit; a cgroup it cannot read; a guard whose parent dies; --drop-cache through a hub kept
+# behind a link. Then the trim and kill decisions, driven poll by poll, and a kill that survives a failing report and
+# log. A fake py-spy records its calls.
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -69,7 +70,7 @@ fake_proc() {
 }
 
 # Starts the guard for case $1 on $work/$1/cgroup with its run dir $work/$1/run; its pid lands in guard_pid.
-# Args: case pattern [cache_path...]
+# Args: case [cache_path...]
 start_guard() {
     local dir=$work/$1
     shift
@@ -123,7 +124,7 @@ missing_controls="{'controls': {'memory.reclaim': 'missing', 'memory.high': 'mis
 fadvise=$(python3 -I -c 'import os; print(hasattr(os, "posix_fadvise"))')
 
 cgroup_v2 "$work/low/cgroup" 100000 1000000
-start_guard low '[f]akeserver-none'
+start_guard low
 wait_for has_lines "$work/low/run/memory.jsonl" 4 || fail "low: fewer than 4 lines in 10 s"
 stop low
 rows low "rows[0] == $missing_controls and all(r['current'] == 100000 and r['max'] == 1000000 and r['anon'] == 11
@@ -135,7 +136,7 @@ echo "ok: under the trim line every poll logs usage, limit, and the memory.stat 
 # 85 GiB of a 100 GiB limit: 5 GiB over the trim line, of which one request asks for 4.
 cgroup_v2 "$work/trim/cgroup" 91268055040 107374182400
 : >"$work/trim/cgroup/memory.reclaim"
-start_guard trim '[f]akeserver-none' "$work/trim/cache"
+start_guard trim "$work/trim/cache"
 wait_for has_lines "$work/trim/run/memory.jsonl" 6 || fail "trim: fewer than 6 lines in 10 s"
 stop trim
 rows trim "rows[0]['controls'] == {'memory.reclaim': 'writable', 'memory.high': 'missing'}
@@ -146,7 +147,7 @@ rows trim "rows[0]['controls'] == {'memory.reclaim': 'writable', 'memory.high': 
 [[ ! -e $work/trim/run/memory_guard.txt ]] || fail "trim: the guard fired under the kill line"
 echo "ok: over the trim line the guard trims once, asks memory.reclaim for at most 4 GiB, and logs what is left"
 
-# The server, its worker, and a process outside its tree whose command line matches the server pattern.
+# The server, its worker, and a process outside its tree.
 server=$(spawn "fakeserver-$$")
 worker=$(spawn "fakeserver-$$-worker")
 outsider=$(spawn "fakeserver-$$-outsider")
@@ -158,18 +159,18 @@ fake_proc "$proc" "$outsider" 1 S 502
 cgroup_v2 "$work/full/cgroup" 950000 1000000
 mkdir -p "$work/full/run"
 echo "$server" >"$work/full/run/server.pid"
-MEM_GUARD_PROC=$proc start_guard full "[f]akeserver-$$" "$work/full/cache"
+MEM_GUARD_PROC=$proc start_guard full "$work/full/cache"
 report=$work/full/run/memory_guard.txt
 wait_for grep -qs '"after_kill"' "$work/full/run/memory.jsonl" || fail "full: the guard did not fire"
-wait_for has_lines "$work/full/run/memory.jsonl" 5 || fail "full: the guard stopped logging after the kill"
+wait_for has_lines "$work/full/run/memory.jsonl" 6 || fail "full: the guard stopped logging after the kill"
 stop full
 for pid in "$server" "$worker"; do
     gone "$pid" || fail "full: $pid of the server's tree outlived the kill"
 done
 ! gone "$outsider" || fail "full: the guard killed a process outside the server's tree"
 rows full "rows[1]['trim'] == {'fadvise': $fadvise, 'reclaim': 'skipped'} and rows[1]['after_trim'] == 950000
-           and rows[1]['fired'] is True and rows[2]['after_kill']['live'] == []
-           and not any('trim' in r or 'fired' in r for r in rows[3:])"
+           and rows[1]['fired'] is True and rows[2]['after_kill'] == {'live': [], 'current': 950000}
+           and rows[3]['after_drop']['failed'] == 0 and not any('trim' in r or 'fired' in r for r in rows[4:])"
 reading='^fired [0-9T:-]+Z: memory.current 0.0 GiB is 95.0% of memory.max 0.0 GiB, at or over the kill line of 93%'
 head -n 1 "$report" | grep -qE "$reading after a page cache trim\$" \
     || fail "full: the report's first line is not the reading: $(head -n 1 "$report")"
@@ -194,21 +195,42 @@ assert rows[0]["detail"].startswith("fired ") and rows[0]["detail"].endswith(f"s
 EOF
 echo "ok: over the kill line the guard stops, reports on, and kills the server's tree only, then keeps logging"
 
-wanderer=$(spawn "fakeserver-$$-nopid")
-pids+=("$wanderer")
+# serve_variant.sh's SIGTERM lands while a py-spy that hangs holds the fire in its report. The kill and its record still
+# have to land inside the 5 s serve_variant.sh gives the guard before SIGKILL.
+mkdir -p "$work/hangbin"
+printf '#!/usr/bin/env bash\nexec sleep 30\n' >"$work/hangbin/py-spy"
+chmod +x "$work/hangbin/py-spy"
+stuck=$(spawn "fakeserver-$$-stuck")
+pids+=("$stuck")
+cgroup_v2 "$work/term/cgroup" 950000 1000000
+mkdir -p "$work/term/run"
+echo "$stuck" >"$work/term/run/server.pid"
+PATH="$work/hangbin:$PATH" start_guard term
+wait_for grep -qs '^## server processes' "$work/term/run/memory_guard.txt" || fail "term: the guard did not fire"
+sleep 0.3
+started=$(date +%s)
+kill "$guard_pid"
+wait_for gone "$guard_pid" || fail "term: the guard outlived its SIGTERM by 10 s"
+(( $(date +%s) - started <= 4 )) || fail "term: the guard took more than 4 s to finish after SIGTERM"
+wait_for gone "$stuck" || fail "term: the server outlived the guard's SIGTERM"
+rows term "rows[2]['after_kill']['live'] == [] and 'after_drop' in rows[3]"
+grep -qx "SIGKILL sent to \[$stuck\]" "$work/term/run/memory_guard.txt" || fail "term: the kill is not recorded"
+grep -q "^\$ py-spy dump --nonblocking --pid $stuck (killed before it finished)" "$work/term/run/memory_guard.txt" \
+    || fail "term: the hung py-spy was not cut short"
+echo "ok: a SIGTERM mid-fire cuts the report short, and the kill and its record still land"
+
 cgroup_v2 "$work/nopid/cgroup" 950000 1000000
 mkdir -p "$work/nopid/run"
 echo garbled >"$work/nopid/run/server.pid"
-start_guard nopid "[f]akeserver-$$-nopid"
-wait_for grep -qs '^## kill' "$work/nopid/run/memory_guard.txt" || fail "nopid: the guard did not fire"
-wait_for gone "$wanderer" || fail "nopid: the sweep did not kill by command line"
+start_guard nopid
+wait_for has_lines "$work/nopid/run/memory.jsonl" 4 || fail "nopid: fewer than 4 lines in 10 s"
 stop nopid
-grep -qF "\$ pkill -9 -f '[f]akeserver-$$-nopid' (exit 0)" "$work/nopid/run/memory_guard.txt" \
-    || fail "nopid: the sweep is not recorded"
-echo "ok: with no pid in server.pid the guard falls back to pkill by command line"
+rows nopid "not any('fired' in r for r in rows)"
+[[ ! -e $work/nopid/run/memory_guard.txt ]] || fail "nopid: the guard fired without a server pid"
+echo "ok: while server.pid holds no pid the guard never fires"
 
 cgroup_v2 "$work/max/cgroup" 990000 max
-start_guard max '[f]akeserver-none' "$work/max/cache"
+start_guard max "$work/max/cache"
 wait_for has_lines "$work/max/run/memory.jsonl" 5 || fail "max: fewer than 5 lines in 10 s"
 stop max
 rows max "'is max, no limit, so the guard only logs' in rows[1]['warn'] and not any('warn' in r for r in rows[2:])
@@ -222,7 +244,7 @@ echo 9223372036854771712 >"$work/v1/cgroup/memory/memory.limit_in_bytes"
 printf '%s\n' 'cache 1' 'rss 2' 'mapped_file 3' 'dirty 4' 'shmem 5' 'total_cache 10' 'total_rss 20' \
     'total_mapped_file 30' 'total_dirty 40' 'total_shmem 50' 'total_active_file 60' 'total_inactive_file 70' \
     'total_unevictable 80' >"$work/v1/cgroup/memory/memory.stat"
-start_guard v1 '[f]akeserver-none'
+start_guard v1
 wait_for has_lines "$work/v1/run/memory.jsonl" 3 || fail "v1: fewer than 3 lines in 10 s"
 stop v1
 rows v1 "rows[0] == $missing_controls and 'warn' in rows[1] and rows[2] == {'t': rows[2]['t'], 'current': 500,
@@ -234,7 +256,7 @@ echo "ok: cgroup v1 counters map to the v2 names, and its no-limit value means n
 mkdir -p "$work/hostns/proc/self"
 printf '0::/system.slice/docker-abc.scope\n' >"$work/hostns/proc/self/cgroup"
 cgroup_v2 "$work/hostns/cgroup/system.slice/docker-abc.scope" 300000 1000000
-MEM_GUARD_PROC=$work/hostns/proc start_guard hostns '[f]akeserver-none'
+MEM_GUARD_PROC=$work/hostns/proc start_guard hostns
 wait_for has_lines "$work/hostns/run/memory.jsonl" 3 || fail "hostns: fewer than 3 lines in 10 s"
 stop hostns
 rows hostns "all(r['current'] == 300000 and r['max'] == 1000000 for r in rows[1:])"
@@ -244,7 +266,7 @@ limit=$(MEM_GUARD_CGROUP=$work/max/cgroup python3 -I "$guard" --limit)
 [[ $limit == "none $work/max/cgroup/memory.max is max, no limit" ]] || fail "max --limit: $limit"
 echo "ok: a container cgroup below the host's root is found through /proc/self/cgroup, by the guard and by --limit"
 
-start_guard missing '[f]akeserver-none'
+start_guard missing
 wait_for grep -qs 'poll failed: FileNotFoundError' "$work/missing/mem_guard.log" || fail "missing: no error logged"
 sleep 0.3
 stop missing
@@ -252,9 +274,9 @@ echo "ok: a cgroup it cannot read is logged, and the guard keeps polling"
 
 mkdir -p "$work/orphan/run"
 cgroup_v2 "$work/orphan/cgroup" 100000 1000000
-MEM_GUARD_CGROUP=$work/orphan/cgroup MEM_GUARD_POLL_S=0.1 bash -c 'python3 -I "$0" "$1" "$$" "$2" >"$3" 2>&1 &
-echo $! >"$4"
-sleep 2' "$guard" "$work/orphan/run" '[f]akeserver-none' "$work/orphan/mem_guard.log" "$work/orphan/pid"
+MEM_GUARD_CGROUP=$work/orphan/cgroup MEM_GUARD_POLL_S=0.1 bash -c 'python3 -I "$0" "$1" "$$" >"$2" 2>&1 &
+echo $! >"$3"
+sleep 2' "$guard" "$work/orphan/run" "$work/orphan/mem_guard.log" "$work/orphan/pid"
 orphan=$(<"$work/orphan/pid")
 pids+=("$orphan")
 wait_for gone "$orphan" || fail "orphan: the guard outlived its parent"
@@ -287,15 +309,17 @@ echo "ok: --drop-cache follows the hub link once, counts each file once, a dangl
 
 # Poll by poll, with the page cache pass and the clock under the test's control.
 mkdir -p "$work/steps/run"
-MEM_GUARD_PROC=$work/steps/noproc python3 -I - "$guard" "$work/steps" "[f]akeserver-$$-steps" \
-    2>"$work/steps/mem_guard.log" <<'EOF' || fail "steps"
+MEM_GUARD_PROC=$work/steps/noproc python3 -I - "$guard" "$work/steps" 2>"$work/steps/mem_guard.log" <<'EOF' \
+    || fail "steps"
+import errno
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 import time
 
-path, work, pattern = sys.argv[1:]
+path, work = sys.argv[1:]
 spec = importlib.util.spec_from_file_location("mem_guard", path)
 guard = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(guard)
@@ -312,29 +336,52 @@ def usage(current):
         f.write(str(current))
 
 
-def last():
+def last(key="current"):
     with open(os.path.join(run, "memory.jsonl")) as f:
-        return [row for row in map(json.loads, f) if "current" in row][-1]
+        return [row for row in map(json.loads, f) if key in row][-1]
 
 
+def spawn():
+    # Orphaned at once, so its kill is reaped by init and not left a zombie of this process.
+    out = subprocess.run(["bash", "-c", "sleep 300 >/dev/null 2>&1 & echo $!"], capture_output=True, text=True)
+    return int(out.stdout)
+
+
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+class FullDisk:
+    def write(self, text):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    def flush(self):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+
+server = spawn()
 with open(os.path.join(cgroup, "memory.max"), "w") as f:
     f.write("1000000")
 with open(os.path.join(cgroup, "memory.stat"), "w") as f:
     f.write("anon 1\n")
 with open(os.path.join(run, "server.pid"), "w") as f:
-    f.write("garbled")
+    f.write(str(server))
 os.mkdir(os.path.join(cgroup, "memory.reclaim"))
 
 # A trim that frees the usage back under the kill line decides that poll: no fire.
 usage(950000)
 guard.drop_cache = lambda paths, sync=False: (usage(100000), (0, 0, 0))[1]
-step = guard.Guard(run, 0, pattern, [])
+step = guard.Guard(run, 0, [])
 step.poll()
 assert last()["trim"]["reclaim"] == "skipped" and last()["after_trim"] == 100000 and "fired" not in last(), last()
 
 # Under the kill line a reclaim that fails records its errno; a trim that frees nothing stops the trims.
 guard.drop_cache = lambda paths, sync=False: (0, 0, 0)
-step = guard.Guard(run, 0, pattern, [])
+step = guard.Guard(run, 0, [])
 usage(850000)
 step.poll()
 assert last()["trim"]["reclaim"] == "EISDIR", last()
@@ -342,19 +389,33 @@ clock[0] += 61
 step.poll()
 assert "trim" not in last(), last()
 
-# Within a minute of a trim the kill line is decided on the reading alone.
-step = guard.Guard(run, 0, pattern, [])
+# Within a minute of a trim the kill line is decided on the reading alone. The report fails partway and the log is on
+# a full disk, and the stopped server is still killed.
+assert alive(server)
+step = guard.Guard(run, 0, [])
 step.poll()
 assert "trim" in last(), last()
 usage(950000)
 clock[0] += 30
+
+
+def broken(pid):
+    raise RuntimeError("diagnostics broke")
+
+
+guard.describe = broken
+sys.stderr = FullDisk()
 step.poll()
+sys.stderr = sys.__stderr__
 assert "trim" not in last() and last()["fired"] is True, last()
-assert open(os.path.join(run, "memory_guard.txt")).readline().startswith("fired ")
+assert last("after_kill")["after_kill"]["live"] == [], last("after_kill")
+assert not alive(server)
+report = open(os.path.join(run, "memory_guard.txt")).read()
+assert report.startswith("fired ") and f"## kill\nSIGKILL sent to [{server}]\n" in report, report
 
 # Over the kill line a trim runs even after a useless one, and the fire waits for server.pid.
 os.remove(os.path.join(run, "server.pid"))
-step = guard.Guard(run, 0, pattern, [])
+step = guard.Guard(run, 0, [])
 usage(850000)
 clock[0] += 61
 step.poll()
@@ -363,4 +424,5 @@ usage(950000)
 step.poll()
 assert "trim" in last() and "fired" not in last(), last()
 EOF
-echo "ok: the kill is decided on the usage after that poll's trim, trims stop once useless, and a fire needs a server"
+echo "ok: the kill is decided after that poll's trim, trims stop once useless, a fire needs a server pid, and the kill"
+echo "    survives a report and a log that fail"

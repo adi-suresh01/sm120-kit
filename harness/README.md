@@ -231,19 +231,22 @@ names) and writes `<variant>/memory.jsonl`:
   `unavailable`, `skipped`, or an errno name) and `after_trim`. Once a trim frees under 1 GiB, trims stop until the
   usage reaches the kill line. The guard never writes `memory.high` or `memory.max`.
 - When the usage after that poll's trim is at `MEM_GUARD_KILL_FRACTION` (default 0.93, under RunPod's 98%) or over,
-  and `server.pid` exists, it fires, once: it stops the server's tree (SIGSTOP), adds a `mem_guard` phase line,
-  writes `<variant>/memory_guard.txt` (the reading on its first line, all of `memory.stat`, the 40 largest processes
-  by RSS, and for each server process its `State`, `VmRSS`, `VmLck`, `VmPin`, and `Rss*` lines, each thread's state
-  and wait channel, and the kernel stack of each thread in uninterruptible sleep where the container may read it;
-  then a `py-spy dump --nonblocking` of each within 15 s when `py-spy` is on PATH), kills the tree (SIGKILL), and
-  drops the hub cache again once the server is gone (an `after_kill` line). Only a `server.pid` with no pid in it
-  makes it fall back to `pkill -9 -f` of the server's process pattern, which would also hit the wrappers above the
-  server. The run then ends the usual way, `BOOT_FAIL` or `POST_FAIL` with the server's death in its `RESULT` line
-  and `mem_guard` in its verdict, while the container and its logs still exist, and the guard keeps logging.
+  and `server.pid` has given it the server's pid, it fires, once: it stops the server's tree (SIGSTOP), adds a
+  `mem_guard` phase line, writes `<variant>/memory_guard.txt` (the reading on its first line, all of `memory.stat`,
+  the 40 largest processes by RSS, and for each server process its `State`, `VmRSS`, `VmLck`, `VmPin`, and `Rss*`
+  lines, each thread's state and wait channel, and the kernel stack of each thread in uninterruptible sleep where
+  the container may read it; then a `py-spy dump --nonblocking` of each within 15 s when `py-spy` is on PATH), kills
+  the tree (SIGKILL) whatever became of the report, records the tree after the kill (an `after_kill` line), and drops
+  the hub cache again now the server's mappings are gone (an `after_drop` line). It never matches command lines, so
+  `serve_and_smoke.sh` and the `timeout` above the server live on. The run then ends the usual way, `BOOT_FAIL` or
+  `POST_FAIL` with the server's death in its `RESULT` line and `mem_guard` in its verdict, while the container and its
+  logs still exist, and the guard keeps logging.
 - With no limit, or one it cannot read, it writes one `warn` line and only logs.
 
-Its own errors go to `<variant>/mem_guard.log` and never fail the run. `serve_variant.sh` stops it on every way out,
-and it exits by itself once the pid `serve_variant.sh` passed it is no longer its parent. The three knobs go in a
+Its own errors go to `<variant>/mem_guard.log` and never fail the run; a log it cannot write never stops a kill.
+`serve_variant.sh` stops it with SIGTERM on every way out, and SIGKILL 5 s later: outside a fire it exits at once, and
+during one it cuts the report short and finishes the kill and the `after_kill` line first. It also exits by itself
+once the pid `serve_variant.sh` passed it is no longer its parent. The three knobs go in a
 variant's `env`. `mem_guard.py --drop-cache <path>...` syncs each file and does the fadvise pass once, and
 `mem_guard.py --limit` prints the limit in bytes (or `none`) and where it came from; `issues/vllm-56771/setup.sh`
 uses both.

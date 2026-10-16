@@ -64,9 +64,9 @@ if [[ -f $issue_dir/hooks.sh ]]; then
 fi
 
 guard_pid=""
-# A guard left running would write into this run's files after its verdict, and one that never saw a server pid falls
-# back to killing by command line, which would hit the next variant's server. One stuck in a read on a wedged FUSE
-# mount cannot die until the read returns, so the run does not wait on it past the kill.
+# A guard left running would write into this run's files after its verdict. On SIGTERM it exits at once, or finishes
+# a kill in progress well inside the 5 s here; one stuck in a read on a wedged FUSE mount cannot die until the read
+# returns, so the run does not wait on it past the SIGKILL.
 stop_guard() {
     if [[ -z $guard_pid ]]; then
         return 0
@@ -81,10 +81,11 @@ stop_guard() {
 }
 
 # Scheduler and detokenizer children can outlive the launcher after a fault and hold GPU memory, which would fail
-# the next variant's idle check. The guard goes first, so it writes nothing after the verdict.
+# the next variant's idle check. The guard goes first, so it writes nothing after the verdict. pkill reads every
+# process's command line, which blocks on a process stuck in a page fault, so it is bounded.
 cleanup() {
     stop_guard
-    pkill -9 -f "$server_procs" || true
+    timeout -s KILL 30 pkill -9 -f "$server_procs" || true
     if declare -F post_stop >/dev/null; then
         post_stop "$run_dir" || true
     fi
@@ -119,7 +120,7 @@ fi
 # what fills the memory, drops the weights from the page cache, and ends the server before that (see mem_guard.py).
 # huggingface_hub keeps the weights in HF_HUB_CACHE, by default HF_HOME's hub.
 hub_cache=${HF_HUB_CACHE:-${HF_HOME:-$HOME/.cache/huggingface}/hub}
-python3 -I "$here/mem_guard.py" "$run_dir" "$$" "$server_procs" "$hub_cache" >"$run_dir/mem_guard.log" 2>&1 &
+python3 -I "$here/mem_guard.py" "$run_dir" "$$" "$hub_cache" >"$run_dir/mem_guard.log" 2>&1 &
 guard_pid=$!
 launch_cmd=("${SERVER_CMD[@]}" --host 127.0.0.1 --port "$PORT")
 progress launch "${launch_cmd[*]}"

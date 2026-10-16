@@ -13,16 +13,16 @@ the usage is under the kill line. The line carries trim (fadvise: whether that p
 unavailable, skipped, or an errno name) and after_trim. Once a trim frees under 1 GiB, trims stop until the usage
 reaches the kill line. memory.high and memory.max are never written.
 
-When the usage after any trim of that poll is at MEM_GUARD_KILL_FRACTION (default 0.93) or over, and server.pid
-exists, the guard fires: it
-stops (SIGSTOP) every process of the server's tree, adds a mem_guard phase to <run_dir>/progress.jsonl, writes
-<run_dir>/memory_guard.txt (its reading on the first line, then memory.stat, the largest processes, and each server
-process's memory lines, threads, and kernel stacks, then py-spy stacks within 15 s), kills (SIGKILL) the tree, and
-drops the cache paths again once the server's mappings are gone (an after_kill line). Only when server.pid holds no
-pid does it fall back to `pkill -9 -f <server_pattern>`. It then keeps logging until stopped, and never fires twice.
-Under no limit, or one it cannot read, it only logs.
+When the usage after any trim of that poll is at MEM_GUARD_KILL_FRACTION (default 0.93) or over, and server.pid has
+given the server's pid, the guard fires: it stops (SIGSTOP) every process of the server's tree, adds a mem_guard phase
+to <run_dir>/progress.jsonl, writes <run_dir>/memory_guard.txt (its reading on the first line, then memory.stat, the
+largest processes, and each server process's memory lines, threads, and kernel stacks, then py-spy stacks within
+15 s), kills (SIGKILL) the tree whatever became of the report, records the tree after the kill (an after_kill line),
+and drops the cache paths again now the server's mappings are gone (an after_drop line). It then keeps logging until
+stopped, and never fires twice. A SIGTERM ends the guard at once, or, during a fire, right after the kill and its
+record. Under no limit, or one it cannot read, it only logs.
 
-Usage: mem_guard.py <run_dir> <parent_pid> <server_pattern> [<cache_path>...]   (exits once <parent_pid> is gone)
+Usage: mem_guard.py <run_dir> <parent_pid> [<cache_path>...]   (exits once <parent_pid> is gone)
        mem_guard.py --drop-cache <path>...   (one summary line)
        mem_guard.py --limit                   (the limit in bytes, or none, then where it came from)
   MEM_GUARD_CGROUP (default /sys/fs/cgroup) is the cgroup v2 root, or the v1 root that holds memory/; under it the
@@ -56,8 +56,9 @@ USEFUL_TRIM = GIB
 # The kernel reclaims in the writer's context, so a large request holds up the poll for as long as it takes.
 RECLAIM_CAP = 4 * GIB
 STACK_BUDGET_S = 15
-SWEEP_TIMEOUT_S = 5
 EXIT_WAIT_S = 10
+# serve_variant.sh allows a stopped guard 5 s before SIGKILL, and the after_kill line has to land inside that.
+STOPPING_WAIT_S = 1
 TABLE_LINES = 40
 STATUS_KEYS = ("State", "VmRSS", "VmLck", "VmPin", "RssAnon", "RssFile", "RssShmem")
 CONTROLS = ("memory.reclaim", "memory.high")
@@ -71,7 +72,11 @@ def utc_now():
 
 
 def log(message):
-    print(f"{utc_now()} {message}", file=sys.stderr, flush=True)
+    try:
+        print(f"{utc_now()} {message}", file=sys.stderr, flush=True)
+    # The guard's own log on a full disk must not stop a fire halfway, with the server's tree stopped and not killed.
+    except (OSError, ValueError):
+        pass
 
 
 def append(path, record):
@@ -346,19 +351,21 @@ def start(argv):
         return argv, out, e
 
 
-def finish(started, deadline):
-    """The command line, how it ended, and its output."""
+def finish(started, deadline, cut_short):
+    """The command line, how it ended, and its output, waiting no later than the deadline or `cut_short()`."""
     argv, out, proc = started
     with out:
         if isinstance(proc, OSError):
             return f"$ {shlex.join(argv)}\n{proc}\n"
-        try:
-            ended = f"exit {proc.wait(timeout=max(0.0, deadline - time.monotonic()))}"
-        except subprocess.TimeoutExpired:
+        while proc.poll() is None and time.monotonic() < deadline and not cut_short():
+            time.sleep(0.05)
+        if proc.returncode is None:
             # A child stuck in an uninterruptible read cannot be reaped until the read returns, so it is not waited
             # for: the kill after it matters more.
             proc.kill()
-            ended = "killed at its time limit"
+            ended = "killed before it finished"
+        else:
+            ended = f"exit {proc.returncode}"
         out.seek(0)
         return f"$ {shlex.join(argv)} ({ended})\n{out.read().decode('utf-8', 'replace')}"
 
@@ -405,21 +412,20 @@ def describe(pid):
     return "".join(out)
 
 
-def stacks(pids):
+def stacks(pids, cut_short):
     """Python stacks of the stopped server, all dumped at once within one budget."""
     if shutil.which("py-spy") is None:
         return "py-spy is not on PATH\n"
     # --nonblocking: the default dump stops the process first, and a worker in uninterruptible sleep never stops.
     started = [start(["py-spy", "dump", "--nonblocking", "--pid", str(pid)]) for pid in pids]
     deadline = time.monotonic() + STACK_BUDGET_S
-    return "".join(finish(one, deadline) for one in started)
+    return "".join(finish(one, deadline, cut_short) for one in started)
 
 
 class Guard:
-    def __init__(self, run_dir, parent, pattern, cache_paths):
+    def __init__(self, run_dir, parent, cache_paths):
         self.run_dir = run_dir
         self.parent = parent
-        self.pattern = pattern
         self.cache_paths = cache_paths
         self.root = cgroup_root()
         self.server = Server(os.path.join(run_dir, "server.pid"))
@@ -431,11 +437,22 @@ class Guard:
         self.last_freed = None
         self.warned = False
         self.fired = False
+        self.firing = False
+        self.stopping = False
 
     def path(self, name):
         return os.path.join(self.run_dir, name)
 
+    def on_term(self, signum, frame):
+        # serve_variant.sh sends SIGTERM as its run ends, which comes right after the server the guard killed dies.
+        # Outside a fire the guard exits at once. Inside one nothing is raised, so no step of the kill can be cut off:
+        # the report stops early, and the kill and its record finish inside the 5 s serve_variant.sh allows.
+        self.stopping = True
+        if not self.firing:
+            raise SystemExit(0)
+
     def watch(self):
+        signal.signal(signal.SIGTERM, self.on_term)
         try:
             # Whether a container may ask for reclaim, or set a soft limit, differs between hosts and decides what a
             # guard can do there beyond fadvise.
@@ -476,14 +493,17 @@ class Guard:
             record["after_trim"] = after
             if after is not None:
                 level = after
-        # Before serve_and_smoke.sh writes the server's pid there is no server of this run to stop, and the guard fires
-        # only once.
-        fire = level >= kill_line and os.path.exists(self.server.pid_file)
+        # Until serve_and_smoke.sh has written the server's pid there is no server of this run to stop, and the guard
+        # fires only once.
+        fire = level >= kill_line and self.server.root is not None
         if fire:
             record["fired"] = True
-        append(self.path("memory.jsonl"), record)
-        if fire:
-            self.fire(reading, level)
+        try:
+            append(self.path("memory.jsonl"), record)
+        finally:
+            # A full disk must not keep the guard from the kill.
+            if fire:
+                self.fire(reading, level)
 
     def trim_due(self, over_kill_line):
         if self.last_trim is not None and time.monotonic() - self.last_trim < TRIM_EVERY_S:
@@ -524,58 +544,71 @@ class Guard:
 
     def fire(self, reading, level):
         self.fired = True
-        self.server.refresh()
-        # Stopped first: the memory stops growing, and the processes keep their state for the report.
-        stopped = self.server.signal(signal.SIGSTOP)
+        self.firing = True
+        report = self.path("memory_guard.txt")
+        try:
+            self.server.refresh()
+            # Stopped first: the memory stops growing, and the processes keep their state for the report.
+            stopped = self.server.signal(signal.SIGSTOP)
+            self.report(report, reading, level, stopped)
+        except Exception as e:
+            log(f"writing the report failed: {type(e).__name__}: {e}")
+        finally:
+            # Whatever became of the report, the tree is killed: one left stopped would hang the boot until
+            # boot_timeout_s, and the kill is what keeps RunPod from removing the container.
+            killed = self.server.signal(signal.SIGKILL)
+            log(f"SIGKILL sent to {killed}")
+            try:
+                with open(report, "a", encoding="utf-8") as f:
+                    f.write(f"\n## kill\nSIGKILL sent to {killed}\n")
+            except OSError as e:
+                log(f"recording the kill failed: {e}")
+            self.after_kill()
+            self.firing = False
+        if self.stopping:
+            raise SystemExit(0)
+
+    def report(self, report, reading, level, stopped):
         summary = (f"fired {reading.t}: memory.current {level / GIB:.1f} GiB is {level / reading.limit:.1%} of "
                    f"memory.max {reading.limit / GIB:.1f} GiB, at or over the kill line of {self.kill_at:.0%} after a "
                    f"page cache trim")
         log(f"{summary}; stopped {stopped}")
-        report = self.path("memory_guard.txt")
-        try:
-            # progress.sh's line, written here so `harness exec` shows the guard firing while the report is written.
-            append(self.path("progress.jsonl"),
-                   {"phase": "mem_guard", "t": int(time.time()), "detail": f"{summary}; stopped pids {stopped}"})
-            with open(report, "w", encoding="utf-8") as f:
-                f.write(f"{summary}\n\n## reading\n{json.dumps(reading.record())}\n\n## memory.stat\n"
-                        f"{reading.stat_text}\n## largest processes\n{process_table()}\n## server processes, stopped: "
-                        f"{stopped}\n")
-                for pid in stopped:
-                    f.write(describe(pid))
-                # What is written so far survives a py-spy that hangs past the container's end.
-                f.flush()
-                f.write(f"\n## stacks\n{stacks(stopped)}")
-        except Exception as e:
-            log(f"writing the report failed: {type(e).__name__}: {e}")
-        # The kill is what keeps RunPod from removing the container, so a report that failed does not stop it.
-        killed = self.server.signal(signal.SIGKILL)
-        outcome = f"SIGKILL sent to {killed}\n"
-        if self.server.root is None:
-            # No server pid was ever written, so matching command lines is all that is left, wrappers whose arguments
-            # name the server included.
-            outcome += finish(start(["pkill", "-9", "-f", self.pattern]), time.monotonic() + SWEEP_TIMEOUT_S)
-        log(outcome.strip())
-        try:
-            with open(report, "a", encoding="utf-8") as f:
-                f.write(f"\n## kill\n{outcome}")
-        except OSError as e:
-            log(f"recording the kill failed: {e}")
-        self.after_kill()
+        # progress.sh's line, written here so `harness exec` shows the guard firing while the report is written.
+        append(self.path("progress.jsonl"),
+               {"phase": "mem_guard", "t": int(time.time()), "detail": f"{summary}; stopped pids {stopped}"})
+        with open(report, "w", encoding="utf-8") as f:
+            f.write(f"{summary}\n\n## reading\n{json.dumps(reading.record())}\n\n## memory.stat\n"
+                    f"{reading.stat_text}\n## largest processes\n{process_table()}\n## server processes, stopped: "
+                    f"{stopped}\n")
+            for pid in stopped:
+                f.write(describe(pid))
+            # What is written so far survives a py-spy that hangs past the container's end.
+            f.flush()
+            f.write(f"\n## stacks\n{stacks(stopped, lambda: self.stopping)}")
 
     def after_kill(self):
-        # The server's mappings went with it, so the cache a trim could not drop while it ran drops now.
-        deadline = time.monotonic() + EXIT_WAIT_S
-        while self.server.live() and time.monotonic() < deadline:
+        started = time.monotonic()
+        while self.server.live():
+            if time.monotonic() - started >= (STOPPING_WAIT_S if self.stopping else EXIT_WAIT_S):
+                break
             time.sleep(0.1)
-        left = self.server.live()
-        files, size, failed = drop_cache(self.cache_paths)
         try:
-            after = current_usage(self.root)
+            usage = current_usage(self.root)
         except (OSError, ValueError) as e:
             log(f"reading the usage after the kill failed: {e}")
-            after = None
-        append(self.path("memory.jsonl"), {"t": utc_now(), "after_kill": {"live": left, "dropped_files": files,
-                                                                          "failed": failed, "current": after}})
+            usage = None
+        # Recorded before the drop, which may take longer than serve_variant.sh waits once it stops the guard.
+        append(self.path("memory.jsonl"),
+               {"t": utc_now(), "after_kill": {"live": self.server.live(), "current": usage}})
+        # The server's mappings went with it, so the cache a trim could not drop while it ran drops now.
+        files, size, failed = drop_cache(self.cache_paths)
+        try:
+            usage = current_usage(self.root)
+        except (OSError, ValueError) as e:
+            log(f"reading the usage after the drop failed: {e}")
+            usage = None
+        append(self.path("memory.jsonl"),
+               {"t": utc_now(), "after_drop": {"files": files, "bytes": size, "failed": failed, "current": usage}})
 
 
 def report_drop(paths):
@@ -610,10 +643,10 @@ def main(args):
     if args == ["--limit"]:
         report_limit()
         return 0
-    if len(args) < 3 or not args[1].isdigit():
+    if len(args) < 2 or not args[1].isdigit():
         print(__doc__, file=sys.stderr)
         return 2
-    Guard(args[0], int(args[1]), args[2], args[3:]).watch()
+    Guard(args[0], int(args[1]), args[2:]).watch()
     return 0
 
 

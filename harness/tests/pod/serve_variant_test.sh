@@ -506,6 +506,7 @@ cmp -s <(tail -n 1 "$guarded/progress.jsonl") "$guarded/verdict.json" \
     || fail "hook-guard: the verdict is not the last progress line"
 grep -q '"fired": true' "$guarded/memory.jsonl" || fail "hook-guard: memory.jsonl has no fired line"
 grep -q '"after_kill": {"live": \[\]' "$guarded/memory.jsonl" || fail "hook-guard: the server outlived the kill"
+grep -q '"after_drop": {' "$guarded/memory.jsonl" || fail "hook-guard: no cache drop after the kill"
 echo "ok: a guard that fires kills the server alone, and the run ends as POST_FAIL with the guard in its verdict"
 
 [[ $(wc -l <"$work/results/verdicts.jsonl") -eq 25 ]] || fail "verdicts.jsonl should hold one line per run"
