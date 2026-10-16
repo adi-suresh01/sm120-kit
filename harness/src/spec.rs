@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
 use std::path::Path;
@@ -389,8 +389,15 @@ impl Variant {
                 package != Package::Vllm || quality.gsm8k <= GSM8K_TEST_QUESTIONS,
                 "quality.gsm8k must be at most {GSM8K_TEST_QUESTIONS}, the questions in GSM8K's test split"
             );
+            let mut seen = BTreeSet::new();
             for &(concurrency, prompts) in &quality.bench {
                 ensure!(concurrency >= 1 && prompts >= 1, "quality.bench pairs must be positive");
+                // The verdict keeps one tok/s per concurrency, and the bench output files are named by it, so a
+                // second run at the same concurrency would overwrite the first.
+                ensure!(
+                    seen.insert(concurrency),
+                    "quality.bench lists concurrency {concurrency} more than once"
+                );
             }
         }
         Ok(())
@@ -667,6 +674,9 @@ smoke_concurrency = 13
                     "{package} {bad}: {err}"
                 );
             }
+            let twice = "gsm8k = 50\nbench = [[16, 64], [1, 8], [16, 256]]\n";
+            let err = error_of(&with_quality(package, twice));
+            assert!(err.contains("concurrency 16 more than once"), "{package}: {err}");
             let err = error_of(&with_quality(package, "gsm8k = 50\nmax_tokens = 4096\n"));
             assert!(err.contains("unknown field `max_tokens`"), "{package}: {err}");
         }
