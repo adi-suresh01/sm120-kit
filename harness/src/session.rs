@@ -101,8 +101,10 @@ fn ssh_command(target: &Target, identity: Option<&Path>) -> Result<Command> {
         fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
     let mut command = Command::new("ssh");
-    // The pod runs a third-party image as root; a forwarded agent would let it log in anywhere as Aditya.
+    // The pod runs a third-party image as root; a forwarded agent would let it log in anywhere as Aditya, and a
+    // SendEnv pattern in a user's ssh config would hand it the API key.
     command
+        .env_remove("RUNPOD_API_KEY")
         .args([
             "-o",
             "BatchMode=yes",
@@ -565,6 +567,12 @@ mod tests {
             "{keyed}"
         );
         assert!(dir.is_dir());
+        let command = ssh_command(&target, None).unwrap();
+        assert!(
+            command
+                .get_envs()
+                .any(|(key, value)| key == "RUNPOD_API_KEY" && value.is_none())
+        );
         fs::remove_dir_all(dir).unwrap();
     }
 
