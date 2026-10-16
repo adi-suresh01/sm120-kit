@@ -158,6 +158,99 @@ Run: `harness run vllm-47990` (all four variants in file order, then down).
   rebase. The rebased patch keeps jszzr as author; offer it to them rather than opening a competing PR.
 - On #47988: the Marlin fallback finding and the pad-vs-guard numbers, whichever way they go.
 
-## Results
+## Results (2026-10-16 05:05-05:27 UTC, pod sm120-vllm-47990-f12efe)
 
-Not run yet.
+Environment (`results/vllm-47990/env.txt`): 1x RTX PRO 6000 Blackwell Server Edition (cc 12.0, 97887 MiB, driver
+580.173.02), SECURE. vllm 0.31.0, torch 2.13.0+cu130, flashinfer-python 0.7.0.post1, triton 3.7.1.
+Spend: $0.93 (estimate, `harness budget show`), 22.5 min from `run` to terminate. The plan guessed 60-65 min: setup
+took 90 s (model download 27 s) and each eval 2.5-5 min.
+
+### Verdicts and routing
+
+| Variant | kv_a_proj (576 x 2048) | Aligned layers | Verdict | Boot |
+|---|---|---|---|---|
+| auto | DeepGEMM (server log: only `DeepGemmFp8BlockScaledMMKernel`) | DeepGEMM | OK | 86 s |
+| cutlass | `CutlassFp8BlockScaledMMKernel` (route.py) | CUTLASS | BOOT_FAIL | 56 s |
+| guard-47988 | `MarlinFP8ScaledMMLinearKernel` (route.py; server log names both) | CUTLASS | OK | 80 s |
+| pad-48588 | `CutlassFp8BlockScaledMMKernel`, padded to 640 (route.py) | CUTLASS | OK | 75 s |
+
+`cutlass` dies in the memory profiling pass: `profile_run` -> `_dummy_run` -> `deepseek_v2.py forward` ->
+`RuntimeError: cutlass_gemm_caller, .../c3x/cutlass_gemm_caller.cuh:52, Invalid status`. kv_a_proj is the model's
+only block-FP8 layer with N % 128 != 0.
+
+- H1 holds: the bug is still in v0.31.0, after #52775 and #55180.
+- H2 holds: a real block-FP8 MLA model crashes at startup once kv_a_proj routes to CUTLASS.
+- H3 holds for the Docker image: DeepGEMM takes every block-FP8 layer, so the default config never reaches CUTLASS.
+- #47988's guard falls through to Marlin W8A16 on SM120, not Triton.
+
+### Kernel tests and sweep
+
+| | stock (auto) | pad-48588 |
+|---|---|---|
+| `test_block_fp8.py -k cutlass` (rebased tests, 22 selected) | 7 passed, 15 failed | 22 passed |
+| sweep, wrapper path, N in {64, 192, 576, 1344, 2112} | `Invalid status` at all 27 M x K each | OK at all 27, max rel err 1.4-1.6e-3 |
+| sweep, raw op, same N | `Invalid status` | `Invalid status` (kernel unchanged, as expected) |
+| sweep, aligned N {512, 1536, 7168} | OK, max rel err 1.4-1.5e-3 | same |
+
+The 14 failing stock matmul cases fail on `Invalid status`; the 15th is the PR's layer test (640-row assert). Errors
+are vs an fp32 dequant reference; the padded rows match the aligned ones.
+
+### GEMM and layer timings (median us, CUDA graphs, default Triton config)
+
+N=576 K=2048 (this model's kv_a_proj), layer level (`apply_weights`, activation handling included):
+
+| M | Triton | CUTLASS padded | Marlin (guard's fallback) |
+|---|---|---|---|
+| 1 | 20.5 | 8.3 | 16.0 |
+| 4 | 20.9 | 11.2 | 16.1 |
+| 16 | 21.1 | 11.4 | 19.5 |
+| 64 | 21.3 | 11.7 | 34.3 |
+| 256 | 21.8 | 17.2 | 14.0 |
+| 1024 | 23.1 | 31.8 | 18.4 |
+| 4096 | 33.1 | 59.2 | 50.5 |
+
+N=576 K=7168 (DeepSeek-V3 kv_a_proj):
+
+| M | GEMM Triton | GEMM CUTLASS padded | Layer Triton | Layer CUTLASS | Layer Marlin |
+|---|---|---|---|---|---|
+| 1 | 63.9 | 18.0 | 65.4 | 19.2 | 20.1 |
+| 16 | 65.1 | 19.9 | 66.7 | 22.6 | 24.1 |
+| 64 | 65.2 | 20.0 | 67.0 | 24.2 | 42.6 |
+| 256 | 65.9 | 32.1 | 68.3 | 42.3 | 23.2 |
+| 1024 | 66.5 | 57.3 | 72.2 | 91.3 | 39.3 |
+| 4096 | 96.2 | 63.1 | 135.8 | 184.4 | 136.4 |
+
+- vs Triton (what both threads compared): padded CUTLASS GEMM is 3.3-3.6x faster at M <= 64 on N=576 K=7168, 2.1x
+  at 256, 1.2-1.5x at 1024-4096. Same direction as jszzr's PRO 5000 numbers, larger at small M.
+- vs Marlin (what the guard actually gives): padded CUTLASS is 1.4-2.9x faster at M <= 64 on the model's shape; on
+  DeepSeek-V3's it is within 7% at M <= 16 and 1.8x faster at 64. Marlin is faster at M = 256-1024 (1.2-2.3x). Marlin's times are not
+  monotonic in M (34.3 us at M=64, 14.0 at 256), so its own M-dependent tile choice is visible here.
+- The CUTLASS layer row carries a large activation-quant overhead at big M that the GEMM row does not: 91.3 vs 57.3 us
+  at M=1024, 184.4 vs 63.1 at 4096, and the aligned 512 x 7168 control shows the same (175.6 vs 55.0 at 4096), so it
+  is not the padding. It is the eager CustomOp quant path; the compiled server may differ. Worth a separate look.
+- H6 (N=32 K=1024, default Triton config): padded CUTLASS GEMM 4.6-8.4 us vs Triton 9.8-10.1 at M <= 256 (1.2-2.1x
+  faster), 12.3-12.5 vs 10.2-10.5 at M >= 1024 (Triton 1.2x faster). F21HGG's 1.7-4.4x for Triton was with a tuned
+  config, which we did not run, so this neither confirms nor refutes it.
+- Max rel diff vs Triton: CUTLASS 5e-7 (same quantized math), Marlin 2.8e-2 (BF16 activations, different numerics).
+
+### Whole model (offline engine, prefix caching off, median of 3)
+
+| Variant | kv_a_proj kernel | GSM8K 5-shot (1319) | tok/s b1 (512/512) | b64 (1024/256) | b256 (1024/256) |
+|---|---|---|---|---|---|
+| auto | DeepGEMM (all layers) | 0.626 | 245.4 | 3808 | 6925 |
+| guard-47988 | Marlin | 0.646 | 224.0 | 3646 | 6854 |
+| pad-48588 | CUTLASS padded | 0.635 | 234.1 | 3606 | 6910 |
+
+- GSM8K: pad vs guard differ by 1.1 points; one standard error at p=0.64, n=1319 is 1.3 points. No accuracy
+  difference shows. (H4 holds.)
+- Throughput, pad vs guard: +4.5% at batch 1, -1.1% at batch 64, +0.8% at batch 256. The batch-1 gain matches the
+  decode-M win above; batch 64 includes 64k prefill tokens, likely where Marlin's large-M edge shows (not profiled). kv_a_proj is one
+  small GEMM per layer, so the whole-model effect is a few percent either way. (H5: holds at decode, a wash at load.)
+- `auto` is not an accuracy baseline (DeepGEMM requantizes every layer to E8M0 scales).
+
+### What this means for the two PRs
+
+Both fix the crash on this model. #48588 keeps kv_a_proj on W8A8 CUTLASS and is faster at decode batch sizes, both
+per kernel (1.4-2.9x over Marlin at M <= 64) and end to end at batch 1 (+4.5%). #47988's guard is a correct safety
+net, but its fallback on SM120 is Marlin, not Triton, which both threads assumed. Whole-model accuracy is the same
+within noise.
