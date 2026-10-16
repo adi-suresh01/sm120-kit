@@ -25,8 +25,10 @@ if [[ -z $fault ]]; then
         2>/dev/null | head -n 1 || true)
 fi
 # Under CUDA_LAUNCH_BLOCKING=1 the deepest Python frame before the first CUDA fault names the kernel's launcher;
-# the frame before the first other error is the fallback, matching the order of the fault column.
+# the frame before the first other error is the fallback, matching the order of the fault column. Nothing after
+# vLLM's shutdown counts: stopping a healthy server logs an EngineDeadError traceback that names no fault.
 where=$(awk '
+    /\[shutdown\] API server: shutdown triggered/ { exit }
     /File "/ { f = $0 }
     /illegal memory access|cudaErrorIllegalAddress|CUDA error: / && f != "" { c = f; exit }
     /Error: / && g == "" && f != "" { g = f }

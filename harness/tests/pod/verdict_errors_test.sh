@@ -96,6 +96,14 @@ printf 'Score: 0.9.1\nSpeculative accept length (per-request, from meta_info): n
 check badscore "{'gsm8k': None, 'accept': None}" "gsm8k.txt score: not a number: '0.9.1'"
 echo "ok: a score that is not a number"
 
+# A healthy vLLM server stopped by the harness: its shutdown logs an EngineDeadError traceback, which is no fault.
+mkdir -p "$work/shutdown"
+printf '%s\n' 'INFO [launcher.py:254] [shutdown] API server: shutdown triggered' \
+    '  File "/x/core_client.py", line 1272, in get_output_async' \
+    'vllm.v1.engine.exceptions.EngineDeadError: EngineCore encountered an issue.' >"$work/shutdown/server.log"
+check shutdown "{'fault': None, 'where': None}" ""
+echo "ok: the traceback from a requested shutdown names no fault"
+
 # A log with NUL bytes (grep calls it binary) and a fault message with bytes that are not UTF-8.
 mkdir -p "$work/binary"
 printf 'boot\0\0\n  File "/x/driver.py", line 3, in launch\nRuntimeError: CUDA error: bad \xff\xfe byte. more\n' \
