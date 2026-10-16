@@ -193,7 +193,8 @@ fn apply(ctx: &Ctx, action: &Action) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ledger::{Budget, Offer};
+    use crate::cloud::Offer;
+    use crate::ledger::Budget;
     use crate::spec::CloudTier;
 
     fn at(s: &str) -> Timestamp {

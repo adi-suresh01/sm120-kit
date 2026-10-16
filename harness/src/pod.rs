@@ -14,11 +14,12 @@ use serde_json::json;
 use crate::budget;
 use crate::clock::Clock;
 use crate::cloud::{
-    Cloud, CloudError, CreatePodRequest, GpuRequest, Mounts, PersistentMount, Pod, PodStatus, SshEndpoint, find_offers,
+    Cloud, CloudError, CreatePodRequest, GpuRequest, Mounts, Offer, PersistentMount, Pod, PodStatus, SshEndpoint,
+    find_offers,
 };
 use crate::events::{Events, Kind};
-use crate::ledger::{ADOPT_WINDOW, Ledger, LedgerStore, Offer, PodEntry, PodState};
-use crate::session::{JobState, Remote, TRANSFER_LIMIT, Target, poll_job, start_job};
+use crate::ledger::{ADOPT_WINDOW, Ledger, LedgerStore, PodEntry, PodState};
+use crate::session::{Remote, TRANSFER_LIMIT, Target, start_job, wait_job};
 use crate::spec::IssueSpec;
 
 pub const ENTRYPOINT: &str = include_str!("../pod/entrypoint.sh");
@@ -359,8 +360,6 @@ const READY_TIMEOUT: SignedDuration = SignedDuration::from_mins(30);
 const NO_DIRECT_SSH: SignedDuration = SignedDuration::from_mins(3);
 const NAME_LOOKUPS: usize = 3;
 const GONE_CHECKS: usize = 6;
-/// About five minutes of failed polls, at POLL apart, before a job counts as lost.
-const POLL_FAILURES: u32 = 30;
 
 pub fn up(ctx: &Ctx, spec: &IssueSpec, run_setup: bool, after_failure: AfterFailure) -> Result<LivePod> {
     let issue = spec.issue.as_str();
@@ -629,52 +628,6 @@ fn setup(ctx: &Ctx, spec: &IssueSpec, entry: &PodEntry, target: &Target, run_set
         json!({"pod": entry.name, "setup_sh": setup_sh}),
     );
     Ok(())
-}
-
-/// Polls a job started with `start_job` until it exits, handing every complete new line of `tail_path` to
-/// `on_line`. Ends early on Ctrl-C, at the pod deadline, or after POLL_FAILURES polls in a row fail.
-pub fn wait_job(
-    ctx: &Ctx,
-    issue: &str,
-    entry: &PodEntry,
-    target: &Target,
-    job: &str,
-    tail_path: &str,
-    on_line: &mut dyn FnMut(&str),
-) -> Result<i32> {
-    let mut offset = 0;
-    let mut failures = 0;
-    loop {
-        ctx.check_interrupted()?;
-        ensure!(
-            ctx.clock.now() < entry.deadline,
-            "pod {} reached its deadline while {job} ran",
-            entry.name
-        );
-        match poll_job(ctx.remote, target, issue, job, tail_path, offset) {
-            Ok(status) => {
-                failures = 0;
-                status.lines.iter().for_each(|line| on_line(line));
-                offset = status.offset;
-                match status.state {
-                    JobState::Exited(code) => return Ok(code),
-                    JobState::Dead => bail!(
-                        "job {job} died without an exit code (killed, or the container restarted); see \
-                         results/{issue}/jobs/{job}.log"
-                    ),
-                    JobState::Running => {}
-                }
-            }
-            Err(e) => {
-                failures += 1;
-                if failures >= POLL_FAILURES {
-                    return Err(e).context(format!("lost contact with the pod while {job} ran"));
-                }
-                ctx.warn(issue, format!("polling {job} failed ({failures} in a row): {e:#}"));
-            }
-        }
-        ctx.clock.sleep(POLL);
-    }
 }
 
 /// Pulls all of results/<issue>.

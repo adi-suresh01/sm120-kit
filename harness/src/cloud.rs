@@ -11,7 +11,7 @@ use ureq::http::{HeaderMap, Response};
 use ureq::{Agent, Body};
 
 use crate::clock::Clock;
-use crate::ledger::{ADOPT_WINDOW, Offer};
+use crate::ledger::ADOPT_WINDOW;
 use crate::spec::{CloudTier, GpuChoice, PodSpec};
 
 const BACKOFF_S: [u64; 5] = [1, 2, 4, 8, 16];
@@ -215,6 +215,15 @@ pub fn in_stock(gpu: &CatalogGpu, cloud: CloudTier) -> bool {
         // Community hosts sit outside RunPod's data centers, so the catalog never lists any for them.
         CloudTier::Community => gpu.availability.is_some_and(Availability::in_stock),
     }
+}
+
+/// A GPU choice with a live price: what a reservation is made for.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Offer {
+    pub gpu: String,
+    pub cloud: CloudTier,
+    pub count: u32,
+    pub rate_usd_hr: f64,
 }
 
 pub fn offer_for(choice: &GpuChoice, count: u32, catalog: &[CatalogGpu]) -> Option<Offer> {

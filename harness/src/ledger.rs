@@ -6,6 +6,7 @@ use anyhow::{Context, Result, bail, ensure};
 use jiff::{SignedDuration, Timestamp};
 use serde::{Deserialize, Serialize};
 
+use crate::cloud::Offer;
 use crate::spec::CloudTier;
 
 /// Headroom on the quoted GPU rate for disk charges and price drift; the deadline is sized so that
@@ -66,15 +67,6 @@ pub struct PodEntry {
     pub terminated_at: Option<Timestamp>,
     pub cost_usd: Option<f64>,
     pub cost_source: Option<CostSource>,
-}
-
-/// A GPU choice with a live price: what a reservation is made for.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Offer {
-    pub gpu: String,
-    pub cloud: CloudTier,
-    pub count: u32,
-    pub rate_usd_hr: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -338,21 +330,15 @@ impl PodEntry {
         }
     }
 
-    /// Returns whether the entry changed. Billing replaces the booked cost once it is at least as high, or once
-    /// it has had a day to settle, so a partial record never understates what was spent.
-    pub fn apply_billing(&mut self, billed_usd: f64, now: Timestamp) -> bool {
-        let Some(at) = self.terminated_at else { return false };
-        if self.state != PodState::Terminated {
-            return false;
-        }
+    /// Billing replaces the booked cost once it is at least as high, or once it has had a day to settle, so a
+    /// partial record never understates what was spent.
+    pub fn apply_billing(&mut self, billed_usd: f64, now: Timestamp) {
+        let Some(at) = self.terminated_at else { return };
         let settled = now.duration_since(at) >= BILLING_SETTLE;
-        if billed_usd < self.cost_usd.unwrap_or(0.0) && !settled {
-            return false;
+        if self.state == PodState::Terminated && (billed_usd >= self.cost_usd.unwrap_or(0.0) || settled) {
+            self.cost_usd = Some(billed_usd);
+            self.cost_source = Some(CostSource::Billing);
         }
-        let changed = self.cost_usd != Some(billed_usd) || self.cost_source != Some(CostSource::Billing);
-        self.cost_usd = Some(billed_usd);
-        self.cost_source = Some(CostSource::Billing);
-        changed
     }
 }
 
@@ -609,15 +595,19 @@ mod tests {
         entry.mark_live("p1").unwrap();
         entry.mark_terminated(at("2026-10-16T18:00:00Z")).unwrap();
         assert!(entry.needs_billing(at("2026-10-16T18:05:00Z")));
-        assert!(!entry.apply_billing(0.5, at("2026-10-16T18:05:00Z")));
-        assert_eq!(entry.cost_usd, Some(2.0));
-        assert!(entry.apply_billing(2.1, at("2026-10-16T18:05:00Z")));
+        entry.apply_billing(0.5, at("2026-10-16T18:05:00Z"));
+        assert_eq!(
+            (entry.cost_usd, entry.cost_source),
+            (Some(2.0), Some(CostSource::Estimate))
+        );
+        entry.apply_billing(2.1, at("2026-10-16T18:05:00Z"));
         assert_eq!(
             (entry.cost_usd, entry.cost_source),
             (Some(2.1), Some(CostSource::Billing))
         );
         assert!(entry.needs_billing(at("2026-10-17T17:00:00Z")));
-        assert!(entry.apply_billing(1.9, at("2026-10-17T18:00:00Z")));
+        entry.apply_billing(1.9, at("2026-10-17T18:00:00Z"));
+        assert_eq!(entry.cost_usd, Some(1.9));
         assert!(!entry.needs_billing(at("2026-10-17T18:00:00Z")));
     }
 

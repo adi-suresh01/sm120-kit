@@ -1,9 +1,9 @@
 use anyhow::{Result, bail, ensure};
 use serde_json::json;
 
-use crate::cloud::find_offers;
+use crate::cloud::{Offer, find_offers};
 use crate::events::Kind;
-use crate::ledger::{Budget, Offer, plan_reservation};
+use crate::ledger::{Budget, plan_reservation};
 use crate::pod::{Ctx, cents, reconcile_billing};
 use crate::spec::{IssueSpec, is_slug};
 

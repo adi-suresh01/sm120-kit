@@ -8,6 +8,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 
+use crate::ledger::PodEntry;
+use crate::pod::{Ctx, POLL};
+
 pub const KIT_DIR: &str = "/workspace/sm120-kit";
 const UPLOAD_EXCLUDES: [&str; 3] = [".DS_Store", "harness-ledger.json*", ".harness-ledger.lock"];
 /// A poll, a job start, or the topology gate answers in seconds on a healthy pod. ServerAlive ends a dead
@@ -447,6 +450,55 @@ pub fn parse_poll(output: &str, offset: u64) -> Result<JobStatus> {
 
 fn truncate(text: &str) -> String {
     text.chars().take(200).collect()
+}
+
+/// About five minutes of failed polls, at POLL apart, before a job counts as lost.
+const POLL_FAILURES: u32 = 30;
+
+/// Polls a job started with `start_job` until it exits, handing every complete new line of `tail_path` to
+/// `on_line`. Ends early on Ctrl-C, at the pod deadline, or after POLL_FAILURES polls in a row fail.
+pub fn wait_job(
+    ctx: &Ctx,
+    issue: &str,
+    entry: &PodEntry,
+    target: &Target,
+    job: &str,
+    tail_path: &str,
+    on_line: &mut dyn FnMut(&str),
+) -> Result<i32> {
+    let mut offset = 0;
+    let mut failures = 0;
+    loop {
+        ctx.check_interrupted()?;
+        ensure!(
+            ctx.clock.now() < entry.deadline,
+            "pod {} reached its deadline while {job} ran",
+            entry.name
+        );
+        match poll_job(ctx.remote, target, issue, job, tail_path, offset) {
+            Ok(status) => {
+                failures = 0;
+                status.lines.iter().for_each(|line| on_line(line));
+                offset = status.offset;
+                match status.state {
+                    JobState::Exited(code) => return Ok(code),
+                    JobState::Dead => bail!(
+                        "job {job} died without an exit code (killed, or the container restarted); see \
+                         results/{issue}/jobs/{job}.log"
+                    ),
+                    JobState::Running => {}
+                }
+            }
+            Err(e) => {
+                failures += 1;
+                if failures >= POLL_FAILURES {
+                    return Err(e).context(format!("lost contact with the pod while {job} ran"));
+                }
+                ctx.warn(issue, format!("polling {job} failed ({failures} in a row): {e:#}"));
+            }
+        }
+        ctx.clock.sleep(POLL);
+    }
 }
 
 #[cfg(test)]

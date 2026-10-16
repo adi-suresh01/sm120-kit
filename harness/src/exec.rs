@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use crate::events::Kind;
 use crate::pod::{self, AfterFailure, Ctx, LivePod, StillLive};
 use crate::reap;
-use crate::session::{TRANSFER_LIMIT, shell_quote, start_job};
+use crate::session::{TRANSFER_LIMIT, shell_quote, start_job, wait_job};
 use crate::spec::{IssueSpec, Variant};
 
 /// The variant as a bash file that `serve_variant.sh` sources. Every value is single-quoted, so spaces, quotes,
@@ -149,7 +149,7 @@ fn run_variant(ctx: &Ctx, spec: &IssueSpec, live: &LivePod, planned: &Planned) -
     start_job(ctx.remote, &live.target, issue, &job, &command)?;
     let mut verdicts = 0;
     let progress = format!("results/{issue}/{name}/progress.jsonl");
-    let code = pod::wait_job(ctx, issue, &live.entry, &live.target, &job, &progress, &mut |line| {
+    let code = wait_job(ctx, issue, &live.entry, &live.target, &job, &progress, &mut |line| {
         if progress_line(ctx, issue, name, line) {
             verdicts += 1;
         }
