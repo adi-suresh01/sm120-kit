@@ -4,7 +4,8 @@
 # test, and a server that dies mid-evaluation. Also checks restores between runs, the hooks, and progress.jsonl.
 # Then vllm variants with quality, through gsm8k_chat.py on a fixture and fake_vllm.py: right answers, garbage
 # answers, HTTP 500s, a retried failure, a max_model_len too short to answer in, a fixture hash mismatch, and a bench
-# run that drops a request. Last, an issue whose hooks.sh defines post_smoke: alone, failing, and after quality.
+# run that drops a request. Last, an issue whose hooks.sh defines post_smoke: alone, failing, after quality, under
+# a server that dies, and leaving a process running behind it.
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -41,6 +42,14 @@ cat >"$work/bin/pkill" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"$WORK/pkill.log"
 EOF
+# macOS has no setsid(1). The stand-in has to start a new session too, since serve_and_smoke.sh ends POST_SMOKE by
+# its process group.
+if ! command -v setsid >/dev/null; then
+    cat >"$work/bin/setsid" <<'EOF'
+#!/usr/bin/env bash
+exec python3 -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' "$@"
+EOF
+fi
 cat >"$work/bin/vllm" <<EOF
 #!/usr/bin/env bash
 exec python3 -I '$here/fake_vllm.py' "\$@"
@@ -289,13 +298,16 @@ echo "ok: a bench run that completes fewer requests than it sent fails the quali
 
 # The hook writes what it was called with and saw, asks the live server, adds a phase, and appends "finished" last.
 # The variant env picks its mode: HOOK=fail fails a command in its middle, HOOK=hang waits like a client that keeps
-# retrying.
+# retrying, and HOOK=background leaves a process running behind it.
 issue="$work/hooked"
 mkdir -p "$issue"
 cat >"$issue/hooks.sh" <<'EOF'
 post_smoke() {
     if [[ ${HOOK:-} == hang ]]; then
         sleep 29.123
+    fi
+    if [[ ${HOOK:-} == background ]]; then
+        sleep 28.456 &
     fi
     printf '%s|%s|%s|%s|%s\n' "$1" "$2" "$3" "$VARIANT" "${HOOK:-}" >"$1/hook.txt"
     curl -sf -w '\n' "http://127.0.0.1:$2/health" >>"$1/hook.txt"
@@ -354,13 +366,22 @@ if pgrep -fx 'sleep 29.123' >/dev/null; then
 fi
 echo "ok: a server that dies under post_smoke ends as POST_FAIL and takes the hook's processes down"
 
-[[ $(wc -l <"$work/results/verdicts.jsonl") -eq 17 ]] || fail "verdicts.jsonl should hold one line per run"
-cmp -s <(tail -n 1 "$work/results/verdicts.jsonl") "$work/results/hook-die/verdict.json" || fail "verdict.json differs"
+write_variant hook-bg ok "" "HOOK=background"
+serve hook-bg
+field hook-bg verdict "'OK'"
+grep -qx finished "$work/results/hook-bg/hook.txt" || fail "hook-bg: the hook did not finish"
+if pgrep -fx 'sleep 28.456' >/dev/null; then
+    fail "hook-bg: a process the hook backgrounded outlived the run"
+fi
+echo "ok: a process post_smoke leaves running behind it is ended with the run"
+
+[[ $(wc -l <"$work/results/verdicts.jsonl") -eq 18 ]] || fail "verdicts.jsonl should hold one line per run"
+cmp -s <(tail -n 1 "$work/results/verdicts.jsonl") "$work/results/hook-bg/verdict.json" || fail "verdict.json differs"
 if pgrep -f "$here/fake_server.py" >/dev/null; then
     fail "a fake server outlived its run"
 fi
 [[ $(grep -cxF -- '-9 -f [s]glang[.]launch_server|[s]glang::' "$work/pkill.log") -eq 5 ]] \
     || fail "each sglang run should clean up the server pattern once"
-[[ $(grep -cxF -- '-9 -f [v]llm serve|[V]LLM::' "$work/pkill.log") -eq 12 ]] \
+[[ $(grep -cxF -- '-9 -f [v]llm serve|[V]LLM::' "$work/pkill.log") -eq 13 ]] \
     || fail "each vllm run should clean up the server pattern once"
 echo "ok: one verdict line per run, one cleanup per run, and no server left behind"
