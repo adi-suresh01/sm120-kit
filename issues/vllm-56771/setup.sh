@@ -11,6 +11,8 @@ model=deepseek-ai/DeepSeek-V4.1-Flash
 revision=314113f8a7dadb388215396ba5fbee2c610a04d6
 min_ram_gb=256
 hub=/root/hf-hub
+# The download's chunk cache would otherwise sit under HF_HOME, on the 30 GB volume.
+export HF_XET_CACHE=/root/hf-xet
 
 python3 - <<'EOF'
 from importlib.metadata import version
@@ -37,7 +39,7 @@ if (( ram_gb < min_ram_gb )); then
     echo "RAM ${ram_gb} GiB (${ram_source}) is under ${min_ram_gb} GiB; run harness down" >&2
     exit 1
 fi
-mkdir -p /workspace/cores
+mkdir -p /root/cores
 
 # The weights go on container disk: on EU-CZ-1 vLLM spent 7m35s just opening lazy views of the 48 shards on the FUSE
 # volume at /workspace, and on EUR-IS-2 that volume wrote at 130 MB/s against 1.2 GB/s for container disk.
@@ -53,6 +55,19 @@ ln -sfn "$hub" "$HF_HOME/hub"
 if ! python3 -m pip install --quiet --break-system-packages py-spy==0.4.0 \
     && ! python3 -m pip install --quiet py-spy==0.4.0; then
     echo "installing py-spy failed; memory_guard.txt will have no Python stacks" >&2
+fi
+# A container without CAP_SYS_PTRACE cannot read another process's memory, so one dump of a Python process tells
+# whether the report will have stacks.
+if command -v py-spy >/dev/null; then
+    python3 -c 'import time; time.sleep(60)' &
+    probe=$!
+    sleep 2
+    if timeout 30 py-spy dump --nonblocking --pid "$probe" >/dev/null 2>&1; then
+        echo "py-spy reads Python stacks here"
+    else
+        echo "py-spy cannot read Python stacks here (no CAP_SYS_PTRACE?); memory_guard.txt will have none" >&2
+    fi
+    kill "$probe"
 fi
 
 # Tokenizer first, so the prompts are built (and checked) before the 510 GB download.
