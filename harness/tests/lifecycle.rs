@@ -730,6 +730,67 @@ fn the_ledger_records_the_account_and_refuses_another() {
     assert_eq!(w.states(), [PodState::Live]);
 }
 
+/// What main does for `down`: the key's account check, the reaper, then `down`.
+fn down_as_main_does(w: &World) -> anyhow::Result<()> {
+    let events = Events::new(&w.repo.path().join("results"), &w.clock, false);
+    let account = pod::key_account(&w.cloud, w.repo.path(), &events, Some(ISSUE), true)?;
+    let ctx = Ctx {
+        repo: w.repo.path(),
+        cloud: &w.cloud,
+        remote: &w.remote,
+        clock: &w.clock,
+        events: &events,
+        interrupted: &w.interrupted,
+        account: account.as_deref(),
+    };
+    reap::reap(&ctx)?;
+    pod::down(&ctx, ISSUE)
+}
+
+fn strict_account_check(w: &World) -> String {
+    let events = Events::new(&w.repo.path().join("results"), &w.clock, false);
+    err_text(pod::key_account(&w.cloud, w.repo.path(), &events, Some(ISSUE), false))
+}
+
+#[test]
+fn a_failed_account_check_never_stops_down_from_deleting() {
+    // Another issue's ledger names another organization; this issue's pod is ended and booked as usual.
+    let w = World::default();
+    w.up().unwrap();
+    fs::create_dir_all(w.repo.path().join("issues/vllm-1")).unwrap();
+    LedgerStore::new(w.repo.path(), "vllm-1")
+        .with_account(Some("org-other"))
+        .update(|ledger| {
+            ledger.budget = w.ledger().budget;
+            Ok(())
+        })
+        .unwrap();
+    assert!(strict_account_check(&w).contains("org-other"));
+    down_as_main_does(&w).unwrap();
+    assert_eq!(w.states(), [PodState::Terminated]);
+    assert!(w.events().contains("ending pods anyway"), "{}", w.events());
+
+    // This ledger's own organization differs, or the key's cannot be read: the delete still goes out, and the
+    // ledger write after it refuses to book the pod as gone under a key that may not see it.
+    for (account, error, refusal) in [
+        (Some("org-other"), None, "org-other"),
+        (Some("org-sm120"), Some(500), "cannot tell it is the same account"),
+    ] {
+        let w = World::default();
+        w.up().unwrap();
+        {
+            let mut state = w.cloud.0.borrow_mut();
+            state.account = account.map(str::to_string);
+            state.account_error = error;
+        }
+        assert!(!strict_account_check(&w).is_empty());
+        let err = err_text(down_as_main_does(&w));
+        assert!(err.contains(refusal) && err.contains("still up"), "{err}");
+        assert!(w.cloud.billing_pods().is_empty());
+        assert_eq!(w.states(), [PodState::Live]);
+    }
+}
+
 #[test]
 fn a_key_without_an_organization_records_nothing() {
     let w = World::default();

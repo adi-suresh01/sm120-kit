@@ -8,9 +8,9 @@ use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand};
 use serde_json::json;
 use sm120_harness::clock::SystemClock;
-use sm120_harness::cloud::{API_BASE, Cloud, RunpodRest};
+use sm120_harness::cloud::{API_BASE, RunpodRest};
 use sm120_harness::events::{Events, Kind};
-use sm120_harness::ledger::{LedgerStore, check_accounts};
+use sm120_harness::ledger::LedgerStore;
 use sm120_harness::pod::{self, AfterFailure, Ctx};
 use sm120_harness::session::{SshRemote, TRANSFER_LIMIT};
 use sm120_harness::spec::{IssueSpec, is_slug};
@@ -171,8 +171,8 @@ fn dispatch(
     interrupted: &AtomicBool,
     command: Command,
 ) -> Result<()> {
-    let account = cloud.account().context("reading the key's RunPod organization")?;
-    check_accounts(repo, account.as_deref())?;
+    let ends_pods = matches!(command, Command::Down { .. } | Command::Reap);
+    let account = pod::key_account(cloud, repo, events, command.issue(), ends_pods)?;
     let remote = SshRemote::from_env();
     let ctx = Ctx {
         repo,

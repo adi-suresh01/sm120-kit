@@ -46,6 +46,8 @@ pub struct State {
     pub delete_error: Option<u16>,
     pub delete_ignored: bool,
     pub account: Option<String>,
+    /// GET /v2/organization fails with this status, as on a RunPod outage of that endpoint alone.
+    pub account_error: Option<u16>,
     pub skew: Option<SignedDuration>,
     pub billing: Option<f64>,
     pub interrupt_on_create: Option<Rc<AtomicBool>>,
@@ -87,6 +89,7 @@ impl Default for FakeCloud {
             delete_error: None,
             delete_ignored: false,
             account: Some("org-sm120".into()),
+            account_error: None,
             skew: Some(SignedDuration::ZERO),
             billing: None,
             interrupt_on_create: None,
@@ -244,7 +247,11 @@ impl Cloud for FakeCloud {
     }
 
     fn account(&self) -> Result<Option<String>, CloudError> {
-        Ok(self.0.borrow().account.clone())
+        let state = self.0.borrow();
+        if let Some(status) = state.account_error {
+            return Err(http(status));
+        }
+        Ok(state.account.clone())
     }
 
     fn clock_skew(&self) -> Option<SignedDuration> {

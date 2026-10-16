@@ -119,8 +119,10 @@ An error after the pod exists names the pod, its deadline in local time, and `ha
 
 A 404 from RunPod never books a pod as gone on its own, since RunPod also answers 404 for a pod the key cannot
 see. The ledger records the key's RunPod organization (`GET /v2/organization`) on its first write, and every
-command refuses a key of another organization. That endpoint needs `membership:read` and answers 404 for an
-account outside any organization; on a 401, 403, or 404 the check is skipped, and nothing is recorded.
+command refuses a key of another organization, except `down` and `reap`: they warn and still send the delete,
+since a terminate never sent costs more, and the ledger write after it still refuses to book the pod as gone.
+That endpoint needs `membership:read` and answers 404 for an account outside any organization; on a 401, 403, or
+404 the check is skipped, and nothing is recorded.
 
 ## Watching a run
 

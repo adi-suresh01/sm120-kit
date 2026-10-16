@@ -18,7 +18,7 @@ use crate::cloud::{
     find_offers,
 };
 use crate::events::{Events, Kind};
-use crate::ledger::{ADOPT_WINDOW, Ledger, LedgerStore, PodEntry, PodState};
+use crate::ledger::{ADOPT_WINDOW, Ledger, LedgerStore, PodEntry, PodState, check_accounts};
 use crate::session::{Remote, TRANSFER_LIMIT, Target, start_job, wait_job};
 use crate::spec::IssueSpec;
 
@@ -152,6 +152,41 @@ pub fn report_error(events: &Events, issue: Option<&str>, error: &anyhow::Error)
         fields["next"] = json!(live.next_step());
     }
     events.emit(issue, Kind::Error, fields);
+}
+
+/// The key's RunPod organization, checked against every ledger before anything reads a 404 as gone. Commands that
+/// only end pods (`down`, `reap`) warn and go on when the check fails or cannot run: a terminate never sent costs
+/// more than one sent with another account's key, which RunPod answers with a harmless 404, and the ledger write
+/// after it still refuses to book that account's pod as gone.
+pub fn key_account(
+    cloud: &dyn Cloud,
+    repo: &Path,
+    events: &Events,
+    issue: Option<&str>,
+    ends_pods: bool,
+) -> Result<Option<String>> {
+    let warn = |e: anyhow::Error| {
+        let detail = format!("{e:#}; ending pods anyway, and no ledger write under this key books one as gone");
+        events.emit(issue, Kind::Warn, json!({ "detail": detail }));
+    };
+    let account = match cloud.account() {
+        Ok(account) => account,
+        Err(e) => {
+            let e = anyhow!(e).context("reading the key's RunPod organization");
+            if !ends_pods {
+                return Err(e);
+            }
+            warn(e);
+            None
+        }
+    };
+    if let Err(e) = check_accounts(repo, account.as_deref()) {
+        if !ends_pods {
+            return Err(e);
+        }
+        warn(e);
+    }
+    Ok(account)
 }
 
 pub fn cents(usd: f64) -> f64 {
