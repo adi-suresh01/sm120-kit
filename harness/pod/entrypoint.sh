@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # Pod entrypoint, passed to the container as `bash -c <this file>` by `harness up`, so this shell is the container's
-# PID 1. The deadline watchdog runs in this shell itself: nothing inside the container can kill PID 1, not even
-# SIGKILL, while a forked subshell would carry this whole text as its command line and die to any `pkill -f sshd`.
-# SSH setup, which can hang on apt, runs in the background instead.
+# main process: PID 1, or on RunPod the only child of docker-init (PID 1), which exits when this shell does and
+# takes the whole container with it. The deadline watchdog runs in this shell itself, so whatever kills it also
+# ends the pod, while a forked subshell would carry this whole text as its command line and could die to a
+# `pkill -f sshd` alone and leave the pod running. SSH setup, which can hang on apt, runs in the background instead.
 # Env: HARNESS_DEADLINE_EPOCH (absolute, so a container restart cannot extend it), HARNESS_APT, PUBLIC_KEY,
 #      RUNPOD_POD_ID and RUNPOD_API_KEY (set by RunPod).
 # Tests only: HARNESS_TEST_ROOT prefixes every absolute path; HARNESS_WATCHDOG_NAP_S shortens the naps.
-# No -e or -u: a failed step or an unset variable must never end PID 1, or the watchdog would go with it.
+# No -e or -u: a failed step or an unset variable must never end this shell, or the watchdog would go with it.
 set -o pipefail
 
 root=${HARNESS_TEST_ROOT:-}
@@ -111,7 +112,7 @@ setup_ssh() {
 
 main() {
     # Untrapped, a SIGINT that reaches this shell and its nap together (`pkill -INT -f sleep`) breaks the loop and
-    # exits the shell, and if PID 1 is ever an init shim instead of this shell, TERM or HUP would kill it outright.
+    # exits the shell, and docker-init forwards TERM and HUP to this shell, which would kill it outright.
     local sig
     for sig in HUP INT QUIT TERM USR1 USR2 ALRM; do
         # shellcheck disable=SC2064  # the name is fixed per trap on purpose

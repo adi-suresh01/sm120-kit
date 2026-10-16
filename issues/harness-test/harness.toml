@@ -10,12 +10,13 @@ min_cuda = "12.8"
 container_disk_gb = 20
 volume_gb = 10
 needs_hf_token = false
+# SECURE first: the first community 3070 host was proxy-only (no public IP), and the harness needs direct SSH.
 gpus = [
+  { id = "NVIDIA GeForce RTX 3090", cloud = "SECURE" },
   { id = "NVIDIA GeForce RTX 3070", cloud = "COMMUNITY" },
   { id = "NVIDIA GeForce RTX 3080 Ti", cloud = "COMMUNITY" },
   { id = "NVIDIA RTX 4000 Ada Generation", cloud = "COMMUNITY" },
   { id = "NVIDIA GeForce RTX 3090", cloud = "COMMUNITY" },
-  { id = "NVIDIA GeForce RTX 3090", cloud = "SECURE" },
 ]
 
 [server]

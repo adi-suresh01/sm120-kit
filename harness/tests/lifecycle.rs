@@ -168,7 +168,7 @@ fn up_reserves_creates_waits_copies_and_sets_up() {
     assert_eq!(entry.deadline, "2026-10-16T18:00:00Z".parse().unwrap());
     assert_eq!(live.target.port, 40122);
     assert_eq!(*w.remote.uploads.borrow(), [vec!["harness/pod", "issues/vllm-47990"]]);
-    let armed = format!("watchdog armed for epoch {} in pid 1", entry.deadline.as_second());
+    let armed = format!("watchdog armed for epoch {} in pid ", entry.deadline.as_second());
     assert!(w.remote.scripts.borrow()[0].contains(&armed));
     let setup = w.remote.jobs.borrow()[0].clone();
     assert!(setup.contains("env_report.sh > results/vllm-47990/env.txt 2>&1 && bash issues/vllm-47990/setup.sh"));

@@ -107,11 +107,13 @@ An error after the pod exists names the pod, its deadline in local time, and `ha
    under 15 minutes. One live pod per issue. It also refuses to reserve while RunPod lists a pod named for the
    issue that the ledger does not track (another checkout, or a ledger reverted by git), or while the laptop clock
    is more than 2 minutes off RunPod's.
-2. **Watchdog on the pod.** The entrypoint runs it as PID 1 on the absolute `HARNESS_DEADLINE_EPOCH`, so a
+2. **Watchdog on the pod.** The entrypoint runs it in the container's main process (on RunPod, the only child of
+   docker-init, whose exit ends the container) on the absolute `HARNESS_DEADLINE_EPOCH`, so a
    container restart cannot extend it. At the deadline it tries `DELETE /v2/pods/$RUNPOD_POD_ID` with the pod's
    own key, then `runpodctl pod remove`, then `runpodctl pod stop`, and keeps retrying; each attempt goes to
-   `/workspace/harness-watchdog.log`. `up` ends a pod at once when that log does not show the watchdog armed as
-   PID 1 for the ledger's deadline (an image or API that skipped the entrypoint).
+   `/workspace/harness-watchdog.log`. `up` ends a pod at once when that log does not show the watchdog armed for
+   the ledger's deadline in a process that is still the container's main process (an image or API that skipped
+   the entrypoint).
 3. **Reaper**, first in every command: deletes a pod still listed 2 minutes past its deadline (booking at most
    its reservation), books a pod RunPod no longer lists once a GET agrees, adopts a reservation whose pod
    appeared, releases one whose pod never did (10 minutes), and warns about any `sm120-*` pod no ledger tracks

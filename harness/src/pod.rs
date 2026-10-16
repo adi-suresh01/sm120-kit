@@ -636,26 +636,56 @@ fn wait_ready(ctx: &Ctx, issue: &str, entry: &PodEntry, mut pod: Pod) -> Result<
     }
 }
 
-/// The line entrypoint.sh's watchdog logs as it starts, minus the timestamp.
-fn watchdog_armed_line(deadline: Timestamp) -> String {
-    format!("watchdog armed for epoch {} in pid 1", deadline.as_second())
+/// The start of the line entrypoint.sh's watchdog logs as it arms, after the timestamp; its pid follows.
+fn watchdog_armed_prefix(deadline: Timestamp) -> String {
+    format!("watchdog armed for epoch {} in pid ", deadline.as_second())
+}
+
+/// Prints WATCHDOG_ARMED only while the watchdog that logged the armed line is the container's main process:
+/// PID 1 itself, or the only child of a docker-init or tini PID 1. Both inits exit when that child exits and the
+/// kernel then kills the whole container, so nothing can kill the watchdog and leave the pod running. RunPod
+/// starts containers under docker-init (seen on a live pod, 2026-10-16). sshd also ends up a child of PID 1 once it
+/// daemonizes, so the watchdog's own command line has to be the entrypoint too.
+fn watchdog_check_script(deadline: Timestamp, log: &str, proc: &str) -> String {
+    let armed = watchdog_armed_prefix(deadline);
+    format!(
+        r#"log={log}; proc={proc}
+pid=$(sed -nE 's/^[^ ]* {armed}([0-9]+)$/\1/p' "$log" 2>/dev/null | tail -n 1)
+main=no
+if [[ $pid == 1 ]]; then
+    main=yes
+elif [[ -n $pid && -r $proc/$pid/status ]]; then
+    ppid=$(awk '$1 == "PPid:" {{print $2}}' "$proc/$pid/status")
+    init=$(tr '\0' ' ' <"$proc/1/cmdline" 2>/dev/null)
+    own=$(tr '\0' ' ' <"$proc/$pid/cmdline" 2>/dev/null)
+    init_re='^(/sbin/docker-init|[^ ]*/tini(-static)?) (-[^ ]+ )*-- /bin/bash -c #!/usr/bin/env bash'
+    if [[ $ppid == 1 && $init =~ $init_re && $own == "/bin/bash -c #!/usr/bin/env bash"* ]]; then
+        main=yes
+    fi
+fi
+if [[ $main == yes ]]; then
+    echo WATCHDOG_ARMED
+else
+    echo WATCHDOG_MISSING
+    tail -n 5 "$log" 2>/dev/null || true
+    echo '--- pid 1:'
+    tr '\0' ' ' <"$proc/1/cmdline" 2>/dev/null
+    echo
+    ps -eo pid,ppid,user,args --forest 2>/dev/null | head -n 30 | cut -c1-160 || true
+fi"#
+    )
 }
 
 /// The watchdog is what ends the pod once the laptop is gone. An image ENTRYPOINT or an API change that skips
 /// entrypoint.sh leaves a pod that only `down` or a later reaper pass can end, so such a pod is ended before use.
 /// The script also sources the container env the entrypoint wrote, which fails the same way.
 fn check_watchdog(ctx: &Ctx, entry: &PodEntry, target: &Target) -> Result<()> {
-    let armed = watchdog_armed_line(entry.deadline);
-    let script = format!(
-        "log=/workspace/harness-watchdog.log\n\
-         if grep -qE '^[^ ]* {armed}$' \"$log\" 2>/dev/null; then echo WATCHDOG_ARMED\n\
-         else echo WATCHDOG_MISSING; tail -n 5 \"$log\" 2>/dev/null || true; fi"
-    );
+    let script = watchdog_check_script(entry.deadline, "/workspace/harness-watchdog.log", "/proc");
     let reply = ctx.remote.run(target, &script).context("checking the pod's watchdog")?;
     ensure!(
         reply.lines().any(|line| line == "WATCHDOG_ARMED"),
-        "pod {} shows no watchdog armed as PID 1 for its deadline {}, so nothing on the pod would end it; the \
-         watchdog log ends: {:?}",
+        "pod {} shows no watchdog armed as the container's main process for its deadline {}, so nothing on the \
+         pod would end it; the watchdog log ends: {:?}",
         entry.name,
         entry.deadline,
         reply.trim()
@@ -936,9 +966,78 @@ mod tests {
         assert!(ENTRYPOINT.contains("log \"watchdog armed for epoch $deadline in pid $$\""));
         let deadline: Timestamp = "2026-10-16T20:03:00Z".parse().unwrap();
         assert_eq!(
-            watchdog_armed_line(deadline),
-            "watchdog armed for epoch 1792180980 in pid 1"
+            watchdog_armed_prefix(deadline),
+            "watchdog armed for epoch 1792180980 in pid "
         );
+    }
+
+    /// Runs the real check script in local bash against a fake /proc and watchdog log.
+    fn watchdog_check(log_lines: &[&str], procs: &[(u32, u32, &str)]) -> String {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!("sm120-watchdog-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for (pid, ppid, cmdline) in procs {
+            let p = dir.join("proc").join(pid.to_string());
+            std::fs::create_dir_all(&p).unwrap();
+            std::fs::write(p.join("status"), format!("Name:\tx\nPid:\t{pid}\nPPid:\t{ppid}\n")).unwrap();
+            std::fs::write(p.join("cmdline"), cmdline.replace(' ', "\0") + "\0").unwrap();
+        }
+        let log = dir.join("watchdog.log");
+        std::fs::write(&log, log_lines.join("\n") + "\n").unwrap();
+        let deadline: Timestamp = "2026-10-16T20:03:00Z".parse().unwrap();
+        let script = watchdog_check_script(deadline, log.to_str().unwrap(), dir.join("proc").to_str().unwrap());
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(script)
+            .output()
+            .unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        String::from_utf8(out.stdout)
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap_or("")
+            .to_string()
+    }
+
+    #[test]
+    fn the_watchdog_counts_as_armed_only_as_the_containers_main_process() {
+        const ENTRY: &str = "/bin/bash -c #!/usr/bin/env bash\n# Pod entrypoint";
+        let docker_init = format!("/sbin/docker-init -- {ENTRY}");
+        let armed = |pid: u32| format!("2026-10-16T19:48:00Z watchdog armed for epoch 1792180980 in pid {pid}");
+        let other_epoch = "2026-10-16T19:48:00Z watchdog armed for epoch 1792180000 in pid 1";
+        // What RunPod runs: docker-init as PID 1, the entrypoint as its child, sshd reparented to PID 1.
+        let runpod = [
+            (1, 0, docker_init.as_str()),
+            (497, 1, ENTRY),
+            (2294, 1, "sshd: /usr/sbin/sshd"),
+        ];
+        assert_eq!(watchdog_check(&[&armed(497)], &runpod), "WATCHDOG_ARMED");
+        assert_eq!(watchdog_check(&[&armed(1)], &[(1, 0, ENTRY)]), "WATCHDOG_ARMED");
+        let tini = format!("/usr/bin/tini -s -g -- {ENTRY}");
+        assert_eq!(
+            watchdog_check(&[&armed(497)], &[(1, 0, tini.as_str()), (497, 1, ENTRY)]),
+            "WATCHDOG_ARMED"
+        );
+        for (lines, procs) in [
+            // a deadline that is not the ledger's
+            (vec![other_epoch], &runpod[..]),
+            // the watchdog has died since it logged
+            (vec![&armed(498)], &runpod[..]),
+            // a pid that is not the entrypoint, though PID 1 is its parent
+            (vec![&armed(2294)], &runpod[..]),
+            // the newest line wins over an older armed line
+            (vec![&armed(1), &armed(2294)], &runpod[..]),
+        ] {
+            assert_eq!(watchdog_check(&lines, procs), "WATCHDOG_MISSING", "{lines:?}");
+        }
+        // an init that outlives its child, or an entrypoint that is not the init's direct child
+        let supervisor = [(1, 0, "/usr/bin/supervisord -n"), (497, 1, ENTRY)];
+        assert_eq!(watchdog_check(&[&armed(497)], &supervisor), "WATCHDOG_MISSING");
+        let nested = [(1, 0, docker_init.as_str()), (300, 1, ENTRY), (497, 300, ENTRY)];
+        assert_eq!(watchdog_check(&[&armed(497)], &nested), "WATCHDOG_MISSING");
+        assert_eq!(watchdog_check(&[], &runpod), "WATCHDOG_MISSING");
     }
 
     #[test]
