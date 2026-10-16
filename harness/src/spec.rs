@@ -190,8 +190,22 @@ impl PatchEntry {
 #[serde(deny_unknown_fields)]
 pub struct Quality {
     pub gsm8k: u32,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "bench_pairs")]
     pub bench: Vec<(u32, u32)>,
+}
+
+/// `[concurrency, prompts]` pairs. Read straight into a tuple, `[1, 8, 2]` would pass as (1, 8): the toml reader
+/// leaves the extra number unread instead of refusing it.
+fn bench_pairs<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<(u32, u32)>, D::Error> {
+    Vec::<Vec<u32>>::deserialize(deserializer)?
+        .into_iter()
+        .map(|pair| match pair[..] {
+            [concurrency, prompts] => Ok((concurrency, prompts)),
+            _ => Err(de::Error::custom(format!(
+                "quality.bench entries are [concurrency, prompts] pairs, got {pair:?}"
+            ))),
+        })
+        .collect()
 }
 
 const GSM8K_TEST_QUESTIONS: u32 = 1319;
@@ -645,6 +659,14 @@ smoke_concurrency = 13
             assert!(err.contains("quality.gsm8k must be at least 1"), "{package}: {err}");
             let err = error_of(&with_quality(package, "gsm8k = 50\nbench = [[1, 8], [0, 64]]\n"));
             assert!(err.contains("quality.bench pairs must be positive"), "{package}: {err}");
+            for bad in ["[1, 8, 2]", "[16]", "[]"] {
+                let quality = format!("gsm8k = 50\nbench = [[1, 8], {bad}]\n");
+                let err = error_of(&with_quality(package, &quality));
+                assert!(
+                    err.contains(&format!("[concurrency, prompts] pairs, got {bad}")),
+                    "{package} {bad}: {err}"
+                );
+            }
             let err = error_of(&with_quality(package, "gsm8k = 50\nmax_tokens = 4096\n"));
             assert!(err.contains("unknown field `max_tokens`"), "{package}: {err}");
         }
