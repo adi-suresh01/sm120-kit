@@ -1,7 +1,7 @@
 issue = "vllm-56771"
-# Setup about 25 min (image, 510 GB of weights, prompts), then g0 + a1 + a0 about 60 min, then two follow-up
-# variants about 30 min (README.md, "Hours and cost"). 3.5 h leaves one slow cold boot of slack.
-planned_hours = 1.6
+# What is left of the approved $40 after the EUR-IS-2 attempts: setup about 25 min (image, 510 GB of weights,
+# prompts), then a1 and a0 about 40 min (README.md, "Attempts 1-5").
+planned_hours = 1.45
 
 [pod]
 # Nightly 2026-10-16: FlashInfer 0.7.2 (FI #5197, the SM120 sparse-MLA rewrite) plus #60945 and #57152.
@@ -12,6 +12,8 @@ container_disk_gb = 60
 # 510 GB of weights plus the prompt corpus and logs.
 volume_gb = 600
 needs_hf_token = false
+# Its one 4x host reached HF at 15 MB/s on 10-16, so the 510 GB download could not finish (README.md).
+avoid_data_centers = ["EUR-IS-2"]
 # The reporter's box: 4x Server Edition, TP4, PCIe only. Workstation Edition had no 4x stock on 2026-10-16.
 gpus = [
   { id = "NVIDIA RTX PRO 6000 Blackwell Server Edition", cloud = "SECURE" },
