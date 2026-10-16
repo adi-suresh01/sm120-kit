@@ -283,13 +283,55 @@ fn a_pod_that_exits_while_starting_is_terminated() {
 #[test]
 fn a_pod_billing_above_the_reserved_rate_is_terminated_at_once() {
     let w = World::default();
-    w.cloud.0.borrow_mut().cost = 2.75;
+    w.cloud.0.borrow_mut().cost = Some(2.75);
     assert!(err_text(w.up()).contains("above the $2.739/hr"));
     assert_eq!(w.states(), [PodState::Terminated]);
     assert!(w.cloud.billing_pods().is_empty());
     let w = World::default();
-    w.cloud.0.borrow_mut().cost = 2.70;
+    w.cloud.0.borrow_mut().cost = Some(2.70);
     w.up().unwrap();
+}
+
+#[test]
+fn a_running_pod_whose_rate_cannot_be_read_is_terminated() {
+    for (cost, expected) in [(Some(0.0), "reports its cost as $0/hr"), (None, "reports no cost")] {
+        let w = World::default();
+        w.cloud.0.borrow_mut().cost = cost;
+        let err = err_text(w.up());
+        assert!(err.contains(expected), "{err}");
+        assert_eq!(w.states(), [PodState::Terminated]);
+        assert!(w.cloud.billing_pods().is_empty());
+        assert_eq!(w.events().contains("has no cost field"), cost.is_none());
+    }
+}
+
+#[test]
+fn a_proxy_only_host_is_terminated_after_three_minutes() {
+    let w = World::default();
+    w.cloud.0.borrow_mut().proxy_only = true;
+    let err = err_text(w.up());
+    assert!(
+        err.contains("RunPod gave no direct SSH endpoint (proxy-only host)"),
+        "{err}"
+    );
+    let waited = w.clock.slept.borrow().iter().sum::<std::time::Duration>();
+    assert!(waited >= std::time::Duration::from_secs(180) && waited < std::time::Duration::from_secs(300));
+    assert_eq!(w.states(), [PodState::Terminated]);
+    assert!(w.cloud.billing_pods().is_empty());
+}
+
+#[test]
+fn a_deadline_that_comes_while_starting_ends_the_wait() {
+    // $0.75 buys about 16 min at $2.49/hr with the margin, well short of the 30 min ready timeout.
+    let w = World {
+        repo: funded_checkout(0.75),
+        ..World::default()
+    };
+    w.cloud.0.borrow_mut().boot = vec![PodStatus::Starting];
+    let err = err_text(w.up());
+    assert!(err.contains("reached its deadline"), "{err}");
+    assert_eq!(w.states(), [PodState::Terminated]);
+    assert!(w.cloud.billing_pods().is_empty());
 }
 
 #[test]

@@ -260,6 +260,9 @@ pub const POLL: Duration = Duration::from_secs(10);
 pub const PULL_BEFORE_DELETE: Duration = Duration::from_secs(5 * 60);
 /// Image pulls for serving images run to tens of GB.
 const READY_TIMEOUT: SignedDuration = SignedDuration::from_mins(30);
+/// RunPod publishes 22/tcp a little after RUNNING; a host without public IPs never does, and the harness needs
+/// direct SSH for scp and tar (the proxy carries a shell only).
+const NO_DIRECT_SSH: SignedDuration = SignedDuration::from_mins(3);
 const NAME_LOOKUPS: usize = 3;
 const GONE_CHECKS: usize = 6;
 /// About five minutes of failed polls, at POLL apart, before a job counts as lost.
@@ -426,41 +429,81 @@ fn adopt_by_name(ctx: &Ctx, store: &LedgerStore, entry: &PodEntry, error: CloudE
     ))
 }
 
+/// The deadline was sized for the quoted rate, so a pod that bills above it, or whose rate cannot be read, could
+/// outspend its reservation before the watchdog fires.
+fn check_rate(ctx: &Ctx, issue: &str, entry: &PodEntry, pod: &Pod, warned: &mut bool) -> Result<()> {
+    let reserved_rate = entry.reserved_rate_usd_hr();
+    if pod.cost.is_none() && !*warned {
+        *warned = true;
+        ctx.warn(
+            issue,
+            format!("RunPod's reply for pod {} has no cost field", entry.name),
+        );
+    }
+    match pod.cost {
+        Some(cost) if cost > reserved_rate => bail!(
+            "pod {} bills ${cost:.3}/hr, above the ${reserved_rate:.3}/hr its deadline was sized for",
+            entry.name
+        ),
+        // RunPod reports 0 only for a pod that is not running, so a running pod at 0 means the rate is unknown.
+        Some(cost) if cost <= 0.0 && pod.status == PodStatus::Running => bail!(
+            "pod {} is RUNNING but RunPod reports its cost as ${cost}/hr, so its rate cannot be checked against the \
+             ${reserved_rate:.3}/hr its deadline was sized for",
+            entry.name
+        ),
+        None if pod.status == PodStatus::Running => bail!(
+            "pod {} is RUNNING but RunPod reports no cost, so its rate cannot be checked against the \
+             ${reserved_rate:.3}/hr its deadline was sized for",
+            entry.name
+        ),
+        _ => Ok(()),
+    }
+}
+
 fn wait_ready(ctx: &Ctx, issue: &str, entry: &PodEntry, mut pod: Pod) -> Result<Target> {
     let started = ctx.clock.now();
-    let reserved_rate = entry.reserved_rate_usd_hr();
+    let mut warned_no_cost = false;
+    let mut proxy_only_since = None;
     loop {
-        if let Some(cost) = pod.cost
-            && cost > reserved_rate
-        {
-            bail!(
-                "pod {} bills ${cost:.3}/hr, above the ${reserved_rate:.3}/hr its deadline was sized for",
-                entry.name
-            );
-        }
+        check_rate(ctx, issue, entry, &pod, &mut warned_no_cost)?;
+        let now = ctx.clock.now();
         match pod.status {
             PodStatus::Exited | PodStatus::Error | PodStatus::Terminated => {
                 bail!("pod {} went {:?} while starting", entry.name, pod.status)
             }
-            PodStatus::Running => {
-                if let Some(endpoint) = pod.ssh_direct() {
+            PodStatus::Running => match pod.ssh_direct() {
+                Some(endpoint) => {
+                    proxy_only_since = None;
                     let target = ctx.target(issue, &entry.name, endpoint);
                     if ctx.remote.reachable(&target) {
                         return Ok(target);
                     }
                 }
-            }
+                None => {
+                    let since = *proxy_only_since.get_or_insert(now);
+                    ensure!(
+                        now.duration_since(since) < NO_DIRECT_SSH,
+                        "pod {}: RunPod gave no direct SSH endpoint (proxy-only host) within {} min of RUNNING",
+                        entry.name,
+                        NO_DIRECT_SSH.as_mins()
+                    );
+                }
+            },
             PodStatus::Provisioning | PodStatus::Starting | PodStatus::Unknown => {}
         }
         ctx.check_interrupted()?;
-        let now = ctx.clock.now();
-        if now.duration_since(started) >= READY_TIMEOUT || now >= entry.deadline {
-            bail!(
-                "pod {} did not answer on SSH within {} min",
-                entry.name,
-                READY_TIMEOUT.as_mins()
-            );
-        }
+        ensure!(
+            now < entry.deadline,
+            "pod {} reached its deadline {} while starting",
+            entry.name,
+            entry.deadline
+        );
+        ensure!(
+            now.duration_since(started) < READY_TIMEOUT,
+            "pod {} did not answer on SSH within {} min",
+            entry.name,
+            READY_TIMEOUT.as_mins()
+        );
         ctx.clock.sleep(POLL);
         let id = &pod.id;
         pod = ctx

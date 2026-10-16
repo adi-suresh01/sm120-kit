@@ -31,7 +31,9 @@ pub struct State {
     pub creates: VecDeque<Create>,
     /// Statuses a new pod reports on successive reads; the last one repeats.
     pub boot: Vec<PodStatus>,
-    pub cost: f64,
+    pub cost: Option<f64>,
+    /// A running pod never gets `ssh.direct`, as on a host without public IPs.
+    pub proxy_only: bool,
     pub pods: Vec<FakePod>,
     pub unlisted: Vec<FakePod>,
     pub get_error: Option<u16>,
@@ -70,7 +72,8 @@ impl Default for FakeCloud {
             community: catalog(include_str!("../fixtures/catalog_community_x1.json")),
             creates: VecDeque::new(),
             boot: vec![PodStatus::Starting, PodStatus::Running],
-            cost: 2.49,
+            cost: Some(2.49),
+            proxy_only: false,
             pods: Vec::new(),
             unlisted: Vec::new(),
             get_error: None,
@@ -121,7 +124,7 @@ impl FakeCloud {
             id: format!("fakepod{:04}", state.next_id),
             name: request.name.clone(),
             status: PodStatus::Provisioning,
-            cost: Some(state.cost),
+            cost: state.cost,
             ssh: Some(PodSsh { direct: None }),
         };
         let fake = FakePod {
@@ -192,6 +195,7 @@ impl Cloud for FakeCloud {
         if state.get_not_found {
             return Ok(None);
         }
+        let proxy_only = state.proxy_only;
         let Some(fake) = state.pods.iter_mut().find(|fake| fake.pod.id == id) else {
             return Ok(None);
         };
@@ -199,7 +203,7 @@ impl Cloud for FakeCloud {
             fake.boot.pop_front();
         }
         fake.pod.status = fake.boot[0];
-        if fake.pod.status == PodStatus::Running {
+        if fake.pod.status == PodStatus::Running && !proxy_only {
             fake.pod.ssh = Some(PodSsh {
                 direct: Some(SshEndpoint {
                     host: "203.0.113.7".into(),
