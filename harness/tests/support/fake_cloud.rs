@@ -28,6 +28,7 @@ pub struct FakePod {
     pub pod: Pod,
     pub env: BTreeMap<String, String>,
     boot: VecDeque<PodStatus>,
+    placement: VecDeque<Option<String>>,
     pulls_left: usize,
 }
 
@@ -42,6 +43,11 @@ pub struct State {
     pub proxy_only: bool,
     /// RUNNING reads before the container starts, as while an uncached image pulls; `usize::MAX` never starts it.
     pub pull_reads: usize,
+    /// The data center a new pod reports on successive reads, whatever the request preferred; the last one repeats.
+    /// The create reply reports none.
+    pub placement: Vec<Option<String>>,
+    /// Every create body sent, in order.
+    pub requests: Vec<CreatePodRequest>,
     pub pods: Vec<FakePod>,
     pub unlisted: Vec<FakePod>,
     pub get_error: Option<u16>,
@@ -100,6 +106,8 @@ impl Default for FakeCloud {
             cost: Some(2.49),
             proxy_only: false,
             pull_reads: 0,
+            placement: vec![Some("EU-CZ-1".into())],
+            requests: Vec::new(),
             pods: Vec::new(),
             unlisted: Vec::new(),
             get_error: None,
@@ -156,11 +164,13 @@ impl FakeCloud {
             cost: state.cost,
             ssh: Some(PodSsh { direct: None }),
             runtime: None,
+            data_center_id: None,
         };
         let fake = FakePod {
             pod: pod.clone(),
             env: request.env.clone(),
             boot: state.boot.iter().copied().collect(),
+            placement: state.placement.iter().cloned().collect(),
             pulls_left: state.pull_reads,
         };
         if listed {
@@ -188,6 +198,7 @@ impl Cloud for FakeCloud {
         let outcome = {
             let mut state = self.0.borrow_mut();
             state.create_calls += 1;
+            state.requests.push(request.clone());
             if let Some(flag) = &state.interrupt_on_create {
                 flag.store(true, Ordering::SeqCst);
             }
@@ -237,6 +248,12 @@ impl Cloud for FakeCloud {
         let Some(fake) = state.pods.iter_mut().find(|fake| fake.pod.id == id) else {
             return Ok(None);
         };
+        let placed = if fake.placement.len() > 1 {
+            fake.placement.pop_front()
+        } else {
+            fake.placement.front().cloned()
+        };
+        fake.pod.data_center_id = placed.flatten();
         if fake.boot.len() > 1 {
             fake.boot.pop_front();
         }

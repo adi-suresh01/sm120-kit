@@ -255,7 +255,7 @@ fn refuse_clock_skew(ctx: &Ctx, issue: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn create_request(spec: &IssueSpec, entry: &PodEntry) -> CreatePodRequest {
+pub fn create_request(spec: &IssueSpec, entry: &PodEntry, data_centers: &[String]) -> CreatePodRequest {
     let mut apt: Vec<&str> = REQUIRED_APT.to_vec();
     for package in &spec.pod.apt {
         if !apt.contains(&package.as_str()) {
@@ -288,6 +288,7 @@ pub fn create_request(spec: &IssueSpec, entry: &PodEntry) -> CreatePodRequest {
             },
         },
         cloud: entry.cloud,
+        data_center_ids: data_centers.to_vec(),
         gpu: GpuRequest {
             id: entry.gpu.clone(),
             count: entry.count,
@@ -418,7 +419,7 @@ pub fn up(ctx: &Ctx, spec: &IssueSpec, run_setup: bool, after_failure: AfterFail
     refuse_untracked(issue, &ledger, &ctx.cloud.list_pods()?)?;
     refuse_clock_skew(ctx, issue)?;
     let (entry, pod) = create_first_available(ctx, spec, &offers)?;
-    let ready = wait_ready(ctx, issue, &entry, pod)
+    let ready = wait_ready(ctx, issue, &entry, pod, &spec.pod.avoid_data_centers)
         .and_then(|target| gate_and_copy(ctx, spec, &entry, &target).map(|()| target));
     let target = match ready {
         Ok(target) => target,
@@ -469,7 +470,7 @@ fn create_first_available(ctx: &Ctx, spec: &IssueSpec, offers: &[Offer]) -> Resu
                 "rate_usd_hr": offer.rate_usd_hr, "reserved_usd": cents(entry.reserved_usd), "deadline": entry.deadline,
             }),
         );
-        match ctx.cloud.create_pod(&create_request(spec, &entry)) {
+        match ctx.cloud.create_pod(&create_request(spec, &entry, &offer.data_centers)) {
             Ok(pod) => {
                 let entry = track(ctx, &store, &name, &pod.id)?;
                 ctx.events
@@ -584,13 +585,28 @@ fn check_rate(ctx: &Ctx, issue: &str, entry: &PodEntry, pod: &Pod, warned: &mut 
     }
 }
 
-fn wait_ready(ctx: &Ctx, issue: &str, entry: &PodEntry, mut pod: Pod) -> Result<Target> {
+/// The v2 schema calls `dataCenterIds` preferred data centers, so the placement is checked too: a pod in an avoided
+/// data center, where setup may never finish, ends before setup at a cost of minutes instead of the whole budget.
+fn check_placement(entry: &PodEntry, pod: &Pod, avoid: &[String]) -> Result<()> {
+    match &pod.data_center_id {
+        Some(dc) if avoid.contains(dc) => bail!(
+            "RunPod placed pod {} in data center {dc}, which pod.avoid_data_centers excludes",
+            entry.name
+        ),
+        _ => Ok(()),
+    }
+}
+
+fn wait_ready(ctx: &Ctx, issue: &str, entry: &PodEntry, mut pod: Pod, avoid: &[String]) -> Result<Target> {
     let started = ctx.clock.now();
     let mut warned_no_cost = false;
     let mut warned_no_container = false;
     let mut proxy_only_since = None;
+    let mut placed = false;
     loop {
         check_rate(ctx, issue, entry, &pod, &mut warned_no_cost)?;
+        check_placement(entry, &pod, avoid)?;
+        placed |= pod.data_center_id.is_some();
         let now = ctx.clock.now();
         match pod.status {
             PodStatus::Exited | PodStatus::Error | PodStatus::Terminated => {
@@ -601,6 +617,16 @@ fn wait_ready(ctx: &Ctx, issue: &str, entry: &PodEntry, mut pod: Pod) -> Result<
                     proxy_only_since = None;
                     let target = ctx.target(issue, &entry.name, endpoint);
                     if ctx.remote.reachable(&target) {
+                        if !avoid.is_empty() && !placed {
+                            ctx.warn(
+                                issue,
+                                format!(
+                                    "RunPod reported no data center for pod {} on any read, so \
+                                     pod.avoid_data_centers went unchecked after placement",
+                                    entry.name
+                                ),
+                            );
+                        }
                         return Ok(target);
                     }
                 }

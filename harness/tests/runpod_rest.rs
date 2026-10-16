@@ -150,6 +150,7 @@ fn create_request() -> CreatePodRequest {
             },
         },
         cloud: CloudTier::Secure,
+        data_center_ids: Vec::new(),
         gpu: GpuRequest {
             id: "NVIDIA RTX PRO 6000 Blackwell Server Edition".into(),
             count: 1,
@@ -172,6 +173,7 @@ fn creates_a_pod_with_the_v2_body_and_bearer_auth() {
     );
     assert!(pod.ssh_direct().is_none());
     assert!(pod.runtime.is_none() && pod.container().is_none());
+    assert!(pod.data_center_id.is_none());
     let seen = server.seen();
     assert_eq!((seen[0].method.as_str(), seen[0].target.as_str()), ("POST", "/v2/pods"));
     assert_eq!(seen[0].authorization, "Bearer test-key");
@@ -181,6 +183,23 @@ fn creates_a_pod_with_the_v2_body_and_bearer_auth() {
     assert_eq!(body["mounts"]["persistent"]["path"], "/workspace");
     assert_eq!(body["cloud"], "SECURE");
     assert_eq!(body["ports"][0], "22/tcp");
+}
+
+#[test]
+fn the_create_body_names_data_centers_only_when_there_are_some() {
+    let server = FixtureServer::start(vec![Step::Reply(201, CREATED), Step::Reply(201, CREATED)]);
+    let clock = FakeClock::at("2026-10-16T17:03:00Z");
+    let api = RunpodRest::new(&server.base, "k", &clock);
+    api.create_pod(&create_request()).unwrap();
+    let mut placed = create_request();
+    placed.data_center_ids = vec!["CA-MTL-3".into(), "EU-CZ-1".into()];
+    api.create_pod(&placed).unwrap();
+    let seen = server.seen();
+    assert!(!seen[0].body.contains("dataCenter"), "{}", seen[0].body);
+    let mut bodies: Vec<serde_json::Value> = seen.iter().map(|s| serde_json::from_str(&s.body).unwrap()).collect();
+    assert_eq!(bodies[1]["dataCenterIds"], serde_json::json!(["CA-MTL-3", "EU-CZ-1"]));
+    bodies[1].as_object_mut().unwrap().remove("dataCenterIds");
+    assert_eq!(bodies[1], bodies[0]);
 }
 
 #[test]
@@ -345,6 +364,7 @@ fn get_pod_reads_the_direct_ssh_endpoint_and_treats_404_as_gone() {
         (direct.host.as_str(), direct.port, pod.status),
         ("203.0.113.7", 40122, PodStatus::Running)
     );
+    assert_eq!(pod.data_center_id.as_deref(), Some("EU-CZ-1"));
     let container = pod.container().unwrap();
     assert_eq!(container.uptime, Some(121.0));
     assert_eq!(container.ports[0]["public"], 40122);

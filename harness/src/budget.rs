@@ -97,16 +97,34 @@ pub fn emit_quote(ctx: &Ctx, spec: &IssueSpec, offers: &[Offer], remaining: Opti
     )?;
     let fallbacks: Vec<String> = offers[1..]
         .iter()
-        .map(|o| format!("{} {} ${:.2}/hr", o.gpu, o.cloud.as_str(), o.rate_usd_hr))
+        .map(|o| {
+            let mut line = format!("{} {} ${:.2}/hr", o.gpu, o.cloud.as_str(), o.rate_usd_hr);
+            if !o.data_centers.is_empty() {
+                line.push_str(&format!(" in {}", o.data_centers.join(", ")));
+            }
+            line
+        })
         .collect();
-    ctx.events.emit(
-        Some(&spec.issue),
-        Kind::Quote,
-        json!({
-            "gpu": first.gpu, "cloud": first.cloud, "count": first.count, "rate_usd_hr": first.rate_usd_hr,
-            "deadline": plan.deadline, "worst_case_usd": cents(plan.reserved_usd),
-            "remaining_usd": remaining.map(cents), "fallbacks": fallbacks,
-        }),
-    );
+    let mut fields = json!({
+        "gpu": first.gpu, "cloud": first.cloud, "count": first.count, "rate_usd_hr": first.rate_usd_hr,
+        "deadline": plan.deadline, "worst_case_usd": cents(plan.reserved_usd),
+        "remaining_usd": remaining.map(cents), "fallbacks": fallbacks,
+    });
+    if !first.data_centers.is_empty() {
+        fields["data_centers"] = json!(first.data_centers);
+    }
+    ctx.events.emit(Some(&spec.issue), Kind::Quote, fields);
+    if !first.unlisted_avoided.is_empty() {
+        ctx.warn(
+            &spec.issue,
+            format!(
+                "pod.avoid_data_centers lists {}, which the catalog names for no data center of {}x {}: either it \
+                 has no stock there now, or RunPod uses no such id and the list does not avoid what was meant",
+                first.unlisted_avoided.join(", "),
+                first.count,
+                first.gpu
+            ),
+        );
+    }
     Ok(())
 }
