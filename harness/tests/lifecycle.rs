@@ -191,6 +191,14 @@ fn the_create_request_carries_the_deadline_and_never_a_token() {
     assert_eq!(env["HARNESS_DEADLINE_EPOCH"], deadline.as_second().to_string());
     assert_eq!(env["HARNESS_APT"], "openssh-server curl procps patch");
     assert!(!env.contains_key("HF_TOKEN"));
+    // The entrypoint reads each harness variable by the same name; a rename on one side would leave the pod
+    // without a deadline.
+    for key in env.keys().filter(|key| key.starts_with("HARNESS_")) {
+        assert!(
+            pod::ENTRYPOINT.contains(&format!("${{{key}")),
+            "entrypoint.sh never reads {key}"
+        );
+    }
     let w = World::default();
     let spec = IssueSpec::parse(
         &SPEC.replace("volume_gb = 80", "volume_gb = 80\nneeds_hf_token = true"),
