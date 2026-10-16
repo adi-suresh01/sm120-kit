@@ -1,10 +1,12 @@
 mod support;
 
+use std::cell::Cell;
 use std::fs;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::atomic::AtomicBool;
+use std::thread;
 
 use jiff::SignedDuration;
 use sm120_harness::clock::Clock;
@@ -50,21 +52,37 @@ struct World {
     cloud: FakeCloud,
     remote: FakeRemote,
     interrupted: Rc<AtomicBool>,
+    /// Set by the tests whose scenario is a pod this checkout cannot see (a reverted or cleared ledger).
+    untracked_by_design: Cell<bool>,
 }
 
 impl Default for World {
     fn default() -> Self {
-        Self {
-            repo: funded_checkout(20.0),
-            clock: FakeClock::at("2026-10-16T17:00:00Z"),
-            cloud: FakeCloud::default(),
-            remote: FakeRemote::default(),
-            interrupted: Rc::new(AtomicBool::new(false)),
+        Self::new(funded_checkout(20.0))
+    }
+}
+
+/// Every test, fault case or not, ends by checking the safety invariant, so a new fault case cannot forget to.
+impl Drop for World {
+    fn drop(&mut self) {
+        if !thread::panicking() && !self.untracked_by_design.get() {
+            self.assert_every_billing_pod_is_tracked();
         }
     }
 }
 
 impl World {
+    fn new(repo: TempDir) -> Self {
+        Self {
+            repo,
+            clock: FakeClock::at("2026-10-16T17:00:00Z"),
+            cloud: FakeCloud::default(),
+            remote: FakeRemote::default(),
+            interrupted: Rc::new(AtomicBool::new(false)),
+            untracked_by_design: Cell::new(false),
+        }
+    }
+
     fn spec(&self) -> IssueSpec {
         IssueSpec::parse(SPEC, ISSUE, |_| true).unwrap()
     }
@@ -202,10 +220,7 @@ fn quote_prices_the_first_choice_without_reserving() {
 
 #[test]
 fn quote_works_before_any_budget_is_approved() {
-    let w = World {
-        repo: repo_with_issue(ISSUE, &[]),
-        ..World::default()
-    };
+    let w = World::new(repo_with_issue(ISSUE, &[]));
     let spec = IssueSpec::parse(
         &SPEC.replace("planned_hours = 1.0", "planned_hours = 3.0"),
         ISSUE,
@@ -292,14 +307,17 @@ fn an_auth_failure_on_create_stops_at_once() {
 
 #[test]
 fn a_lost_reply_is_adopted_by_name_without_a_second_create() {
-    let w = World::default();
-    w.cloud.script(&[Create::MadeButReplyLost]);
-    w.up().unwrap();
-    assert_eq!(w.cloud.0.borrow().create_calls, 1);
-    assert_eq!(w.cloud.billing_pods().len(), 1);
-    assert_eq!(w.states(), [PodState::Live]);
-    assert!(w.events().contains("\"adopted\":true"));
-    w.assert_every_billing_pod_is_tracked();
+    // A 5xx is no proof of failure either: RunPod can make the pod and still answer 502.
+    for outcome in [Create::MadeButReplyLost, Create::MadeBut5xx] {
+        let w = World::default();
+        w.cloud.script(&[outcome]);
+        w.up().unwrap();
+        assert_eq!(w.cloud.0.borrow().create_calls, 1, "{outcome:?}");
+        assert_eq!(w.cloud.billing_pods().len(), 1);
+        assert_eq!(w.states(), [PodState::Live]);
+        assert!(w.events().contains("\"adopted\":true"));
+        w.assert_every_billing_pod_is_tracked();
+    }
 }
 
 #[test]
@@ -373,10 +391,7 @@ fn a_proxy_only_host_is_terminated_after_three_minutes() {
 #[test]
 fn a_deadline_that_comes_while_starting_ends_the_wait() {
     // $0.75 buys about 16 min at $2.49/hr with the margin, well short of the 30 min ready timeout.
-    let w = World {
-        repo: funded_checkout(0.75),
-        ..World::default()
-    };
+    let w = World::new(funded_checkout(0.75));
     w.cloud.0.borrow_mut().boot = vec![PodStatus::Starting];
     let err = err_text(w.up());
     assert!(err.contains("reached its deadline"), "{err}");
@@ -510,6 +525,8 @@ fn a_second_checkout_cannot_spend_the_budget_again() {
 #[test]
 fn a_reverted_ledger_cannot_free_the_live_pod_budget() {
     let w = World::default();
+    // After the revert only the pod's own watchdog ends it; the point is that no second pod joins it.
+    w.untracked_by_design.set(true);
     let path = LedgerStore::new(w.repo.path(), ISSUE).path().to_path_buf();
     let committed = fs::read_to_string(&path).unwrap();
     w.up().unwrap();
@@ -812,6 +829,7 @@ fn the_reaper_books_a_vanished_pod_up_to_its_deadline() {
 #[test]
 fn the_reaper_never_deletes_an_untracked_pod() {
     let w = World::default();
+    w.untracked_by_design.set(true);
     w.up().unwrap();
     w.with(|ctx| {
         ctx.ledger(ISSUE).update(|l| {
