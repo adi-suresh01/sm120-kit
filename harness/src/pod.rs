@@ -390,8 +390,9 @@ pub const POLL: Duration = Duration::from_secs(10);
 pub const PULL_BEFORE_DELETE: Duration = Duration::from_secs(5 * 60);
 /// Image pulls for serving images run to tens of GB.
 const READY_TIMEOUT: SignedDuration = SignedDuration::from_mins(30);
-/// RunPod publishes 22/tcp a little after RUNNING; a host without public IPs never does, and the harness needs
-/// direct SSH for scp and tar (the proxy carries a shell only).
+/// RunPod publishes 22/tcp a little after the container starts; a host without public IPs never does, and the
+/// harness needs direct SSH for scp and tar (the proxy carries a shell only). It counts from the container start,
+/// not from RUNNING: RunPod reports RUNNING while an uncached image still pulls, which can take longer than this.
 const NO_DIRECT_SSH: SignedDuration = SignedDuration::from_mins(3);
 const NAME_LOOKUPS: usize = 3;
 const GONE_CHECKS: usize = 6;
@@ -586,6 +587,7 @@ fn check_rate(ctx: &Ctx, issue: &str, entry: &PodEntry, pod: &Pod, warned: &mut 
 fn wait_ready(ctx: &Ctx, issue: &str, entry: &PodEntry, mut pod: Pod) -> Result<Target> {
     let started = ctx.clock.now();
     let mut warned_no_cost = false;
+    let mut warned_no_container = false;
     let mut proxy_only_since = None;
     loop {
         check_rate(ctx, issue, entry, &pod, &mut warned_no_cost)?;
@@ -602,15 +604,32 @@ fn wait_ready(ctx: &Ctx, issue: &str, entry: &PodEntry, mut pod: Pod) -> Result<
                         return Ok(target);
                     }
                 }
-                None => {
-                    let since = *proxy_only_since.get_or_insert(now);
-                    ensure!(
-                        now.duration_since(since) < NO_DIRECT_SSH,
-                        "pod {}: RunPod gave no direct SSH endpoint (proxy-only host) within {} min of RUNNING",
-                        entry.name,
-                        NO_DIRECT_SSH.as_mins()
-                    );
-                }
+                None => match pod.container() {
+                    Some(container) => {
+                        let since = *proxy_only_since.get_or_insert(now);
+                        ensure!(
+                            now.duration_since(since) < NO_DIRECT_SSH,
+                            "pod {}: RunPod gave no direct SSH endpoint (proxy-only host) within {} min of its \
+                             container starting; runtime ports: {}",
+                            entry.name,
+                            NO_DIRECT_SSH.as_mins(),
+                            container.ports
+                        );
+                    }
+                    None if !warned_no_container => {
+                        warned_no_container = true;
+                        ctx.warn(
+                            issue,
+                            format!(
+                                "pod {} is RUNNING but has no container yet (image still pulling); waiting up to {} \
+                                 min from create",
+                                entry.name,
+                                READY_TIMEOUT.as_mins()
+                            ),
+                        );
+                    }
+                    None => {}
+                },
             },
             PodStatus::Provisioning | PodStatus::Starting | PodStatus::Unknown => {}
         }

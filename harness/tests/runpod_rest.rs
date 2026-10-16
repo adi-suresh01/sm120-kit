@@ -171,6 +171,7 @@ fn creates_a_pod_with_the_v2_body_and_bearer_auth() {
         ("kfyqcddi6nefdp", PodStatus::Provisioning, Some(2.49))
     );
     assert!(pod.ssh_direct().is_none());
+    assert!(pod.runtime.is_none() && pod.container().is_none());
     let seen = server.seen();
     assert_eq!((seen[0].method.as_str(), seen[0].target.as_str()), ("POST", "/v2/pods"));
     assert_eq!(seen[0].authorization, "Bearer test-key");
@@ -344,6 +345,9 @@ fn get_pod_reads_the_direct_ssh_endpoint_and_treats_404_as_gone() {
         (direct.host.as_str(), direct.port, pod.status),
         ("203.0.113.7", 40122, PodStatus::Running)
     );
+    let container = pod.container().unwrap();
+    assert_eq!(container.uptime, Some(121.0));
+    assert_eq!(container.ports[0]["public"], 40122);
     assert!(api.get_pod("gone").unwrap().is_none());
     let targets: Vec<String> = server.seen().into_iter().map(|s| s.target).collect();
     assert_eq!(targets, ["/v2/pods/kfyqcddi6nefdp", "/v2/pods/gone"]);

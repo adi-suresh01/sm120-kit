@@ -284,12 +284,30 @@ pub struct Pod {
     pub cost: Option<f64>,
     #[serde(default)]
     pub ssh: Option<PodSsh>,
+    #[serde(default)]
+    pub runtime: Option<PodRuntime>,
 }
 
 impl Pod {
     pub fn ssh_direct(&self) -> Option<&SshEndpoint> {
         self.ssh.as_ref()?.direct.as_ref()
     }
+
+    /// RunPod reports RUNNING while an uncached image still pulls, before any container exists; only a runtime
+    /// with an uptime shows one.
+    pub fn container(&self) -> Option<&PodRuntime> {
+        self.runtime.as_ref().filter(|runtime| runtime.uptime.is_some())
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PodRuntime {
+    /// A float, so a fractional uptime cannot fail the decode of the whole pod and end it.
+    #[serde(default)]
+    pub uptime: Option<f64>,
+    /// Kept as RunPod sent it: only error messages read it, so a change in its shape must not fail the decode.
+    #[serde(default)]
+    pub ports: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -612,6 +630,8 @@ impl Cloud for RunpodRest<'_> {
 mod tests {
     use std::cell::RefCell;
 
+    use serde_json::json;
+
     use super::*;
 
     fn http(status: u16, retry_after_s: Option<u64>) -> CloudError {
@@ -706,6 +726,41 @@ mod tests {
         assert!(http(502, None).create_outcome_unknown());
         assert!(!http(400, None).create_outcome_unknown());
         assert!(!http(429, None).create_outcome_unknown());
+    }
+
+    #[test]
+    fn a_running_pod_has_a_container_only_once_its_runtime_has_an_uptime() {
+        let running: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/pod_running.json")).unwrap();
+        let pod: Pod = serde_json::from_value(running.clone()).unwrap();
+        let container = pod.container().unwrap();
+        assert_eq!(container.uptime, Some(121.0));
+        assert_eq!(
+            container.ports,
+            json!([{"private": 22, "public": 40122, "type": "tcp", "ip": "203.0.113.7"}])
+        );
+        let with_runtime = |runtime: Option<serde_json::Value>| -> Pod {
+            let mut reply = running.clone();
+            match runtime {
+                Some(runtime) => reply["runtime"] = runtime,
+                None => {
+                    reply.as_object_mut().unwrap().remove("runtime");
+                }
+            }
+            serde_json::from_value(reply).unwrap()
+        };
+        let started = with_runtime(Some(json!({"uptime": 3, "ports": null})));
+        assert_eq!(started.container().unwrap().ports, serde_json::Value::Null);
+        for runtime in [
+            None,
+            Some(json!(null)),
+            Some(json!({})),
+            Some(json!({"uptime": null, "ports": null})),
+        ] {
+            let pod = with_runtime(runtime.clone());
+            assert_eq!(pod.status, PodStatus::Running);
+            assert!(pod.container().is_none(), "{runtime:?}");
+        }
     }
 
     const SECURE_X1: &str = include_str!("../tests/fixtures/catalog_secure_x1.json");

@@ -4,7 +4,10 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use jiff::SignedDuration;
-use sm120_harness::cloud::{CatalogGpu, Cloud, CloudError, CreatePodRequest, Pod, PodSsh, PodStatus, SshEndpoint};
+use serde_json::json;
+use sm120_harness::cloud::{
+    CatalogGpu, Cloud, CloudError, CreatePodRequest, Pod, PodRuntime, PodSsh, PodStatus, SshEndpoint,
+};
 use sm120_harness::spec::CloudTier;
 
 /// What the next create call does. Several leave a pod behind while reporting failure, which is exactly what the
@@ -25,6 +28,7 @@ pub struct FakePod {
     pub pod: Pod,
     pub env: BTreeMap<String, String>,
     boot: VecDeque<PodStatus>,
+    pulls_left: usize,
 }
 
 pub struct State {
@@ -36,6 +40,8 @@ pub struct State {
     pub cost: Option<f64>,
     /// A running pod never gets `ssh.direct`, as on a host without public IPs.
     pub proxy_only: bool,
+    /// RUNNING reads before the container starts, as while an uncached image pulls; `usize::MAX` never starts it.
+    pub pull_reads: usize,
     pub pods: Vec<FakePod>,
     pub unlisted: Vec<FakePod>,
     pub get_error: Option<u16>,
@@ -67,6 +73,18 @@ fn http(status: u16) -> CloudError {
     }
 }
 
+/// A host without public IPs maps only private ports, so 22/tcp never shows.
+fn container(proxy_only: bool) -> PodRuntime {
+    let mut ports = vec![json!({"ip": "100.65.29.66", "private": 19123, "public": 60482, "type": "http"})];
+    if !proxy_only {
+        ports.push(json!({"ip": "203.0.113.7", "private": 22, "public": 40122, "type": "tcp"}));
+    }
+    PodRuntime {
+        uptime: Some(5.0),
+        ports: ports.into(),
+    }
+}
+
 fn catalog(json: &str) -> Vec<CatalogGpu> {
     let page: serde_json::Value = serde_json::from_str(json).unwrap();
     serde_json::from_value(page["gpus"].clone()).unwrap()
@@ -81,6 +99,7 @@ impl Default for FakeCloud {
             boot: vec![PodStatus::Starting, PodStatus::Running],
             cost: Some(2.49),
             proxy_only: false,
+            pull_reads: 0,
             pods: Vec::new(),
             unlisted: Vec::new(),
             get_error: None,
@@ -136,11 +155,13 @@ impl FakeCloud {
             status: PodStatus::Provisioning,
             cost: state.cost,
             ssh: Some(PodSsh { direct: None }),
+            runtime: None,
         };
         let fake = FakePod {
             pod: pod.clone(),
             env: request.env.clone(),
             boot: state.boot.iter().copied().collect(),
+            pulls_left: state.pull_reads,
         };
         if listed {
             state.pods.push(fake);
@@ -220,13 +241,20 @@ impl Cloud for FakeCloud {
             fake.boot.pop_front();
         }
         fake.pod.status = fake.boot[0];
-        if fake.pod.status == PodStatus::Running && !proxy_only {
-            fake.pod.ssh = Some(PodSsh {
-                direct: Some(SshEndpoint {
-                    host: "203.0.113.7".into(),
-                    port: 40122,
-                }),
-            });
+        if fake.pod.status == PodStatus::Running {
+            if fake.pulls_left > 0 {
+                fake.pulls_left -= 1;
+            } else {
+                fake.pod.runtime = Some(container(proxy_only));
+                if !proxy_only {
+                    fake.pod.ssh = Some(PodSsh {
+                        direct: Some(SshEndpoint {
+                            host: "203.0.113.7".into(),
+                            port: 40122,
+                        }),
+                    });
+                }
+            }
         }
         Ok(Some(fake.pod.clone()))
     }

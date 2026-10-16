@@ -208,6 +208,7 @@ mod tests {
             status,
             cost: Some(2.49),
             ssh: None,
+            runtime: None,
         }
     }
 
