@@ -105,7 +105,7 @@ is slow, so keep `gsm8k` around 200 or lower on a variant suspected of it.
   variant has it, for the issue's own requests (a reporter's exact prompt, long-context prefills). The watchdog
   that covers quality covers it too: the server exiting, a `fail_pattern` line in its log, or 15 quiet minutes stop
   it as `POST_FAIL`, and so does a non-zero exit. It still runs after a failed quality; either failing is
-  `POST_FAIL`.
+  `POST_FAIL`. A `hook_start` phase line marks where it begins, so a hook can name its own phases freely.
 - `post_stop <run_dir>`: after the server is killed, on every way out.
 
 `pre_launch` and `post_smoke` see the variant's `env`, the variant file's variables (`VARIANT`, `PORT`, `MODEL`,

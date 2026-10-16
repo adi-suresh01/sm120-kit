@@ -34,7 +34,7 @@ if [[ -n $GSM8K ]]; then
     bash "$here/quality.sh" "$PACKAGE" "$PORT" "$MODEL" "$run_dir" "$GSM8K" "${BENCH[@]}" || status=$?
 fi
 if declare -F post_smoke >/dev/null; then
-    progress post_smoke
+    progress hook_start
     # Called behind || the hook would run past a failing command, since bash ignores errexit there even inside a
     # subshell. As a plain command in a subshell it stops at the first one, the way pre_launch does.
     set +e

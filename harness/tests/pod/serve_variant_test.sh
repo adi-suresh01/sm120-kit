@@ -331,7 +331,7 @@ hook_port=$(source "$work/hook-ok.sh" && echo "$PORT")
 grep -qxF '{"ok": true}' "$work/results/hook-ok/hook.txt" || fail "hook-ok: the server did not answer the hook"
 grep -qx finished "$work/results/hook-ok/hook.txt" || fail "hook-ok: the hook did not finish"
 grep -qF '"detail": "from the hook"' "$work/results/hook-ok/progress.jsonl" || fail "hook-ok: progress detail"
-phases hook-ok "restore idle_wait launch boot_ok smoke_ok quality_start post_smoke hook_step quality_done stop"
+phases hook-ok "restore idle_wait launch boot_ok smoke_ok quality_start hook_start hook_step quality_done stop"
 echo "ok: post_smoke runs on the live server with its arguments, the variant's variables and env, and progress"
 
 write_variant hook-fail ok "" "HOOK=fail"
@@ -348,7 +348,7 @@ serve hook-quality
 field hook-quality verdict "'OK'"
 field hook-quality gsm8k 1.0
 grep -qx 'Score: 1.000' "$work/results/hook-quality/hook.txt" || fail "hook-quality: post_smoke ran before quality"
-phases hook-quality "restore idle_wait launch boot_ok smoke_ok quality_start post_smoke hook_step quality_done stop"
+phases hook-quality "restore idle_wait launch boot_ok smoke_ok quality_start hook_start hook_step quality_done stop"
 echo "ok: with quality, post_smoke runs after it"
 
 write_variant hook-qfail "ok --fake-gsm8k correct" 3 "FAKE_BENCH=drop"
