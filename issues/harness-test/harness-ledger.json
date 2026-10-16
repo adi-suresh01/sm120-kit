@@ -1,0 +1,85 @@
+{
+  "issue": "harness-test",
+  "budget": {
+    "usd": 0.5,
+    "approved_at": "2026-10-16T01:52:12Z",
+    "note": "Aditya approved 2026-10-15: live harness test, 2 short pods, RTX 3070 community 0.13/hr"
+  },
+  "pods": [
+    {
+      "name": "sm120-harness-test-e38c15",
+      "id": "k4en7836r0k44m",
+      "state": "terminated",
+      "gpu": "NVIDIA GeForce RTX 3070",
+      "count": 1,
+      "cloud": "COMMUNITY",
+      "rate_usd_hr": 0.13,
+      "reserved_usd": 0.035750000000000004,
+      "reserved_at": "2026-10-16T01:52:19Z",
+      "deadline": "2026-10-16T02:07:19Z",
+      "terminated_at": "2026-10-16T01:55:28Z",
+      "cost_usd": 0.006825,
+      "cost_source": "estimate"
+    },
+    {
+      "name": "sm120-harness-test-72cc49",
+      "id": "rhx9it4vtredjy",
+      "state": "terminated",
+      "gpu": "NVIDIA GeForce RTX 3090",
+      "count": 1,
+      "cloud": "SECURE",
+      "rate_usd_hr": 0.5,
+      "reserved_usd": 0.1375,
+      "reserved_at": "2026-10-16T01:56:12Z",
+      "deadline": "2026-10-16T02:11:12Z",
+      "terminated_at": "2026-10-16T01:57:00Z",
+      "cost_usd": 0.006666666666666667,
+      "cost_source": "estimate"
+    },
+    {
+      "name": "sm120-harness-test-5de913",
+      "id": "c6slro0zjxiffc",
+      "state": "terminated",
+      "gpu": "NVIDIA GeForce RTX 3090",
+      "count": 1,
+      "cloud": "SECURE",
+      "rate_usd_hr": 0.5,
+      "reserved_usd": 0.1375,
+      "reserved_at": "2026-10-16T01:58:22Z",
+      "deadline": "2026-10-16T02:13:22Z",
+      "terminated_at": "2026-10-16T01:58:49Z",
+      "cost_usd": 0.00375,
+      "cost_source": "estimate"
+    },
+    {
+      "name": "sm120-harness-test-abd941",
+      "id": "fl080gy0l634ky",
+      "state": "terminated",
+      "gpu": "NVIDIA GeForce RTX 3090",
+      "count": 1,
+      "cloud": "SECURE",
+      "rate_usd_hr": 0.5,
+      "reserved_usd": 0.1375,
+      "reserved_at": "2026-10-16T02:01:48Z",
+      "deadline": "2026-10-16T02:16:48Z",
+      "terminated_at": "2026-10-16T02:16:48Z",
+      "cost_usd": 0.125,
+      "cost_source": "estimate"
+    },
+    {
+      "name": "sm120-harness-test-702cbe",
+      "id": "6giqtlk1454mbv",
+      "state": "terminated",
+      "gpu": "NVIDIA GeForce RTX 3090",
+      "count": 1,
+      "cloud": "SECURE",
+      "rate_usd_hr": 0.5,
+      "reserved_usd": 0.1375,
+      "reserved_at": "2026-10-16T02:17:28Z",
+      "deadline": "2026-10-16T02:32:28Z",
+      "terminated_at": "2026-10-16T02:18:20Z",
+      "cost_usd": 0.007222222222222222,
+      "cost_source": "estimate"
+    }
+  ]
+}
