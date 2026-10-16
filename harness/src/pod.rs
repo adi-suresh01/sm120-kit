@@ -16,7 +16,7 @@ use crate::cloud::{
 };
 use crate::events::{Events, Kind};
 use crate::ledger::{ADOPT_WINDOW, Ledger, LedgerStore, Offer, PodEntry, PodState, plan_reservation};
-use crate::session::{Remote, Target, poll_job, start_job};
+use crate::session::{Remote, TRANSFER_LIMIT, Target, poll_job, start_job};
 use crate::spec::IssueSpec;
 
 pub const ENTRYPOINT: &str = include_str!("../pod/entrypoint.sh");
@@ -173,7 +173,13 @@ pub fn has_nvlink(topo: &str) -> bool {
         .any(|cell| cell.len() > 2 && cell.starts_with("NV") && cell[2..].bytes().all(|b| b.is_ascii_digit()))
 }
 
+/// The coreutils `timeout` ends nvidia-smi on a wedged GPU well inside the ssh command limit, so the gate fails
+/// with a message instead of a killed ssh.
+pub const TOPOLOGY: &str = "timeout 60 nvidia-smi topo -m";
 pub const POLL: Duration = Duration::from_secs(10);
+/// The pull before a delete bills by the minute; results left on a pod cost less than a slow link that keeps it
+/// alive.
+pub const PULL_BEFORE_DELETE: Duration = Duration::from_secs(5 * 60);
 /// Image pulls for serving images run to tens of GB.
 const READY_TIMEOUT: SignedDuration = SignedDuration::from_mins(30);
 const NAME_LOOKUPS: usize = 3;
@@ -388,7 +394,7 @@ fn wait_ready(ctx: &Ctx, issue: &str, entry: &PodEntry, mut pod: Pod) -> Result<
 
 fn gate_and_copy(ctx: &Ctx, spec: &IssueSpec, target: &Target) -> Result<()> {
     if spec.pod.require_pcie() {
-        let topo = ctx.remote.run(target, "nvidia-smi topo -m")?;
+        let topo = ctx.remote.run(target, TOPOLOGY)?;
         ensure!(
             !has_nvlink(&topo),
             "nvidia-smi topo -m shows NVLink, and this repro needs a PCIe-only box:\n{topo}"
@@ -407,7 +413,7 @@ fn setup(ctx: &Ctx, spec: &IssueSpec, entry: &PodEntry, target: &Target, run_set
     }
     start_job(ctx.remote, target, issue, "setup", &command)?;
     let code = wait_job(ctx, issue, entry, target, "setup", "/dev/null", &mut |_| {})?;
-    if let Err(e) = pull(ctx, issue, target) {
+    if let Err(e) = pull(ctx, issue, target, TRANSFER_LIMIT) {
         ctx.warn(issue, format!("pulling setup output failed: {e:#}"));
     }
     ensure!(
@@ -466,9 +472,9 @@ pub fn wait_job(
     }
 }
 
-pub fn pull(ctx: &Ctx, issue: &str, target: &Target) -> Result<()> {
+pub fn pull(ctx: &Ctx, issue: &str, target: &Target, limit: Duration) -> Result<()> {
     let path = format!("results/{issue}");
-    ctx.remote.download(target, &path, ctx.repo)?;
+    ctx.remote.download(target, &[&path], ctx.repo, limit)?;
     ctx.events.emit(Some(issue), Kind::Pull, json!({ "path": path }));
     Ok(())
 }
@@ -515,7 +521,8 @@ pub fn down(ctx: &Ctx, issue: &str) -> Result<()> {
         }
         return Ok(());
     };
-    if let Err(e) = target_for(ctx, issue, &entry).and_then(|target| pull(ctx, issue, &target)) {
+    let pulled = target_for(ctx, issue, &entry).and_then(|target| pull(ctx, issue, &target, PULL_BEFORE_DELETE));
+    if let Err(e) = pulled {
         ctx.warn(issue, format!("pull before terminate failed: {e:#}"));
     }
     terminate(ctx, issue, &entry)

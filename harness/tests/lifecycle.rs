@@ -419,14 +419,45 @@ fn down_pulls_terminates_and_books_the_estimate() {
     let w = World::default();
     w.up().unwrap();
     w.clock.advance(SignedDuration::from_mins(30));
-    let pulls = w.remote.downloads.get();
+    let pulls = w.remote.download_count();
     w.with(|ctx| pod::down(ctx, ISSUE)).unwrap();
-    assert_eq!(w.remote.downloads.get(), pulls + 1);
+    assert_eq!(w.remote.download_count(), pulls + 1);
     let entry = &w.ledger().pods[0];
     assert_eq!(entry.state, PodState::Terminated);
     assert_eq!(entry.cost_source, Some(CostSource::Estimate));
     assert!(entry.cost_usd.unwrap() > 1.24 && entry.cost_usd.unwrap() < 1.4);
     assert!(w.cloud.billing_pods().is_empty());
+}
+
+#[test]
+fn down_caps_the_pull_and_deletes_whatever_the_pull_did() {
+    let w = World::default();
+    w.up().unwrap();
+    w.remote.download_fails.set(true);
+    w.with(|ctx| pod::down(ctx, ISSUE)).unwrap();
+    let (paths, limit) = w.remote.downloads.borrow().last().cloned().unwrap();
+    assert_eq!(
+        (paths, limit),
+        (vec!["results/vllm-47990".to_string()], pod::PULL_BEFORE_DELETE)
+    );
+    assert!(pod::PULL_BEFORE_DELETE <= std::time::Duration::from_secs(300));
+    assert!(w.events().contains("pull before terminate failed"));
+    assert_eq!(w.states(), [PodState::Terminated]);
+    assert!(w.cloud.billing_pods().is_empty());
+}
+
+#[test]
+fn the_topology_gate_cannot_hang_on_a_wedged_gpu() {
+    let w = World::default();
+    let spec = IssueSpec::parse(&SPEC.replace("count = 1", "count = 2"), ISSUE, |_| true).unwrap();
+    w.with(|ctx| pod::up(ctx, &spec, false)).unwrap();
+    assert!(
+        w.remote
+            .scripts
+            .borrow()
+            .iter()
+            .any(|s| s == "timeout 60 nvidia-smi topo -m")
+    );
 }
 
 #[test]

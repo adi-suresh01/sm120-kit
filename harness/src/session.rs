@@ -2,13 +2,20 @@ use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 
 pub const KIT_DIR: &str = "/workspace/sm120-kit";
 const UPLOAD_EXCLUDES: [&str; 3] = [".DS_Store", "harness-ledger.json*", ".harness-ledger.lock"];
+/// A poll, a job start, or the topology gate answers in seconds on a healthy pod. ServerAlive ends a dead
+/// connection, but a remote command that hangs (nvidia-smi on a wedged GPU) holds ssh open for good, and every
+/// loop that bills waits on these calls.
+pub const COMMAND_LIMIT: Duration = Duration::from_secs(120);
+/// Copying the kit up or results down: tens of MB over whatever link the host has.
+pub const TRANSFER_LIMIT: Duration = Duration::from_secs(15 * 60);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Target {
@@ -28,7 +35,9 @@ pub trait Remote {
     /// `path` is relative to the kit directory.
     fn write_file(&self, target: &Target, path: &str, content: &str) -> Result<()>;
     fn upload(&self, target: &Target, local_root: &Path, paths: &[&str]) -> Result<()>;
-    fn download(&self, target: &Target, path: &str, local_root: &Path) -> Result<()>;
+    /// `paths` are relative to the kit directory; the ones that do not exist on the pod are skipped. Gives up
+    /// after `limit`.
+    fn download(&self, target: &Target, paths: &[&str], local_root: &Path, limit: Duration) -> Result<()>;
 }
 
 pub fn shell_quote(value: &str) -> String {
@@ -77,27 +86,91 @@ fn ssh_command(target: &Target) -> Result<Command> {
     Ok(command)
 }
 
-fn run_script(target: &Target, script: &str, stdout: Stdio) -> Result<Vec<u8>> {
-    let mut child = ssh_command(target)?
-        .arg("bash -s")
+/// Waits for every process of a pipeline and kills all of them once `limit` passes.
+fn wait_within(children: &mut [&mut Child], limit: Duration, what: &str) -> Result<Vec<ExitStatus>> {
+    let started = Instant::now();
+    let mut statuses: Vec<Option<ExitStatus>> = vec![None; children.len()];
+    loop {
+        for (child, status) in children.iter_mut().zip(statuses.iter_mut()) {
+            if status.is_none() {
+                *status = child.try_wait().with_context(|| format!("waiting for {what}"))?;
+            }
+        }
+        if statuses.iter().all(Option::is_some) {
+            return Ok(statuses.into_iter().flatten().collect());
+        }
+        if started.elapsed() >= limit {
+            for child in children.iter_mut() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            bail!("{what} ran past its {limit:?} limit and was killed");
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Output {
+    Capture,
+    Inherit,
+    Discard,
+}
+
+/// Runs `command` with `input` on stdin, bounded by `limit`. Stdin and stdout are pumped from their own threads,
+/// so a peer that stops reading or writing can never block the wait for the limit.
+fn run_bounded(mut command: Command, input: &[u8], output: Output, limit: Duration, what: &str) -> Result<Vec<u8>> {
+    let stdout = match output {
+        Output::Capture => Stdio::piped(),
+        Output::Inherit => Stdio::inherit(),
+        Output::Discard => Stdio::null(),
+    };
+    let mut child = command
         .stdin(Stdio::piped())
         .stdout(stdout)
         .spawn()
-        .context("starting ssh")?;
-    child
-        .stdin
-        .take()
-        .context("ssh stdin")?
-        .write_all(remote_script(script).as_bytes())?;
-    let output = child.wait_with_output()?;
-    ensure!(
-        output.status.success(),
-        "remote script failed ({}) on {}:{}",
-        output.status,
-        target.host,
-        target.port
-    );
-    Ok(output.stdout)
+        .with_context(|| format!("starting {what}"))?;
+    let mut stdin = child.stdin.take().context("child stdin")?;
+    let input = input.to_vec();
+    let writer = thread::spawn(move || stdin.write_all(&input));
+    let reader = child.stdout.take().map(|mut out| {
+        thread::spawn(move || {
+            let mut captured = Vec::new();
+            out.read_to_end(&mut captured).map(|_| captured)
+        })
+    });
+    let status = wait_within(&mut [&mut child], limit, what)?[0];
+    let written = writer.join().map_err(|_| anyhow!("{what}: stdin writer panicked"))?;
+    let captured = match reader {
+        Some(reader) => reader
+            .join()
+            .map_err(|_| anyhow!("{what}: stdout reader panicked"))?
+            .with_context(|| format!("reading the output of {what}"))?,
+        None => Vec::new(),
+    };
+    ensure!(status.success(), "{what} failed ({status})");
+    // A script cut short on stdin would have run only its first lines, so a failed write is an error even when
+    // the remote side exited 0.
+    written.with_context(|| format!("writing the input of {what}"))?;
+    Ok(captured)
+}
+
+fn run_script(target: &Target, script: &str, output: Output, limit: Duration) -> Result<Vec<u8>> {
+    let mut ssh = ssh_command(target)?;
+    ssh.arg("bash -s");
+    let what = format!("remote script on {}:{}", target.host, target.port);
+    run_bounded(ssh, remote_script(script).as_bytes(), output, limit, &what)
+}
+
+/// The remote side of a download, as POSIX sh because the pod's login shell runs it. GNU tar exits 1 when a file
+/// changed while it was read (a server log still being written), and the archive is still whole.
+fn download_command(paths: &[&str]) -> String {
+    let quoted: Vec<String> = paths.iter().map(|path| shell_quote(path)).collect();
+    format!(
+        "cd {KIT_DIR} || exit 2; set --; for p in {}; do if [ -e \"$p\" ]; then set -- \"$@\" \"$p\"; fi; done; \
+         tar --warning=no-file-changed -czf - -T /dev/null \"$@\"; rc=$?; [ \"$rc\" -le 1 ]",
+        quoted.join(" ")
+    )
 }
 
 impl Remote for SshRemote {
@@ -120,26 +193,23 @@ impl Remote for SshRemote {
     }
 
     fn run(&self, target: &Target, script: &str) -> Result<String> {
-        let stdout = run_script(target, script, Stdio::piped())?;
+        let stdout = run_script(target, script, Output::Capture, COMMAND_LIMIT)?;
         Ok(String::from_utf8_lossy(&stdout).into_owned())
     }
 
+    /// `harness ssh` is for a person at the terminal, who can Ctrl-C; the transfer limit still stops one left
+    /// running in a background shell.
     fn run_streaming(&self, target: &Target, script: &str) -> Result<()> {
-        run_script(target, script, Stdio::inherit()).map(drop)
+        run_script(target, script, Output::Inherit, TRANSFER_LIMIT).map(drop)
     }
 
     fn write_file(&self, target: &Target, path: &str, content: &str) -> Result<()> {
         let full = format!("{KIT_DIR}/{path}");
         let dir = full.rsplit_once('/').map_or(KIT_DIR, |(dir, _)| dir);
-        let mut child = ssh_command(target)?
-            .arg(format!("mkdir -p {} && cat > {}", shell_quote(dir), shell_quote(&full)))
-            .stdin(Stdio::piped())
-            .spawn()
-            .context("starting ssh")?;
-        child.stdin.take().context("ssh stdin")?.write_all(content.as_bytes())?;
-        let status = child.wait()?;
-        ensure!(status.success(), "writing {full} on the pod failed ({status})");
-        Ok(())
+        let mut ssh = ssh_command(target)?;
+        ssh.arg(format!("mkdir -p {} && cat > {}", shell_quote(dir), shell_quote(&full)));
+        let what = format!("writing {full} on the pod");
+        run_bounded(ssh, content.as_bytes(), Output::Discard, COMMAND_LIMIT, &what).map(drop)
     }
 
     fn upload(&self, target: &Target, local_root: &Path, paths: &[&str]) -> Result<()> {
@@ -157,37 +227,43 @@ impl Remote for SshRemote {
             .spawn()
             .context("starting tar")?;
         let archive = tar.stdout.take().context("tar stdout")?;
-        let ssh = ssh_command(target)?
+        let mut ssh = ssh_command(target)?
             .arg(format!("mkdir -p {KIT_DIR} && tar --no-same-owner -xzf - -C {KIT_DIR}"))
             .stdin(Stdio::from(archive))
-            .status()
+            .spawn()
             .context("starting ssh")?;
-        let tar = tar.wait()?;
+        let what = format!("copying {paths:?} to the pod");
+        let statuses = wait_within(&mut [&mut tar, &mut ssh], TRANSFER_LIMIT, &what)?;
         ensure!(
-            tar.success() && ssh.success(),
-            "copying {paths:?} to the pod failed (tar {tar}, ssh {ssh})"
+            statuses.iter().all(ExitStatus::success),
+            "{what} failed (tar {}, ssh {})",
+            statuses[0],
+            statuses[1]
         );
         Ok(())
     }
 
-    fn download(&self, target: &Target, path: &str, local_root: &Path) -> Result<()> {
+    fn download(&self, target: &Target, paths: &[&str], local_root: &Path, limit: Duration) -> Result<()> {
         let mut ssh = ssh_command(target)?
-            .arg(format!("tar -czf - -C {KIT_DIR} {}", shell_quote(path)))
+            .arg(download_command(paths))
             .stdout(Stdio::piped())
             .spawn()
             .context("starting ssh")?;
         let archive = ssh.stdout.take().context("ssh stdout")?;
         fs::create_dir_all(local_root)?;
-        let tar = Command::new("tar")
+        let mut tar = Command::new("tar")
             .args(["-xzf", "-", "-C"])
             .arg(local_root)
             .stdin(Stdio::from(archive))
-            .status()
+            .spawn()
             .context("starting tar")?;
-        let ssh = ssh.wait()?;
+        let what = format!("pulling {paths:?}");
+        let statuses = wait_within(&mut [&mut ssh, &mut tar], limit, &what)?;
         ensure!(
-            tar.success() && ssh.success(),
-            "pulling {path} failed (tar {tar}, ssh {ssh})"
+            statuses.iter().all(ExitStatus::success),
+            "{what} failed (ssh {}, tar {})",
+            statuses[0],
+            statuses[1]
         );
         Ok(())
     }
@@ -352,9 +428,90 @@ mod tests {
         fn upload(&self, _: &Target, _: &Path, _: &[&str]) -> Result<()> {
             Ok(())
         }
-        fn download(&self, _: &Target, _: &str, _: &Path) -> Result<()> {
+        fn download(&self, _: &Target, _: &[&str], _: &Path, _: Duration) -> Result<()> {
             Ok(())
         }
+    }
+
+    fn sh(script: &str) -> Command {
+        let mut command = Command::new("sh");
+        command.args(["-c", script]);
+        command
+    }
+
+    #[test]
+    fn a_hung_child_is_killed_at_the_limit() {
+        let started = Instant::now();
+        let err = run_bounded(
+            sh("sleep 30"),
+            b"",
+            Output::Discard,
+            Duration::from_millis(300),
+            "sleeper",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("sleeper ran past its 300ms limit"), "{err}");
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn a_child_that_never_reads_its_input_still_hits_the_limit() {
+        // More than a pipe buffer of input to a process that never reads it.
+        let input = vec![b'x'; 1 << 20];
+        let started = Instant::now();
+        assert!(
+            run_bounded(
+                sh("sleep 30"),
+                &input,
+                Output::Discard,
+                Duration::from_millis(300),
+                "deaf"
+            )
+            .is_err()
+        );
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn bounded_runs_pass_input_and_capture_output() {
+        let input = vec![b'y'; 1 << 20];
+        let out = run_bounded(sh("wc -c"), &input, Output::Capture, Duration::from_secs(10), "wc").unwrap();
+        assert_eq!(String::from_utf8(out).unwrap().trim(), "1048576");
+        let err = run_bounded(sh("exit 3"), b"", Output::Capture, Duration::from_secs(10), "three").unwrap_err();
+        assert!(err.to_string().contains("three failed"), "{err}");
+    }
+
+    #[test]
+    fn a_hung_pipeline_is_killed_whole() {
+        let mut first = sh("sleep 30").stdout(Stdio::piped()).spawn().unwrap();
+        let mut second = sh("cat >/dev/null")
+            .stdin(first.stdout.take().unwrap())
+            .spawn()
+            .unwrap();
+        let started = Instant::now();
+        let err = wait_within(&mut [&mut first, &mut second], Duration::from_millis(300), "pipe").unwrap_err();
+        assert!(err.to_string().contains("pipe ran past"), "{err}");
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(first.try_wait().unwrap().is_some() && second.try_wait().unwrap().is_some());
+    }
+
+    #[test]
+    fn a_download_skips_missing_paths_and_accepts_a_changed_file() {
+        let command = download_command(&["results/x/a1", "results/x/it's"]);
+        assert!(
+            command.starts_with("cd /workspace/sm120-kit || exit 2; set --; "),
+            "{command}"
+        );
+        assert!(
+            command.contains("for p in 'results/x/a1' 'results/x/it'\\''s'; do"),
+            "{command}"
+        );
+        assert!(
+            command.contains("tar --warning=no-file-changed -czf - -T /dev/null \"$@\""),
+            "{command}"
+        );
+        assert!(command.ends_with("[ \"$rc\" -le 1 ]"), "{command}");
     }
 
     #[test]

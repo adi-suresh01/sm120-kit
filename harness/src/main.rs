@@ -12,7 +12,7 @@ use sm120_harness::cloud::{API_BASE, Cloud, RunpodRest};
 use sm120_harness::events::{Events, Kind};
 use sm120_harness::ledger::{Budget, check_accounts};
 use sm120_harness::pod::{self, Ctx, cents};
-use sm120_harness::session::{Remote, SshRemote};
+use sm120_harness::session::{Remote, SshRemote, TRANSFER_LIMIT};
 use sm120_harness::spec::{IssueSpec, is_slug};
 use sm120_harness::{exec, reap};
 
@@ -147,7 +147,7 @@ fn run(cli: Cli) -> Result<()> {
             let spec = load(&repo, &issue)?;
             exec::exec(&ctx, &spec, &pod::live_pod(&ctx, &issue)?, &variants)
         }
-        Command::Pull { issue } => pod::pull(&ctx, &issue, &pod::live_pod(&ctx, &issue)?.target),
+        Command::Pull { issue } => pod::pull(&ctx, &issue, &pod::live_pod(&ctx, &issue)?.target, TRANSFER_LIMIT),
         Command::Down { issue } => pod::down(&ctx, &issue),
         Command::Run { issue, variants } => exec::run(&ctx, &load(&repo, &issue)?, &variants),
         Command::Reap => Ok(()),

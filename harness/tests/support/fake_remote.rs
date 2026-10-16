@@ -3,6 +3,7 @@ use std::collections::VecDeque;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use anyhow::{Result, bail};
 use sm120_harness::session::{Remote, Target};
@@ -13,6 +14,8 @@ pub struct FakeRemote {
     pub preflight_ok: Cell<bool>,
     pub reachable: Cell<bool>,
     pub topo: RefCell<String>,
+    /// Every script `run` was given, in order.
+    pub scripts: RefCell<Vec<String>>,
     pub jobs: RefCell<Vec<String>>,
     pub exits: RefCell<VecDeque<i32>>,
     exit: Cell<i32>,
@@ -20,7 +23,8 @@ pub struct FakeRemote {
     pub verdict: RefCell<String>,
     pub uploads: RefCell<Vec<Vec<String>>>,
     pub files: RefCell<Vec<(String, String)>>,
-    pub downloads: Cell<usize>,
+    pub downloads: RefCell<Vec<(Vec<String>, Duration)>>,
+    pub download_fails: Cell<bool>,
     pub interrupt_on_job: RefCell<Option<Rc<AtomicBool>>>,
     pub panic_on_write: Cell<bool>,
 }
@@ -31,6 +35,7 @@ impl Default for FakeRemote {
             preflight_ok: Cell::new(true),
             reachable: Cell::new(true),
             topo: RefCell::new(include_str!("../fixtures/topo_pcie.txt").to_string()),
+            scripts: RefCell::new(Vec::new()),
             jobs: RefCell::new(Vec::new()),
             exits: RefCell::new(VecDeque::new()),
             exit: Cell::new(0),
@@ -38,7 +43,8 @@ impl Default for FakeRemote {
             verdict: RefCell::new(r#"{"variant":"baseline","verdict":"OK","boot_s":180}"#.into()),
             uploads: RefCell::new(Vec::new()),
             files: RefCell::new(Vec::new()),
-            downloads: Cell::new(0),
+            downloads: RefCell::new(Vec::new()),
+            download_fails: Cell::new(false),
             interrupt_on_job: RefCell::new(None),
             panic_on_write: Cell::new(false),
         }
@@ -59,6 +65,10 @@ impl FakeRemote {
         }
         reply
     }
+
+    pub fn download_count(&self) -> usize {
+        self.downloads.borrow().len()
+    }
 }
 
 impl Remote for FakeRemote {
@@ -74,6 +84,7 @@ impl Remote for FakeRemote {
     }
 
     fn run(&self, _: &Target, script: &str) -> Result<String> {
+        self.scripts.borrow_mut().push(script.to_string());
         if script.contains("nvidia-smi topo -m") {
             return Ok(self.topo.borrow().clone());
         }
@@ -111,8 +122,13 @@ impl Remote for FakeRemote {
         Ok(())
     }
 
-    fn download(&self, _: &Target, _: &str, _: &Path) -> Result<()> {
-        self.downloads.set(self.downloads.get() + 1);
+    fn download(&self, _: &Target, paths: &[&str], _: &Path, limit: Duration) -> Result<()> {
+        self.downloads
+            .borrow_mut()
+            .push((paths.iter().map(|p| p.to_string()).collect(), limit));
+        if self.download_fails.get() {
+            bail!("pulling {paths:?} ran past its {limit:?} limit and was killed");
+        }
         Ok(())
     }
 }

@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use crate::events::Kind;
 use crate::pod::{self, Ctx, LivePod};
 use crate::reap;
-use crate::session::{shell_quote, start_job};
+use crate::session::{TRANSFER_LIMIT, shell_quote, start_job};
 use crate::spec::{IssueSpec, Variant};
 
 /// The variant as a bash file that `serve_variant.sh` sources. Every value is single-quoted, so spaces, quotes,
@@ -115,7 +115,7 @@ fn run_variant(ctx: &Ctx, spec: &IssueSpec, live: &LivePod, variant: &Variant) -
             emit_verdict(ctx, issue, line);
         },
     )?;
-    if let Err(e) = pod::pull(ctx, issue, &live.target) {
+    if let Err(e) = pod::pull(ctx, issue, &live.target, TRANSFER_LIMIT) {
         ctx.warn(issue, format!("pull failed: {e:#}"));
     }
     // A server crash is a verdict (BOOT_FAIL); a variant that never reached one is a harness error.
