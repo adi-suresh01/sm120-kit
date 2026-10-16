@@ -93,6 +93,11 @@ bench = [[1, 8], [16, 64], [64, 256]]
 Either way a GSM8K request that failed, or a benchmark that completed fewer requests than it sent, is `POST_FAIL`,
 not a low score or a slow run.
 
+Quality and `post_smoke` (below) have to finish inside `serve_variant.sh`'s outer limit of
+`server.boot_timeout_s + 3600` seconds, which also covers the boot and the smoke test; a run still going at that
+point ends as `TIMEOUT`. A model generating garbage runs every GSM8K reply to `max_tokens` (4096 by default), which
+is slow, so keep `gsm8k` around 200 or lower on a variant suspected of it.
+
 `hooks.sh` is sourced before each variant and may define any of:
 
 - `pre_launch <run_dir>`: before the server starts.
