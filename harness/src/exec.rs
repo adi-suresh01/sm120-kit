@@ -12,7 +12,9 @@ use crate::session::{TRANSFER_LIMIT, shell_quote, start_job};
 use crate::spec::{IssueSpec, Variant};
 
 /// The variant as a bash file that `serve_variant.sh` sources. Every value is single-quoted, so spaces, quotes,
-/// `$`, backticks, and newlines reach bash unchanged.
+/// `$`, backticks, and newlines reach bash unchanged. Patches go as three parallel arrays (file stem, package,
+/// strip level); SNAPSHOT_PKGS lists every package this issue's variants patch, so each is restored before every
+/// variant whether or not this one patches it.
 pub fn render_variant(spec: &IssueSpec, variant: &Variant) -> Result<String> {
     let server = &spec.server;
     let command: Vec<&str> = server
@@ -34,6 +36,7 @@ pub fn render_variant(spec: &IssueSpec, variant: &Variant) -> Result<String> {
         ),
         None => (String::new(), Vec::new()),
     };
+    let strips: Vec<String> = variant.patches.iter().map(|patch| patch.strip.to_string()).collect();
     let mut out = String::new();
     for (name, value) in [
         ("VARIANT", variant.name.as_str()),
@@ -43,16 +46,25 @@ pub fn render_variant(spec: &IssueSpec, variant: &Variant) -> Result<String> {
         ("FAIL_PATTERN", &server.fail_pattern),
         ("BOOT_TIMEOUT", &server.boot_timeout_s.to_string()),
         ("CONCURRENCY", &variant.smoke_concurrency.to_string()),
-        ("PATCH_STRIP", &server.patch_strip.to_string()),
         ("GSM8K", &gsm8k),
     ] {
         writeln!(out, "{name}={}", shell_quote(value))?;
     }
     for (name, values) in [
         (
-            "PATCHES",
-            variant.patches.iter().map(String::as_str).collect::<Vec<_>>(),
+            "PATCH_FILES",
+            variant
+                .patches
+                .iter()
+                .map(|patch| patch.name.as_str())
+                .collect::<Vec<_>>(),
         ),
+        (
+            "PATCH_PKGS",
+            variant.patches.iter().map(|patch| patch.package.as_str()).collect(),
+        ),
+        ("PATCH_STRIPS", strips.iter().map(String::as_str).collect()),
+        ("SNAPSHOT_PKGS", spec.snapshot_packages()),
         ("SERVER_CMD", command),
         ("VARIANT_ENV", env.iter().map(String::as_str).collect()),
         ("BENCH", bench.iter().map(String::as_str).collect()),
@@ -289,7 +301,7 @@ boot_timeout_s = 1800
 patch_strip = 2
 [variants.a6]
 flags = ["--speculative-algorithm", "NEXTN"]
-patches = ["ep-dispatcher-runner"]
+patches = ["ep-dispatcher-runner", { name = "fi-graphs", package = "flashinfer", strip = 1 }]
 env = { HF_HUB_OFFLINE = "1", ODD = "it's $HOME `id`\nline2" }
 smoke_concurrency = 9
 [variants.a6.quality]
@@ -308,10 +320,13 @@ bench = [[1, 8], [16, 64]]
         let n = NEXT.fetch_add(1, Ordering::SeqCst);
         let path = std::env::temp_dir().join(format!("sm120-variant-{}-{n}.sh", std::process::id()));
         std::fs::write(&path, rendered).unwrap();
+        // The last value is empty unless the variables the pod scripts no longer read are still set.
         let script = r#"source "$1"
-for v in "$VARIANT" "$PACKAGE" "$MODEL" "$PORT" "$FAIL_PATTERN" "$BOOT_TIMEOUT" "$CONCURRENCY" "$PATCH_STRIP" \
-         "$GSM8K" "${#PATCHES[@]}" "${PATCHES[@]}" "${#SERVER_CMD[@]}" "${SERVER_CMD[@]}" \
-         "${#VARIANT_ENV[@]}" "${VARIANT_ENV[@]}" "${#BENCH[@]}" "${BENCH[@]}"; do
+for v in "$VARIANT" "$PACKAGE" "$MODEL" "$PORT" "$FAIL_PATTERN" "$BOOT_TIMEOUT" "$CONCURRENCY" "$GSM8K" \
+         "${#PATCH_FILES[@]}" "${PATCH_FILES[@]}" "${#PATCH_PKGS[@]}" "${PATCH_PKGS[@]}" \
+         "${#PATCH_STRIPS[@]}" "${PATCH_STRIPS[@]}" "${#SNAPSHOT_PKGS[@]}" "${SNAPSHOT_PKGS[@]}" \
+         "${#SERVER_CMD[@]}" "${SERVER_CMD[@]}" "${#VARIANT_ENV[@]}" "${VARIANT_ENV[@]}" \
+         "${#BENCH[@]}" "${BENCH[@]}" "${PATCHES+PATCHES}${PATCH_STRIP+PATCH_STRIP}"; do
     printf '%s\0' "$v"
 done"#;
         let out = Command::new("bash")
@@ -339,10 +354,19 @@ done"#;
             "illegal memory access|CUDA error: ",
             "1800",
             "9",
-            "2",
             "200",
-            "1",
+            "2",
             "ep-dispatcher-runner",
+            "fi-graphs",
+            "2",
+            "sglang",
+            "flashinfer",
+            "2",
+            "2",
+            "1",
+            "2",
+            "sglang",
+            "flashinfer",
             "11",
             "python3",
             "-m",
@@ -361,16 +385,17 @@ done"#;
             "2",
             "1:8",
             "16:64",
+            "",
         ];
         assert_eq!(values, expected);
     }
 
     #[test]
-    fn a_bare_variant_renders_empty_lists() {
+    fn a_bare_variant_still_restores_every_package_the_issue_patches() {
         let spec = spec();
         let values = through_bash(&render_variant(&spec, spec.variant("b0").unwrap()).unwrap());
-        assert_eq!(&values[6..10], ["1", "2", "", "0"]);
-        assert_eq!(values.last().unwrap(), "0");
+        assert_eq!(&values[6..14], ["1", "", "0", "0", "0", "2", "sglang", "flashinfer"]);
+        assert_eq!(&values[values.len() - 3..], ["0", "0", ""]);
     }
 
     #[test]

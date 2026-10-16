@@ -4,7 +4,8 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail, ensure};
-use serde::de::{Deserializer, MapAccess, Visitor};
+use serde::de::value::MapAccessDeserializer;
+use serde::de::{self, Deserializer, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,15 +41,25 @@ impl Package {
     }
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug)]
 pub struct IssueSpec {
     pub issue: String,
     pub planned_hours: f64,
     pub pod: PodSpec,
     pub server: ServerSpec,
-    #[serde(default, deserialize_with = "variants_in_file_order")]
     pub variants: Vec<Variant>,
+}
+
+/// harness.toml as written; `IssueSpec` is this with every patch resolved against the server's defaults.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSpec {
+    issue: String,
+    planned_hours: f64,
+    pod: PodSpec,
+    server: ServerSpec,
+    #[serde(default, deserialize_with = "variants_in_file_order")]
+    variants: Vec<(String, VariantBody)>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -93,10 +104,19 @@ pub struct ServerSpec {
 pub struct Variant {
     pub name: String,
     pub flags: Vec<String>,
-    pub patches: Vec<String>,
+    pub patches: Vec<Patch>,
     pub env: BTreeMap<String, String>,
     pub smoke_concurrency: u32,
     pub quality: Option<Quality>,
+}
+
+/// One `patches/<name>.diff`, applied with `patch -p<strip>` to the installed Python package `package`, which
+/// need not be the one served: vllm#49476's FlashInfer fix patches flashinfer under a vllm server.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Patch {
+    pub name: String,
+    pub package: String,
+    pub strip: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -105,12 +125,65 @@ struct VariantBody {
     #[serde(default)]
     flags: Vec<String>,
     #[serde(default)]
-    patches: Vec<String>,
+    patches: Vec<PatchEntry>,
     #[serde(default)]
     env: BTreeMap<String, String>,
     #[serde(default = "default_smoke_concurrency")]
     smoke_concurrency: u32,
     quality: Option<Quality>,
+}
+
+/// A patch as harness.toml writes it: `"name"` for the served package, or a table naming another one.
+#[derive(Debug)]
+enum PatchEntry {
+    Name(String),
+    Table(PatchTable),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PatchTable {
+    name: String,
+    package: Option<String>,
+    strip: Option<u32>,
+}
+
+impl<'de> Deserialize<'de> for PatchEntry {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Entry;
+
+        impl<'de> Visitor<'de> for Entry {
+            type Value = PatchEntry;
+
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a patch name or a { name, package, strip } table")
+            }
+
+            fn visit_str<E: de::Error>(self, name: &str) -> Result<Self::Value, E> {
+                Ok(PatchEntry::Name(name.to_string()))
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
+                PatchTable::deserialize(MapAccessDeserializer::new(map)).map(PatchEntry::Table)
+            }
+        }
+
+        deserializer.deserialize_any(Entry)
+    }
+}
+
+impl PatchEntry {
+    fn resolve(self, server: &ServerSpec) -> Patch {
+        let (name, package, strip) = match self {
+            Self::Name(name) => (name, None, None),
+            Self::Table(table) => (table.name, table.package, table.strip),
+        };
+        Patch {
+            name,
+            package: package.unwrap_or_else(|| server.package.as_str().to_string()),
+            strip: strip.unwrap_or(server.patch_strip),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -130,11 +203,11 @@ fn default_smoke_concurrency() -> u32 {
 }
 
 /// `run` with no variant names runs them in the order the file lists them, so the control can come first.
-fn variants_in_file_order<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<Variant>, D::Error> {
+fn variants_in_file_order<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<(String, VariantBody)>, D::Error> {
     struct Ordered;
 
     impl<'de> Visitor<'de> for Ordered {
-        type Value = Vec<Variant>;
+        type Value = Vec<(String, VariantBody)>;
 
         fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
             f.write_str("a table of variant tables")
@@ -142,21 +215,39 @@ fn variants_in_file_order<'de, D: Deserializer<'de>>(deserializer: D) -> Result<
 
         fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
             let mut variants = Vec::new();
-            while let Some((name, body)) = map.next_entry::<String, VariantBody>()? {
-                variants.push(Variant {
-                    name,
-                    flags: body.flags,
-                    patches: body.patches,
-                    env: body.env,
-                    smoke_concurrency: body.smoke_concurrency,
-                    quality: body.quality,
-                });
+            while let Some(entry) = map.next_entry::<String, VariantBody>()? {
+                variants.push(entry);
             }
             Ok(variants)
         }
     }
 
     deserializer.deserialize_map(Ordered)
+}
+
+impl RawSpec {
+    fn resolve(self) -> IssueSpec {
+        let server = self.server;
+        let variants = self
+            .variants
+            .into_iter()
+            .map(|(name, body)| Variant {
+                name,
+                flags: body.flags,
+                patches: body.patches.into_iter().map(|patch| patch.resolve(&server)).collect(),
+                env: body.env,
+                smoke_concurrency: body.smoke_concurrency,
+                quality: body.quality,
+            })
+            .collect();
+        IssueSpec {
+            issue: self.issue,
+            planned_hours: self.planned_hours,
+            pod: self.pod,
+            server,
+            variants,
+        }
+    }
 }
 
 impl IssueSpec {
@@ -170,9 +261,21 @@ impl IssueSpec {
     }
 
     pub fn parse(text: &str, issue: &str, patch_exists: impl Fn(&str) -> bool) -> Result<Self> {
-        let spec: Self = toml::from_str(text)?;
+        let spec = toml::from_str::<RawSpec>(text)?.resolve();
         spec.validate(issue, &patch_exists)?;
         Ok(spec)
+    }
+
+    /// The served package first, then every package any variant patches. serve_variant.sh restores each one
+    /// before a variant, so a package an earlier variant patched is clean again for the next.
+    pub fn snapshot_packages(&self) -> Vec<&str> {
+        let mut packages = vec![self.server.package.as_str()];
+        for patch in self.variants.iter().flat_map(|variant| &variant.patches) {
+            if !packages.contains(&patch.package.as_str()) {
+                packages.push(&patch.package);
+            }
+        }
+        packages
     }
 
     pub fn variant(&self, name: &str) -> Result<&Variant> {
@@ -250,15 +353,17 @@ impl Variant {
             is_variant_name(&self.name),
             "variant names must be letters, digits, '_' or '-', and not jobs or variants"
         );
-        for patch in &self.patches {
-            ensure!(is_name(patch), "patch name {patch:?} must be a plain file stem");
+        for Patch { name, package, .. } in &self.patches {
+            ensure!(is_name(name), "patch name {name:?} must be a plain file stem");
+            ensure!(patch_exists(name), "patch {name:?} not found under patches/{name}.diff");
+            // pkg_snapshot.sh imports it to find its directory, so it has to be a Python import name.
             ensure!(
-                patch_exists(patch),
-                "patch {patch:?} not found under patches/{patch}.diff"
+                is_identifier(package),
+                "patch {name:?} names package {package:?}, which is not a Python import name"
             );
         }
         for key in self.env.keys() {
-            ensure!(is_env_key(key), "env key {key:?} is not a shell variable name");
+            ensure!(is_identifier(key), "env key {key:?} is not a shell variable name");
         }
         ensure!(self.smoke_concurrency >= 1, "smoke_concurrency must be at least 1");
         if let Some(quality) = &self.quality {
@@ -297,7 +402,8 @@ fn is_name(s: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
-fn is_env_key(s: &str) -> bool {
+/// `[A-Za-z_][A-Za-z0-9_]*`: a shell variable name, and an ASCII Python import name.
+fn is_identifier(s: &str) -> bool {
     s.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
         && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
@@ -381,7 +487,12 @@ smoke_concurrency = 13
         assert_eq!(spec.server.package, Package::Vllm);
         assert_eq!(spec.server.patch_strip, 1);
         let fixed = spec.variant("fixed-graphs-31g").unwrap();
-        assert_eq!(fixed.patches, ["pr60069", "pr57946"]);
+        let vllm = |name: &str| Patch {
+            name: name.into(),
+            package: "vllm".into(),
+            strip: 1,
+        };
+        assert_eq!(fixed.patches, [vllm("pr60069"), vllm("pr57946")]);
         assert_eq!(fixed.env["MEM_BUDGET_GIB"], "31.45");
         assert_eq!(fixed.smoke_concurrency, 13);
         assert_eq!(spec.variant("baseline-graphs").unwrap().smoke_concurrency, 1);
@@ -424,6 +535,63 @@ smoke_concurrency = 13
     fn rejects_a_missing_patch() {
         let err = error_of(&example().replace("\"pr57946\"", "\"fi4827\""));
         assert!(err.contains("patch \"fi4827\" not found"), "{err}");
+    }
+
+    fn with_table_patch(table: &str) -> String {
+        example().replace(
+            "patches = [\"pr60069\", \"pr57946\"]",
+            &format!("patches = [\"pr60069\", {table}]"),
+        )
+    }
+
+    #[test]
+    fn a_patch_table_names_another_package_and_strip() {
+        let spec = parse(&with_table_patch(
+            "{ name = \"pr4827\", package = \"flashinfer\", strip = 2 }, { name = \"pr57946\" }",
+        ))
+        .unwrap();
+        let patches = &spec.variant("fixed-graphs-31g").unwrap().patches;
+        let got: Vec<(&str, &str, u32)> = patches
+            .iter()
+            .map(|p| (p.name.as_str(), p.package.as_str(), p.strip))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("pr60069", "vllm", 1),
+                ("pr4827", "flashinfer", 2),
+                ("pr57946", "vllm", 1)
+            ]
+        );
+        assert_eq!(spec.snapshot_packages(), ["vllm", "flashinfer"]);
+    }
+
+    #[test]
+    fn a_patch_table_is_checked_like_a_name() {
+        let err = error_of(&with_table_patch("{ name = \"fi4827\", package = \"flashinfer\" }"));
+        assert!(err.contains("patch \"fi4827\" not found"), "{err}");
+        for package in ["flash-infer", "1flash", "flash infer", "", "a/b"] {
+            let err = error_of(&with_table_patch(&format!(
+                "{{ name = \"pr1\", package = \"{package}\" }}"
+            )));
+            assert!(err.contains("not a Python import name"), "{package}: {err}");
+        }
+        let err = error_of(&with_table_patch("{ name = \"pr1\", pkg = \"flashinfer\" }"));
+        assert!(err.contains("unknown field `pkg`"), "{err}");
+        let err = error_of(&with_table_patch("{ package = \"flashinfer\" }"));
+        assert!(err.contains("missing field `name`"), "{err}");
+    }
+
+    #[test]
+    fn snapshot_packages_cover_every_variant_once_served_first() {
+        let text = with_table_patch("{ name = \"pr2\", package = \"flashinfer\" }")
+            .replace(
+                "[variants.zeta-first]\n",
+                "[variants.zeta-first]\npatches = [{ name = \"pr3\", package = \"sgl_kernel\" }, { name = \"pr4\", package = \"flashinfer\" }]\n",
+            );
+        let spec = parse(&text).unwrap();
+        assert_eq!(spec.snapshot_packages(), ["vllm", "sgl_kernel", "flashinfer"]);
+        assert_eq!(parse(&example()).unwrap().snapshot_packages(), ["vllm"]);
     }
 
     #[test]
