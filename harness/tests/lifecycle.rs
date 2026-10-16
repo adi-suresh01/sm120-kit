@@ -7,6 +7,7 @@ use std::path::Path;
 use std::rc::Rc;
 use std::sync::atomic::AtomicBool;
 use std::thread;
+use std::time::Duration;
 
 use jiff::SignedDuration;
 use sm120_harness::clock::Clock;
@@ -394,17 +395,58 @@ fn a_running_pod_whose_rate_cannot_be_read_is_terminated() {
     }
 }
 
+/// 30 reads at the 10 s poll: 5 min of RUNNING without a container, past the 3 min proxy-only limit.
+const PULL_READS: usize = 30;
+const PULLED: Duration = Duration::from_secs(300);
+
+fn waited(w: &World) -> Duration {
+    w.clock.slept.borrow().iter().sum()
+}
+
 #[test]
-fn a_proxy_only_host_is_terminated_after_three_minutes() {
+fn a_proxy_only_host_is_terminated_three_minutes_after_its_container_starts() {
+    for (pull_reads, pulled) in [(0, Duration::ZERO), (PULL_READS, PULLED)] {
+        let w = World::default();
+        {
+            let mut state = w.cloud.0.borrow_mut();
+            state.proxy_only = true;
+            state.pull_reads = pull_reads;
+        }
+        let err = err_text(w.up());
+        assert!(
+            err.contains("RunPod gave no direct SSH endpoint (proxy-only host) within 3 min of its container starting"),
+            "{err}"
+        );
+        assert!(err.contains(r#""private":19123,"public":60482,"type":"http""#), "{err}");
+        let waited = waited(&w);
+        assert!(
+            waited >= pulled + Duration::from_secs(180) && waited < pulled + Duration::from_secs(300),
+            "{waited:?}"
+        );
+        assert_eq!(w.states(), [PodState::Terminated]);
+        assert!(w.cloud.billing_pods().is_empty());
+    }
+}
+
+#[test]
+fn a_pod_running_while_its_image_pulls_becomes_ready_once_its_container_starts() {
     let w = World::default();
-    w.cloud.0.borrow_mut().proxy_only = true;
+    w.cloud.0.borrow_mut().pull_reads = PULL_READS;
+    let live = w.up().unwrap();
+    assert_eq!(live.target.port, 40122);
+    assert!(waited(&w) >= PULLED);
+    assert_eq!(w.states(), [PodState::Live]);
+    assert_eq!(w.events().matches("image still pulling").count(), 1, "{}", w.events());
+}
+
+#[test]
+fn a_container_that_never_starts_is_bounded_by_the_ready_timeout() {
+    let w = World::default();
+    w.cloud.0.borrow_mut().pull_reads = usize::MAX;
     let err = err_text(w.up());
-    assert!(
-        err.contains("RunPod gave no direct SSH endpoint (proxy-only host)"),
-        "{err}"
-    );
-    let waited = w.clock.slept.borrow().iter().sum::<std::time::Duration>();
-    assert!(waited >= std::time::Duration::from_secs(180) && waited < std::time::Duration::from_secs(300));
+    assert!(err.contains("did not answer on SSH within 30 min"), "{err}");
+    assert!(waited(&w) >= Duration::from_secs(30 * 60));
+    assert_eq!(w.events().matches("image still pulling").count(), 1, "{}", w.events());
     assert_eq!(w.states(), [PodState::Terminated]);
     assert!(w.cloud.billing_pods().is_empty());
 }
