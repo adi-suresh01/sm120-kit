@@ -755,6 +755,31 @@ fn the_reaper_never_deletes_an_untracked_pod() {
     assert!(w.events().contains("no ledger tracks"), "{}", w.events());
 }
 
+#[test]
+fn a_stopped_pod_reaped_days_late_books_no_more_than_its_reservation() {
+    let w = World::default();
+    w.up().unwrap();
+    // The watchdog managed only `runpodctl pod stop` at the deadline.
+    w.cloud.0.borrow_mut().pods[0].pod.status = PodStatus::Exited;
+    w.clock.advance(SignedDuration::from_hours(72));
+    run_reaper(&w);
+    let entry = &w.ledger().pods[0];
+    assert_eq!(entry.state, PodState::Terminated);
+    assert_eq!(entry.cost_usd, Some(entry.reserved_usd));
+    assert!(w.ledger().remaining_usd().unwrap() > 17.0);
+    assert!(w.events().contains("\"action\":\"terminate\"") && w.events().contains("\"last_status\":\"EXITED\""));
+    assert!(w.cloud.billing_pods().is_empty());
+    // A bill above the cap still replaces it.
+    assert!(entry.reserved_usd < 3.0);
+    w.cloud.0.borrow_mut().billing = Some(3.0);
+    w.with(|ctx| pod::reconcile_billing(ctx, ISSUE)).unwrap();
+    let entry = &w.ledger().pods[0];
+    assert_eq!(
+        (entry.cost_usd, entry.cost_source),
+        (Some(3.0), Some(CostSource::Billing))
+    );
+}
+
 fn run(w: &World, variants: &[&str]) -> anyhow::Result<()> {
     let spec = w.spec();
     let names: Vec<String> = variants.iter().map(|name| name.to_string()).collect();

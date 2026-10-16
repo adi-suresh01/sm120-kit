@@ -326,7 +326,16 @@ impl PodEntry {
         }
     }
 
-    /// Returns whether the entry changed. Billing replaces the estimate once it is at least as high, or once
+    /// The reaper ends a pod well past its deadline, after the watchdog stopped it, so rate x time since the
+    /// reservation can book days of GPU time for a pod that billed disk only. No estimate books more than the
+    /// reservation held; billing replaces it when the bill is higher.
+    pub fn cap_estimate_at_reservation(&mut self) {
+        if self.cost_source == Some(CostSource::Estimate) {
+            self.cost_usd = self.cost_usd.map(|cost| cost.min(self.reserved_usd));
+        }
+    }
+
+    /// Returns whether the entry changed. Billing replaces the booked cost once it is at least as high, or once
     /// it has had a day to settle, so a partial record never understates what was spent.
     pub fn apply_billing(&mut self, billed_usd: f64, now: Timestamp) -> bool {
         let Some(at) = self.terminated_at else { return false };
@@ -334,7 +343,7 @@ impl PodEntry {
             return false;
         }
         let settled = now.duration_since(at) >= BILLING_SETTLE;
-        if billed_usd < self.estimate_usd(at) && !settled {
+        if billed_usd < self.cost_usd.unwrap_or(0.0) && !settled {
             return false;
         }
         let changed = self.cost_usd != Some(billed_usd) || self.cost_source != Some(CostSource::Billing);

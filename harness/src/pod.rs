@@ -730,6 +730,15 @@ pub fn down(ctx: &Ctx, issue: &str) -> Result<()> {
 
 /// Deletes the pod, waits until RunPod no longer lists it, then books the estimate and any billing record.
 pub fn terminate(ctx: &Ctx, issue: &str, entry: &PodEntry) -> Result<()> {
+    end_pod(ctx, issue, entry, false)
+}
+
+/// The reaper's delete of a pod past its deadline: as `terminate`, with the estimate capped at the reservation.
+pub fn terminate_overdue(ctx: &Ctx, issue: &str, entry: &PodEntry) -> Result<()> {
+    end_pod(ctx, issue, entry, true)
+}
+
+fn end_pod(ctx: &Ctx, issue: &str, entry: &PodEntry, overdue: bool) -> Result<()> {
     let id = entry
         .id
         .as_deref()
@@ -741,6 +750,9 @@ pub fn terminate(ctx: &Ctx, issue: &str, entry: &PodEntry) -> Result<()> {
         let entry = ledger.entry_mut(&entry.name)?;
         if entry.state == PodState::Live {
             entry.mark_terminated(at)?;
+            if overdue {
+                entry.cap_estimate_at_reservation();
+            }
         }
         Ok(entry.clone())
     })?;

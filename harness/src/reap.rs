@@ -12,11 +12,30 @@ pub const GRACE: SignedDuration = SignedDuration::from_mins(2);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
-    Terminate { issue: String, name: String, id: String },
-    MarkGone { issue: String, name: String },
-    Adopt { issue: String, name: String, id: String },
-    Release { issue: String, name: String },
-    WarnUntracked { name: String, id: String },
+    Terminate {
+        issue: String,
+        name: String,
+        id: String,
+        /// What RunPod listed last: EXITED means the watchdog only managed a stop.
+        status: PodStatus,
+    },
+    MarkGone {
+        issue: String,
+        name: String,
+    },
+    Adopt {
+        issue: String,
+        name: String,
+        id: String,
+    },
+    Release {
+        issue: String,
+        name: String,
+    },
+    WarnUntracked {
+        name: String,
+        id: String,
+    },
 }
 
 fn listed<'a>(pods: &'a [Pod], id: &str) -> Option<&'a Pod> {
@@ -26,9 +45,16 @@ fn listed<'a>(pods: &'a [Pod], id: &str) -> Option<&'a Pod> {
 
 fn live_action(issue: &str, entry: &PodEntry, id: &str, pods: &[Pod], now: Timestamp) -> Option<Action> {
     let (issue, name, id) = (issue.to_string(), entry.name.clone(), id.to_string());
+    // A deadline too close to the end of time to add the grace to is not one the watchdog will ever reach.
+    let overdue = entry.deadline.checked_add(GRACE).is_ok_and(|end| now > end);
     match listed(pods, &id) {
         None => Some(Action::MarkGone { issue, name }),
-        Some(_) if now > entry.deadline + GRACE => Some(Action::Terminate { issue, name, id }),
+        Some(pod) if overdue => Some(Action::Terminate {
+            issue,
+            name,
+            id,
+            status: pod.status,
+        }),
         Some(_) => None,
     }
 }
@@ -118,16 +144,17 @@ fn action_issue<'a>(ctx: &Ctx, action: &'a Action) -> Option<&'a str> {
 /// Each change re-checks the entry under the ledger lock, since another harness process may have moved it on.
 fn apply(ctx: &Ctx, action: &Action) -> Result<()> {
     match action {
-        Action::Terminate { issue, name, id } => {
+        Action::Terminate { issue, name, id, status } => {
             let ledger = ctx.ledger(issue).load()?;
             let entry = ledger.pods.iter().find(|e| &e.name == name);
             if let Some(entry) = entry.filter(|e| e.state == PodState::Live && e.id.as_deref() == Some(id.as_str())) {
                 ctx.events.emit(
                     Some(issue),
                     Kind::Reap,
-                    json!({"pod": name, "id": id, "action": "terminate", "deadline": entry.deadline}),
+                    json!({"pod": name, "id": id, "action": "terminate", "deadline": entry.deadline,
+                           "last_status": status}),
                 );
-                pod::terminate(ctx, issue, entry)?;
+                pod::terminate_overdue(ctx, issue, entry)?;
             }
         }
         Action::MarkGone { issue, name } => {
@@ -215,11 +242,12 @@ mod tests {
 
     const NAME: &str = "sm120-vllm-47990-aaaaaa";
 
-    fn terminate() -> Action {
+    fn terminate(status: PodStatus) -> Action {
         Action::Terminate {
             issue: "vllm-47990".into(),
             name: NAME.into(),
             id: "p1".into(),
+            status,
         }
     }
 
@@ -228,14 +256,17 @@ mod tests {
         let ledgers = [ledger_with(PodState::Live)];
         let pods = [pod("p1", NAME, PodStatus::Running)];
         assert!(decide(&ledgers, &pods, at("2026-10-16T18:01:59Z")).is_empty());
-        assert_eq!(decide(&ledgers, &pods, at("2026-10-16T18:02:01Z")), [terminate()]);
+        assert_eq!(
+            decide(&ledgers, &pods, at("2026-10-16T18:02:01Z")),
+            [terminate(PodStatus::Running)]
+        );
     }
 
     #[test]
     fn a_stopped_pod_past_its_deadline_is_still_deleted() {
         let pods = [pod("p1", NAME, PodStatus::Exited)];
         let actions = decide(&[ledger_with(PodState::Live)], &pods, at("2026-10-16T19:00:00Z"));
-        assert_eq!(actions, [terminate()]);
+        assert_eq!(actions, [terminate(PodStatus::Exited)]);
     }
 
     #[test]
@@ -275,7 +306,7 @@ mod tests {
         let pods = [pod("p1", NAME, PodStatus::Running)];
         let actions = decide(&[ledger_with(PodState::Reserved)], &pods, at("2026-10-16T18:30:00Z"));
         assert_eq!(actions.len(), 2);
-        assert_eq!(actions[1], terminate());
+        assert_eq!(actions[1], terminate(PodStatus::Running));
     }
 
     #[test]
