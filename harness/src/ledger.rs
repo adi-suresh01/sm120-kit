@@ -101,8 +101,11 @@ pub fn plan_reservation(
         "${remaining_usd:.2} left buys {} min at ${rate_usd_hr:.2}/hr with the 10% margin; at least 15 min is needed",
         seconds / 60
     );
+    let deadline = now
+        .checked_add(length)
+        .with_context(|| format!("a deadline {} min after {now} is out of range", seconds / 60))?;
     Ok(Reservation {
-        deadline: now + length,
+        deadline,
         reserved_usd: rate_usd_hr * MARGIN * seconds as f64 / 3600.0,
     })
 }
@@ -463,11 +466,14 @@ impl LedgerStore {
         let mut text = serde_json::to_string_pretty(ledger)?;
         text.push('\n');
         let mut file = File::create(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
-        file.write_all(text.as_bytes())?;
-        file.sync_all()?;
+        file.write_all(text.as_bytes())
+            .with_context(|| format!("writing {}", tmp.display()))?;
+        file.sync_all().with_context(|| format!("syncing {}", tmp.display()))?;
         fs::rename(&tmp, &self.path).with_context(|| format!("replacing {}", self.path.display()))?;
         if let Some(dir) = self.path.parent() {
-            File::open(dir)?.sync_all()?;
+            File::open(dir)
+                .and_then(|dir| dir.sync_all())
+                .with_context(|| format!("syncing {}", dir.display()))?;
         }
         Ok(())
     }
@@ -524,6 +530,13 @@ mod tests {
         assert!(plan_reservation(at("2026-10-16T17:00:00Z"), 0.2, 100.0, 2.49).is_err());
         let fifteen = 2.49 * 1.10 / 4.0;
         assert!(plan_reservation(at("2026-10-16T17:00:00Z"), 2.0, fifteen + 1e-6, 2.49).is_ok());
+    }
+
+    #[test]
+    fn a_deadline_past_the_end_of_time_is_an_error_not_a_panic() {
+        let near_end = Timestamp::MAX - SignedDuration::from_mins(30);
+        let err = plan_reservation(near_end, 2.0, 100.0, 2.49).unwrap_err();
+        assert!(err.to_string().contains("out of range"), "{err}");
     }
 
     #[test]

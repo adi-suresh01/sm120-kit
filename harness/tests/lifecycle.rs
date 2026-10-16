@@ -169,7 +169,7 @@ fn the_create_request_carries_the_deadline_and_never_a_token() {
     let (_, _, env) = w.cloud.billing_pods().remove(0);
     let deadline: jiff::Timestamp = "2026-10-16T18:00:00Z".parse().unwrap();
     assert_eq!(env["HARNESS_DEADLINE_EPOCH"], deadline.as_second().to_string());
-    assert_eq!(env["HARNESS_APT"], "openssh-server curl procps");
+    assert_eq!(env["HARNESS_APT"], "openssh-server curl procps patch");
     assert!(!env.contains_key("HF_TOKEN"));
     let w = World::default();
     let spec = IssueSpec::parse(

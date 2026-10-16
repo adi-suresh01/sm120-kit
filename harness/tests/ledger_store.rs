@@ -50,6 +50,24 @@ fn a_failed_change_writes_nothing() {
 }
 
 #[test]
+fn a_failed_write_names_the_file() {
+    use std::os::unix::fs::PermissionsExt;
+    let repo = repo_with_issue("vllm-47990", &[]);
+    let store = LedgerStore::new(repo.path(), "vllm-47990");
+    set_budget(&store, 15.0);
+    let dir = repo.path().join("issues/vllm-47990");
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
+    let result = store.update(|l| {
+        l.budget = Some(budget(20.0));
+        Ok(())
+    });
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+    let err = format!("{:#}", result.unwrap_err());
+    assert!(err.contains("issues/vllm-47990/harness-ledger.json.tmp"), "{err}");
+    assert_eq!(store.load().unwrap().budget, Some(budget(15.0)));
+}
+
+#[test]
 fn an_unchanged_ledger_is_never_written() {
     let repo = repo_with_issue("vllm-47990", &[]);
     let store = LedgerStore::new(repo.path(), "vllm-47990");

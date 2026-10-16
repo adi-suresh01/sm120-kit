@@ -22,8 +22,9 @@ use crate::session::{JobState, Remote, TRANSFER_LIMIT, Target, poll_job, start_j
 use crate::spec::IssueSpec;
 
 pub const ENTRYPOINT: &str = include_str!("../pod/entrypoint.sh");
-/// sshd, the watchdog's curl, and procps (pkill, free) for the pod scripts, whatever the issue lists.
-const REQUIRED_APT: [&str; 3] = ["openssh-server", "curl", "procps"];
+/// sshd, the watchdog's curl, procps (pkill, free) for the pod scripts, and patch for patch_pkg.sh, whatever
+/// the issue lists: slim images ship none of them.
+const REQUIRED_APT: [&str; 4] = ["openssh-server", "curl", "procps", "patch"];
 
 #[derive(Debug)]
 pub struct Interrupted;
