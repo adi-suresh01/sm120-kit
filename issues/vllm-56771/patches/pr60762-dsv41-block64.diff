@@ -1,0 +1,34 @@
+diff --git a/vllm/models/deepseek_v41/nvidia/flashinfer_sparse.py b/vllm/models/deepseek_v41/nvidia/flashinfer_sparse.py
+index a5ab09283959..8beab59618e4 100644
+--- a/vllm/models/deepseek_v41/nvidia/flashinfer_sparse.py
++++ b/vllm/models/deepseek_v41/nvidia/flashinfer_sparse.py
+@@ -25,6 +25,7 @@
+     DeepseekV4SparseMLAMetadataBuilder,
+     DeepseekV41SparseSWAMetadataBuilder,
+ )
++from vllm.platforms import current_platform
+ from vllm.platforms.interface import DeviceCapability
+ from vllm.utils.flashinfer import flashinfer_trtllm_batch_decode_sparse_mla_dsv4
+ from vllm.v1.attention.backend import (
+@@ -115,6 +116,8 @@ class DeepseekV4FlashInferMLASparseBackend(DeepseekV4SparseMLABackend):
+ 
+     @staticmethod
+     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
++        if current_platform.is_device_capability_family(120):
++            return [64]
+         return [128]
+ 
+     @staticmethod
+diff --git a/vllm/v1/attention/backends/mla/indexer.py b/vllm/v1/attention/backends/mla/indexer.py
+index 468040257e46..6546ddcc5043 100644
+--- a/vllm/v1/attention/backends/mla/indexer.py
++++ b/vllm/v1/attention/backends/mla/indexer.py
+@@ -361,6 +361,8 @@ def get_name() -> str:
+ 
+     @staticmethod
+     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
++        if current_platform.is_device_capability_family(120):
++            return [64]
+         return [64 if current_platform.is_device_capability_family(90) else 128]
+ 
+ 

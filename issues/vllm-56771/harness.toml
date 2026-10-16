@@ -1,0 +1,99 @@
+issue = "vllm-56771"
+# Setup about 25 min (image, 510 GB of weights, prompts), then g0 + a1 + a0 about 60 min, then two follow-up
+# variants about 30 min (README.md, "Hours and cost"). 3.5 h leaves one slow cold boot of slack.
+planned_hours = 3.5
+
+[pod]
+# Nightly 2026-10-16: FlashInfer 0.7.2 (FI #5197, the SM120 sparse-MLA rewrite) plus #60945 and #57152.
+image = "vllm/vllm-openai:nightly-49cb2bbf71cfd36ee5aa33d1e184b1cddff55294@sha256:a8d84c552462d1c60da4d7fc97f8f8f48a8fbfbf6820f73477fa0efe2571bf9d"
+count = 4
+min_cuda = "13.0"
+container_disk_gb = 60
+# 510 GB of weights plus the prompt corpus and logs.
+volume_gb = 600
+needs_hf_token = false
+# The reporter's box: 4x Server Edition, TP4, PCIe only. Workstation Edition had no 4x stock on 2026-10-16.
+gpus = [
+  { id = "NVIDIA RTX PRO 6000 Blackwell Server Edition", cloud = "SECURE" },
+]
+
+[server]
+package = "vllm"
+model = "deepseek-ai/DeepSeek-V4.1-Flash"
+launch = ["vllm", "serve", "deepseek-ai/DeepSeek-V4.1-Flash"]
+# The reporter's 09-16 command, minus the local path and served name.
+base_flags = [
+  "--revision", "314113f8a7dadb388215396ba5fbee2c610a04d6",
+  "--tensor-parallel-size", "4",
+  "--engram-config.cpu_offload", "true",
+  "--max-model-len", "262144",
+  "--gpu-memory-utilization", "0.95",
+  "--max-num-seqs", "64",
+  "--max-num-batched-tokens", "4096",
+  "--kernel-config", '{"enable_flashinfer_autotune": false, "enable_cutedsl_warmup": false, "enable_jit_warmup": false}',
+  "--enable-auto-tool-choice",
+  "--tool-call-parser", "deepseek_v41",
+  "--reasoning-parser", "deepseek_v41",
+]
+port = 8000
+fail_pattern = "illegal memory access|cudaErrorIllegalAddress|CUDA error: "
+# Reading 510 GB, pinning about 189 GiB of Engram tables, compiling, and capturing graphs with DSpark.
+boot_timeout_s = 2400
+
+# Stock nightly, no #60762 and no block-size flags: does vLLM boot DSV4.1 on sm_120 at all yet (#59203).
+[variants.g0-boot-stock]
+env = { VLLM_DEEP_GEMM_WARMUP = "skip", NCCL_P2P_LEVEL = "PXB", NCCL_MIN_NCHANNELS = "32", LONG_PROMPTS = "12k" }
+
+# The repro: the reporter's DSpark config with CUDA graphs on, booted with #59203's working geometry.
+[variants.a1-dspark-graphs]
+patches = ["pr60762-dsv41-block64"]
+flags = [
+  "--block-size", "64", "--kv-cache-dtype", "fp8", "--attention-config", '{"indexer_kv_dtype":"fp8"}',
+  "--speculative-config", '{"method":"dspark","num_speculative_tokens":5,"draft_sample_method":"probabilistic","rejection_sample_method":"block"}',
+]
+env = { VLLM_DEEP_GEMM_WARMUP = "skip", NCCL_P2P_LEVEL = "PXB", NCCL_MIN_NCHANNELS = "32", LONG_PROMPTS = "12k,120k" }
+
+# Control without speculation; the 35K prompt is vllm#58910's case (TP4, graphs, no spec) on FlashInfer 0.7.2.
+[variants.a0-nospec-graphs]
+patches = ["pr60762-dsv41-block64"]
+flags = ["--block-size", "64", "--kv-cache-dtype", "fp8", "--attention-config", '{"indexer_kv_dtype":"fp8"}']
+env = { VLLM_DEEP_GEMM_WARMUP = "skip", NCCL_P2P_LEVEL = "PXB", NCCL_MIN_NCHANNELS = "32", LONG_PROMPTS = "12k,35k,120k" }
+
+# Only if a1 crashes: the reporter's 09-17 A/B (graphs off, torch.compile on) on the new stack.
+[variants.a2-dspark-nograph]
+patches = ["pr60762-dsv41-block64"]
+flags = [
+  "--block-size", "64", "--kv-cache-dtype", "fp8", "--attention-config", '{"indexer_kv_dtype":"fp8"}',
+  "--speculative-config", '{"method":"dspark","num_speculative_tokens":5,"draft_sample_method":"probabilistic","rejection_sample_method":"block"}',
+  "--compilation-config", '{"cudagraph_mode":"NONE"}',
+]
+env = { VLLM_DEEP_GEMM_WARMUP = "skip", NCCL_P2P_LEVEL = "PXB", NCCL_MIN_NCHANNELS = "32", LONG_PROMPTS = "12k" }
+
+# Only if a1 crashes: without image tokens the SWA prefill width is the plain window (he-yufeng's fork on 09-14).
+[variants.a3-dspark-graphs-lmo]
+patches = ["pr60762-dsv41-block64"]
+flags = [
+  "--block-size", "64", "--kv-cache-dtype", "fp8", "--attention-config", '{"indexer_kv_dtype":"fp8"}',
+  "--speculative-config", '{"method":"dspark","num_speculative_tokens":5,"draft_sample_method":"probabilistic","rejection_sample_method":"block"}',
+  "--language-model-only",
+]
+env = { VLLM_DEEP_GEMM_WARMUP = "skip", NCCL_P2P_LEVEL = "PXB", NCCL_MIN_NCHANNELS = "32", LONG_PROMPTS = "12k" }
+
+# Only if a1 crashes: synchronous launches and a GPU core dump name the faulting kernel and block on this stack.
+[variants.a4-dspark-graphs-dump]
+patches = ["pr60762-dsv41-block64"]
+flags = [
+  "--block-size", "64", "--kv-cache-dtype", "fp8", "--attention-config", '{"indexer_kv_dtype":"fp8"}',
+  "--speculative-config", '{"method":"dspark","num_speculative_tokens":5,"draft_sample_method":"probabilistic","rejection_sample_method":"block"}',
+]
+env = { VLLM_DEEP_GEMM_WARMUP = "skip", NCCL_P2P_LEVEL = "PXB", NCCL_MIN_NCHANNELS = "32", LONG_PROMPTS = "12k", CUDA_LAUNCH_BLOCKING = "1", CUDA_ENABLE_COREDUMP_ON_EXCEPTION = "1", CUDA_COREDUMP_FILE = "/workspace/cores/core_%h_%p" }
+
+# Only if a1 serves: #60945's path (adaptive verification), in case LibertAI turns it on.
+[variants.a5-dspark-adaptive]
+patches = ["pr60762-dsv41-block64"]
+flags = [
+  "--block-size", "64", "--kv-cache-dtype", "fp8", "--attention-config", '{"indexer_kv_dtype":"fp8"}',
+  "--speculative-config", '{"method":"dspark","num_speculative_tokens":5,"draft_sample_method":"probabilistic","rejection_sample_method":"block","enable_adaptive_verification":true}',
+]
+env = { VLLM_DEEP_GEMM_WARMUP = "skip", NCCL_P2P_LEVEL = "PXB", NCCL_MIN_NCHANNELS = "32", LONG_PROMPTS = "12k" }
+smoke_concurrency = 16
