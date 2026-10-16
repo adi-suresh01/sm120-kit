@@ -61,17 +61,61 @@ pub fn ssh_banner(host: &str, port: u16, timeout: Duration) -> bool {
     stream.set_read_timeout(Some(timeout)).is_ok() && stream.read_exact(&mut banner).is_ok() && &banner == b"SSH-"
 }
 
-pub struct SshRemote;
+/// The real remote, over the system OpenSSH.
+pub struct SshRemote {
+    identity: Option<PathBuf>,
+}
 
-fn ssh_command(target: &Target) -> Result<Command> {
+impl SshRemote {
+    pub fn new(identity: Option<PathBuf>) -> Self {
+        Self { identity }
+    }
+
+    /// HARNESS_SSH_KEY names the key registered with RunPod, so ssh offers only that one: an agent holding many
+    /// keys can use up the pod's MaxAuthTries before it reaches the right one.
+    pub fn from_env() -> Self {
+        Self::new(
+            std::env::var_os("HARNESS_SSH_KEY")
+                .filter(|key| !key.is_empty())
+                .map(PathBuf::from),
+        )
+    }
+
+    fn ssh(&self, target: &Target) -> Result<Command> {
+        ssh_command(target, self.identity.as_deref())
+    }
+
+    fn run_script(&self, target: &Target, script: &str, output: Output, limit: Duration) -> Result<Vec<u8>> {
+        let mut ssh = self.ssh(target)?;
+        ssh.arg("bash -s");
+        let what = format!("remote script on {}:{}", target.host, target.port);
+        run_bounded(ssh, remote_script(script).as_bytes(), output, limit, &what)
+    }
+}
+
+fn ssh_command(target: &Target, identity: Option<&Path>) -> Result<Command> {
     if let Some(dir) = target.known_hosts.parent() {
         fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
     let mut command = Command::new("ssh");
+    // The pod runs a third-party image as root; a forwarded agent would let it log in anywhere as Aditya.
     command
-        .args(["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new"])
+        .args([
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "StrictHostKeyChecking=accept-new",
+            "-o",
+            "ForwardAgent=no",
+        ])
         .arg("-o")
-        .arg(format!("UserKnownHostsFile=\"{}\"", target.known_hosts.display()))
+        .arg(format!("UserKnownHostsFile=\"{}\"", target.known_hosts.display()));
+    if let Some(identity) = identity {
+        command
+            .args(["-o", "IdentitiesOnly=yes", "-o"])
+            .arg(format!("IdentityFile=\"{}\"", identity.display()));
+    }
+    command
         .args([
             "-o",
             "ConnectTimeout=15",
@@ -84,6 +128,14 @@ fn ssh_command(target: &Target) -> Result<Command> {
         .arg(target.port.to_string())
         .arg(format!("root@{}", target.host));
     Ok(command)
+}
+
+fn quietly_succeeds(command: &mut Command) -> bool {
+    command
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 /// Waits for every process of a pipeline and kills all of them once `limit` passes.
@@ -155,13 +207,6 @@ fn run_bounded(mut command: Command, input: &[u8], output: Output, limit: Durati
     Ok(captured)
 }
 
-fn run_script(target: &Target, script: &str, output: Output, limit: Duration) -> Result<Vec<u8>> {
-    let mut ssh = ssh_command(target)?;
-    ssh.arg("bash -s");
-    let what = format!("remote script on {}:{}", target.host, target.port);
-    run_bounded(ssh, remote_script(script).as_bytes(), output, limit, &what)
-}
-
 /// The remote side of a download, as POSIX sh because the pod's login shell runs it. GNU tar exits 1 when a file
 /// changed while it was read (a server log still being written), and the archive is still whole.
 fn download_command(paths: &[&str]) -> String {
@@ -174,16 +219,24 @@ fn download_command(paths: &[&str]) -> String {
 }
 
 impl Remote for SshRemote {
+    /// ssh runs with BatchMode and cannot ask for a passphrase, so it needs a key file without one or a key in
+    /// ssh-agent.
     fn preflight(&self) -> Result<()> {
-        let status = Command::new("ssh-add")
-            .arg("-l")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .context("running ssh-add")?;
+        if let Some(identity) = &self.identity {
+            ensure!(
+                identity.is_file(),
+                "HARNESS_SSH_KEY names {}, which is not a file",
+                identity.display()
+            );
+            let unencrypted = quietly_succeeds(Command::new("ssh-keygen").args(["-y", "-P", "", "-f"]).arg(identity));
+            if unencrypted {
+                return Ok(());
+            }
+        }
         ensure!(
-            status.success(),
-            "ssh-agent holds no key (ssh-add -l failed); run ssh-add first: ssh runs with BatchMode and cannot ask for a passphrase"
+            quietly_succeeds(Command::new("ssh-add").arg("-l")),
+            "ssh-agent holds no key (ssh-add -l failed); run ssh-add first: ssh runs with BatchMode and cannot ask \
+             for a passphrase"
         );
         Ok(())
     }
@@ -193,20 +246,21 @@ impl Remote for SshRemote {
     }
 
     fn run(&self, target: &Target, script: &str) -> Result<String> {
-        let stdout = run_script(target, script, Output::Capture, COMMAND_LIMIT)?;
+        let stdout = self.run_script(target, script, Output::Capture, COMMAND_LIMIT)?;
         Ok(String::from_utf8_lossy(&stdout).into_owned())
     }
 
     /// `harness ssh` is for a person at the terminal, who can Ctrl-C; the transfer limit still stops one left
     /// running in a background shell.
     fn run_streaming(&self, target: &Target, script: &str) -> Result<()> {
-        run_script(target, script, Output::Inherit, TRANSFER_LIMIT).map(drop)
+        self.run_script(target, script, Output::Inherit, TRANSFER_LIMIT)
+            .map(drop)
     }
 
     fn write_file(&self, target: &Target, path: &str, content: &str) -> Result<()> {
         let full = format!("{KIT_DIR}/{path}");
         let dir = full.rsplit_once('/').map_or(KIT_DIR, |(dir, _)| dir);
-        let mut ssh = ssh_command(target)?;
+        let mut ssh = self.ssh(target)?;
         ssh.arg(format!("mkdir -p {} && cat > {}", shell_quote(dir), shell_quote(&full)));
         let what = format!("writing {full} on the pod");
         run_bounded(ssh, content.as_bytes(), Output::Discard, COMMAND_LIMIT, &what).map(drop)
@@ -227,7 +281,8 @@ impl Remote for SshRemote {
             .spawn()
             .context("starting tar")?;
         let archive = tar.stdout.take().context("tar stdout")?;
-        let mut ssh = ssh_command(target)?
+        let mut ssh = self
+            .ssh(target)?
             .arg(format!("mkdir -p {KIT_DIR} && tar --no-same-owner -xzf - -C {KIT_DIR}"))
             .stdin(Stdio::from(archive))
             .spawn()
@@ -244,7 +299,8 @@ impl Remote for SshRemote {
     }
 
     fn download(&self, target: &Target, paths: &[&str], local_root: &Path, limit: Duration) -> Result<()> {
-        let mut ssh = ssh_command(target)?
+        let mut ssh = self
+            .ssh(target)?
             .arg(download_command(paths))
             .stdout(Stdio::piped())
             .spawn()
@@ -364,15 +420,35 @@ mod tests {
             port: 40122,
             known_hosts: dir.join("known_hosts-sm120-x-abc123"),
         };
-        let command = ssh_command(&target).unwrap();
-        let args: Vec<String> = command.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
-        let joined = args.join(" ");
+        let args = |identity: Option<&Path>| {
+            let command = ssh_command(&target, identity).unwrap();
+            let args: Vec<String> = command.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+            args.join(" ")
+        };
+        let joined = args(None);
         assert!(joined.contains("BatchMode=yes"), "{joined}");
         assert!(joined.contains("StrictHostKeyChecking=accept-new"), "{joined}");
+        assert!(joined.contains("-o ForwardAgent=no"), "{joined}");
+        assert!(!joined.contains("IdentitiesOnly"), "{joined}");
         assert!(joined.contains(&format!("UserKnownHostsFile=\"{}\"", target.known_hosts.display())));
         assert!(joined.ends_with("-p 40122 root@203.0.113.7"), "{joined}");
+        let keyed = args(Some(Path::new("/Users/me/.ssh/runpod key")));
+        assert!(
+            keyed.contains("-o IdentitiesOnly=yes -o IdentityFile=\"/Users/me/.ssh/runpod key\""),
+            "{keyed}"
+        );
         assert!(dir.is_dir());
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_named_key_that_is_missing_fails_before_any_money_moves() {
+        let remote = SshRemote::new(Some(PathBuf::from("/nonexistent/sm120-harness-key")));
+        let err = remote.preflight().unwrap_err().to_string();
+        assert!(
+            err.contains("HARNESS_SSH_KEY names /nonexistent/sm120-harness-key"),
+            "{err}"
+        );
     }
 
     fn serve_once(reply: &'static [u8]) -> u16 {

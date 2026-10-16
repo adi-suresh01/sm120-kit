@@ -12,7 +12,7 @@ use sm120_harness::cloud::{API_BASE, Cloud, RunpodRest};
 use sm120_harness::events::{Events, Kind};
 use sm120_harness::ledger::{LedgerStore, check_accounts};
 use sm120_harness::pod::{self, AfterFailure, Ctx};
-use sm120_harness::session::{Remote, SshRemote, TRANSFER_LIMIT};
+use sm120_harness::session::{SshRemote, TRANSFER_LIMIT};
 use sm120_harness::spec::{IssueSpec, is_slug};
 use sm120_harness::{budget, exec, reap};
 
@@ -173,10 +173,11 @@ fn dispatch(
 ) -> Result<()> {
     let account = cloud.account().context("reading the key's RunPod organization")?;
     check_accounts(repo, account.as_deref())?;
+    let remote = SshRemote::from_env();
     let ctx = Ctx {
         repo,
         cloud,
-        remote: &SshRemote,
+        remote: &remote,
         clock,
         events,
         interrupted,
@@ -212,9 +213,9 @@ fn dispatch(
         Command::Down { issue } => pod::down(&ctx, &issue),
         Command::Run { issue, variants } => exec::run(&ctx, &load(repo, &issue)?, &variants),
         Command::Reap => Ok(()),
-        Command::Ssh { issue, command } => {
-            SshRemote.run_streaming(&pod::live_pod(&ctx, &issue)?.target, &command.join(" "))
-        }
+        Command::Ssh { issue, command } => ctx
+            .remote
+            .run_streaming(&pod::live_pod(&ctx, &issue)?.target, &command.join(" ")),
     }
 }
 
