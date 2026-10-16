@@ -2,8 +2,9 @@
 # Prints the verdict line for a finished variant run: serve_and_smoke's RESULT line plus what the run's logs say.
 # Usage: verdict.sh <run_dir> <variant> <result_line>
 # Output: exactly one JSON object with variant, verdict, boot_s, fault, where, gsm8k, gsm8k_counts, accept, tok_s,
-# result, and verdict_error (null, or what could not be parsed). A run is only counted once a verdict line exists,
-# so a log or result file of an unexpected shape must still produce one.
+# mem_guard (null, or the reading mem_guard.py fired at), result, and verdict_error (null, or what could not be
+# parsed). A run is only counted once a verdict line exists, so a log or result file of an unexpected shape must still
+# produce one.
 set -euo pipefail
 
 usage="usage: $0 <run_dir> <variant> <result_line>"
@@ -40,7 +41,7 @@ score=$(grep -a -m1 -oE '^Score: [0-9.]+' "$run_dir/gsm8k.txt" 2>/dev/null | awk
 counts=$(grep -a -m1 -E '^gsm8k: answered=' "$run_dir/gsm8k.txt" 2>/dev/null || true)
 
 if line=$(python3 -I - "$variant" "$result" "${fault:0:200}" "$where" "$score" "$accept" "$counts" \
-    "$run_dir/bench.jsonl" <<'EOF'
+    "$run_dir/bench.jsonl" "$run_dir/memory_guard.txt" <<'EOF'
 import json
 import os
 import re
@@ -53,7 +54,7 @@ def text(value):
     return value.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
 
 
-variant, result, fault, where, score, accept, counts, bench = (text(arg) for arg in sys.argv[1:])
+variant, result, fault, where, score, accept, counts, bench, guard_report = (text(arg) for arg in sys.argv[1:])
 errors = []
 
 
@@ -90,6 +91,18 @@ def speeds(path):
         return None
 
 
+def guard(path):
+    # The report opens with the reading the guard fired at. One it could not finish still means it fired.
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            return f.readline().strip() or "fired"
+    except Exception as e:
+        errors.append(f"memory_guard.txt: {type(e).__name__}: {e}")
+        return "fired"
+
+
 words = result.split()
 verdict = words[0].removeprefix("RESULT=") if words and words[0].startswith("RESULT=") else "TIMEOUT"
 fields = dict(word.split("=", 1) for word in words[1:] if "=" in word)
@@ -104,6 +117,7 @@ print(json.dumps({
     "gsm8k_counts": tally(counts),
     "accept": number("accept length", accept),
     "tok_s": speeds(bench),
+    "mem_guard": guard(guard_report),
     "result": result,
     "verdict_error": "; ".join(errors) or None,
 }))

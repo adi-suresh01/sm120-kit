@@ -53,6 +53,11 @@ fn nvidia_smi_calls_are_bounded() {
 }
 
 #[test]
+fn memory_guard_on_fake_cgroups() {
+    run_bash_test("mem_guard_test.sh");
+}
+
+#[test]
 fn serve_variant_against_a_fake_server() {
     run_bash_test("serve_variant_test.sh");
 }
