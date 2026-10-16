@@ -676,10 +676,15 @@ pub fn wait_job(
     }
 }
 
+/// Pulls all of results/<issue>.
 pub fn pull(ctx: &Ctx, issue: &str, target: &Target, limit: Duration) -> Result<()> {
-    let path = format!("results/{issue}");
-    ctx.remote.download(target, &[&path], ctx.repo, limit)?;
-    ctx.events.emit(Some(issue), Kind::Pull, json!({ "path": path }));
+    pull_paths(ctx, issue, target, &[format!("results/{issue}")], limit)
+}
+
+pub fn pull_paths(ctx: &Ctx, issue: &str, target: &Target, paths: &[String], limit: Duration) -> Result<()> {
+    let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+    ctx.remote.download(target, &refs, ctx.repo, limit)?;
+    ctx.events.emit(Some(issue), Kind::Pull, json!({ "paths": paths }));
     Ok(())
 }
 

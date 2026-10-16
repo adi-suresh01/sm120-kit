@@ -20,6 +20,9 @@ pub struct FakeRemote {
     pub exits: RefCell<VecDeque<i32>>,
     exit: Cell<i32>,
     polls_before_exit: Cell<u32>,
+    polls: Cell<u32>,
+    /// progress.jsonl lines a variant job writes before its verdict.
+    pub phases: RefCell<Vec<String>>,
     pub verdict: RefCell<String>,
     pub uploads: RefCell<Vec<Vec<String>>>,
     pub files: RefCell<Vec<(String, String)>>,
@@ -27,7 +30,11 @@ pub struct FakeRemote {
     pub download_fails: Cell<bool>,
     /// The next job is killed without writing an exit code.
     pub job_dies: Cell<bool>,
+    /// Variant jobs never exit, like a server that hangs past every timeout.
+    pub variant_hangs: Cell<bool>,
     pub interrupt_on_job: RefCell<Option<Rc<AtomicBool>>>,
+    /// Sets the flag once this many polls have been answered, as a Ctrl-C mid-job would.
+    pub interrupt_after_polls: RefCell<Option<(u32, Rc<AtomicBool>)>>,
     pub panic_on_write: Cell<bool>,
 }
 
@@ -42,13 +49,19 @@ impl Default for FakeRemote {
             exits: RefCell::new(VecDeque::new()),
             exit: Cell::new(0),
             polls_before_exit: Cell::new(1),
+            polls: Cell::new(0),
+            phases: RefCell::new(vec![
+                r#"{"phase":"launch","t":1760000000,"detail":"vllm serve"}"#.into(),
+            ]),
             verdict: RefCell::new(r#"{"variant":"baseline","verdict":"OK","boot_s":180}"#.into()),
             uploads: RefCell::new(Vec::new()),
             files: RefCell::new(Vec::new()),
             downloads: RefCell::new(Vec::new()),
             download_fails: Cell::new(false),
             job_dies: Cell::new(false),
+            variant_hangs: Cell::new(false),
             interrupt_on_job: RefCell::new(None),
+            interrupt_after_polls: RefCell::new(None),
             panic_on_write: Cell::new(false),
         }
     }
@@ -56,11 +69,21 @@ impl Default for FakeRemote {
 
 impl FakeRemote {
     fn poll(&self, script: &str) -> String {
+        let polls = self.polls.get() + 1;
+        self.polls.set(polls);
+        // A wait loop that lost its deadline check would spin here; fail instead of hanging the test run.
+        assert!(polls < 10_000, "polled {polls} times without the harness giving up");
+        if let Some((after, flag)) = self.interrupt_after_polls.borrow().as_ref()
+            && polls >= *after
+        {
+            flag.store(true, Ordering::SeqCst);
+        }
         // What a login shell might print before the poll script runs.
         let mut reply = format!("Welcome to Ubuntu\n{POLL_SENTINEL}\n");
+        let variant = script.contains("progress.jsonl");
         let left = self.polls_before_exit.get();
-        if left > 0 {
-            self.polls_before_exit.set(left - 1);
+        if left > 0 || (variant && self.variant_hangs.get()) {
+            self.polls_before_exit.set(left.saturating_sub(1));
             reply.push_str("RUNNING\n");
             return reply;
         }
@@ -69,7 +92,11 @@ impl FakeRemote {
             return reply;
         }
         reply.push_str(&format!("EXIT {}\n", self.exit.get()));
-        if script.contains("verdict.json") && self.exit.get() == 0 {
+        if variant && self.exit.get() == 0 {
+            for line in self.phases.borrow().iter() {
+                reply.push_str(line);
+                reply.push('\n');
+            }
             reply.push_str(&self.verdict.borrow());
             reply.push('\n');
         }

@@ -7,6 +7,7 @@ use std::rc::Rc;
 use std::sync::atomic::AtomicBool;
 
 use jiff::SignedDuration;
+use sm120_harness::clock::Clock;
 use sm120_harness::cloud::{Cloud, PodStatus};
 use sm120_harness::events::Events;
 use sm120_harness::ledger::{Budget, CostSource, Ledger, LedgerStore, PodState, check_accounts};
@@ -881,7 +882,50 @@ fn run_goes_up_runs_every_variant_and_comes_down() {
     ));
     let events = w.events();
     assert!(events.contains("\"kind\":\"variant_start\",\"variant\":\"baseline\""));
+    assert!(events.contains(
+        "\"kind\":\"phase\",\"variant\":\"baseline\",\"phase\":\"launch\",\"detail\":\"vllm serve\",\"t\":1760000000"
+    ));
     assert!(events.contains("\"kind\":\"verdict\",\"variant\":\"baseline\",\"verdict\":\"OK\""));
+    let polls = w.remote.scripts.borrow();
+    assert!(
+        polls
+            .iter()
+            .any(|s| s.contains("tail -c +1 results/vllm-47990/baseline/progress.jsonl"))
+    );
+}
+
+#[test]
+fn a_variant_pulls_only_its_own_results_into_a_cleared_folder() {
+    let w = World::default();
+    let stale = w.repo.path().join("results/vllm-47990/baseline/server.log");
+    fs::create_dir_all(stale.parent().unwrap()).unwrap();
+    fs::write(&stale, "from an earlier attempt").unwrap();
+    run(&w, &[]).unwrap();
+    assert!(!stale.exists());
+    let downloads = w.remote.downloads.borrow();
+    let variant = downloads.iter().find(|(paths, _)| paths.len() == 3).unwrap();
+    assert_eq!(
+        variant.0,
+        [
+            "results/vllm-47990/baseline",
+            "results/vllm-47990/jobs",
+            "results/vllm-47990/verdicts.jsonl"
+        ]
+    );
+}
+
+#[test]
+fn a_progress_line_that_is_not_a_phase_or_verdict_only_warns() {
+    let w = World::default();
+    w.remote
+        .phases
+        .borrow_mut()
+        .extend(["not json".to_string(), "{\"other\":1}".to_string()]);
+    run(&w, &[]).unwrap();
+    let events = w.events();
+    assert_eq!(events.matches("unreadable progress line").count(), 2, "{events}");
+    assert!(events.contains("\"kind\":\"verdict\""));
+    assert_down(&w);
 }
 
 #[test]
@@ -907,6 +951,27 @@ fn run_comes_down_on_ctrl_c() {
     let w = World::default();
     *w.remote.interrupt_on_job.borrow_mut() = Some(Rc::clone(&w.interrupted));
     assert_eq!(err_text(run(&w, &[])), "interrupted");
+    assert_down(&w);
+}
+
+#[test]
+fn run_comes_down_on_ctrl_c_mid_variant_with_a_job_that_never_exits() {
+    let w = World::default();
+    w.remote.variant_hangs.set(true);
+    *w.remote.interrupt_after_polls.borrow_mut() = Some((20, Rc::clone(&w.interrupted)));
+    assert_eq!(err_text(run(&w, &[])), "interrupted");
+    assert!(w.events().contains("\"kind\":\"variant_start\""));
+    assert_down(&w);
+}
+
+#[test]
+fn a_deadline_that_comes_during_a_job_ends_the_wait() {
+    let w = World::default();
+    w.remote.variant_hangs.set(true);
+    let err = err_text(run(&w, &[]));
+    assert!(err.contains("reached its deadline while variant-baseline ran"), "{err}");
+    // The wait ends at the deadline, not much later.
+    assert!(w.clock.now() <= "2026-10-16T18:01:00Z".parse().unwrap());
     assert_down(&w);
 }
 

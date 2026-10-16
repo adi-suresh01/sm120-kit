@@ -1,6 +1,8 @@
 use std::fmt::Write as _;
+use std::fs;
+use std::io::ErrorKind;
 
-use anyhow::{Result, bail, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
 
 use crate::events::Kind;
@@ -121,7 +123,7 @@ fn run_variant(ctx: &Ctx, spec: &IssueSpec, live: &LivePod, planned: &Planned) -
     let variant = planned.variant;
     let name = variant.name.as_str();
     let file = format!("results/{issue}/variants/{name}.sh");
-    // The first poll can come before serve_variant.sh clears the last attempt, so its verdict goes first.
+    // The first poll can come before serve_variant.sh clears the last attempt, so its progress goes first.
     ctx.remote
         .run(&live.target, &format!("rm -rf results/{issue}/{name}"))?;
     ctx.remote.write_file(&live.target, &file, &planned.rendered)?;
@@ -134,20 +136,13 @@ fn run_variant(ctx: &Ctx, spec: &IssueSpec, live: &LivePod, planned: &Planned) -
     let command = format!("bash harness/pod/serve_variant.sh issues/{issue} {file} results/{issue}");
     start_job(ctx.remote, &live.target, issue, &job, &command)?;
     let mut verdicts = 0;
-    let verdict_file = format!("results/{issue}/{name}/verdict.json");
-    let code = pod::wait_job(
-        ctx,
-        issue,
-        &live.entry,
-        &live.target,
-        &job,
-        &verdict_file,
-        &mut |line| {
+    let progress = format!("results/{issue}/{name}/progress.jsonl");
+    let code = pod::wait_job(ctx, issue, &live.entry, &live.target, &job, &progress, &mut |line| {
+        if progress_line(ctx, issue, name, line) {
             verdicts += 1;
-            emit_verdict(ctx, issue, line);
-        },
-    )?;
-    if let Err(e) = pod::pull(ctx, issue, &live.target, TRANSFER_LIMIT) {
+        }
+    })?;
+    if let Err(e) = pull_variant(ctx, issue, live, name) {
         ctx.warn(issue, format!("pull failed: {e:#}"));
     }
     // A server crash is a verdict (BOOT_FAIL); a variant that never reached one is a harness error.
@@ -158,15 +153,51 @@ fn run_variant(ctx: &Ctx, spec: &IssueSpec, live: &LivePod, planned: &Planned) -
     Ok(())
 }
 
-fn emit_verdict(ctx: &Ctx, issue: &str, line: &str) {
+/// One line of serve_variant.sh's progress.jsonl: a phase as it starts, then the verdict as the last line.
+/// Returns whether the line was the verdict. A line that is neither is reported, never fatal, since the run it
+/// describes still goes on.
+fn progress_line(ctx: &Ctx, issue: &str, variant: &str, line: &str) -> bool {
     match serde_json::from_str::<Value>(line) {
-        Ok(Value::Object(fields)) => ctx.events.emit(Some(issue), Kind::Verdict, Value::Object(fields)),
-        _ => ctx.events.emit(
-            Some(issue),
-            Kind::Warn,
-            json!({"detail": "unreadable verdict line", "line": line}),
-        ),
+        Ok(Value::Object(fields)) if fields.contains_key("verdict") => {
+            ctx.events.emit(Some(issue), Kind::Verdict, Value::Object(fields));
+            true
+        }
+        Ok(Value::Object(fields)) if fields.contains_key("phase") => {
+            ctx.events.emit(
+                Some(issue),
+                Kind::Phase,
+                json!({"variant": variant, "phase": fields["phase"], "detail": fields.get("detail"), "t": fields.get("t")}),
+            );
+            false
+        }
+        _ => {
+            ctx.events.emit(
+                Some(issue),
+                Kind::Warn,
+                json!({"detail": "unreadable progress line", "variant": variant, "line": line}),
+            );
+            false
+        }
     }
+}
+
+/// Only this variant's results, the job logs, and the verdict table come back, so a long session does not pull
+/// every earlier variant again. The local copy of the variant is cleared first, so files from an earlier attempt
+/// cannot mix with this one.
+fn pull_variant(ctx: &Ctx, issue: &str, live: &LivePod, variant: &str) -> Result<()> {
+    let local = ctx.repo.join("results").join(issue).join(variant);
+    match fs::remove_dir_all(&local) {
+        Err(e) if e.kind() != ErrorKind::NotFound => {
+            return Err(e).with_context(|| format!("clearing {}", local.display()));
+        }
+        _ => {}
+    }
+    let paths = [
+        format!("results/{issue}/{variant}"),
+        format!("results/{issue}/jobs"),
+        format!("results/{issue}/verdicts.jsonl"),
+    ];
+    pod::pull_paths(ctx, issue, &live.target, &paths, TRANSFER_LIMIT)
 }
 
 /// `up`, `exec`, `down`. `down` runs on every way out: errors and Ctrl-C come back here as `Err`, and a panic

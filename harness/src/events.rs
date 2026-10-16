@@ -17,6 +17,8 @@ pub enum Kind {
     Ready,
     Setup,
     VariantStart,
+    /// A step of a running variant, from its progress.jsonl.
+    Phase,
     Verdict,
     Pull,
     Terminate,
