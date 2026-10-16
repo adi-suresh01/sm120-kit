@@ -64,13 +64,13 @@ vllm_quality() {
     for pair in "$@"; do
         c=${pair%%:*}
         prompts=${pair##*:}
-        vllm bench serve --backend openai --host 127.0.0.1 --port "$port" --model "$model" --dataset-name random \
-            --random-input-len 1024 --random-output-len 512 --random-range-ratio 0 --ignore-eos \
-            --max-concurrency "$c" --num-prompts "$prompts" --seed 1 \
-            --save-result --result-dir "$out" --result-filename "bench_c$c.json" >"$out/bench_c$c.txt" 2>&1
-        # vllm bench serve also exits 0 over whatever finished. The record joins bench.jsonl before the check, as
-        # bench_serving's does, so a short run still reports its speed.
-        python3 -I - "$out/bench_c$c.json" "$out/bench.jsonl" "$prompts" "$c" <<'EOF'
+        # vllm bench serve also exits 0 over whatever finished, hence the check after it. The record joins bench.jsonl
+        # before the check, as bench_serving's does, so a short run still reports its speed.
+        if ! vllm bench serve --backend openai --host 127.0.0.1 --port "$port" --model "$model" \
+            --dataset-name random --random-input-len 1024 --random-output-len 512 --random-range-ratio 0 \
+            --ignore-eos --max-concurrency "$c" --num-prompts "$prompts" --seed 1 --save-result \
+            --result-dir "$out" --result-filename "bench_c$c.json" >"$out/bench_c$c.txt" 2>&1 \
+            || ! python3 -I - "$out/bench_c$c.json" "$out/bench.jsonl" "$prompts" "$c" <<'EOF'
 import json
 import sys
 
@@ -82,6 +82,11 @@ with open(jsonl, "a") as f:
 if run["completed"] != want:
     sys.exit(f"bench c={c}: {run['completed']}/{want} requests completed")
 EOF
+        then
+            # The reason is in the client's own output, and the post log is where a failed run gets read first.
+            tail -n 20 "$out/bench_c$c.txt" >&2
+            exit 1
+        fi
     done
 }
 

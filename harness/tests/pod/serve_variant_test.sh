@@ -5,7 +5,7 @@
 # Then vllm variants with quality, through gsm8k_chat.py on a fixture and fake_vllm.py: right answers, garbage
 # answers, HTTP 500s, a retried failure, a timeout, right answers that run on as garbage, a reasoning model cut off
 # mid-thought, a fault mid-GSM8K, a max_model_len too short to answer in, a fixture hash mismatch, hash overrides on
-# pod data, and a bench run that drops a request. Last, an issue whose hooks.sh defines post_smoke: alone, failing, after quality, under
+# pod data, a bench run that drops a request, and one that fails outright. Last, an issue whose hooks.sh defines post_smoke: alone, failing, after quality, under
 # a server that dies, and leaving a process running behind it.
 set -euo pipefail
 
@@ -377,7 +377,16 @@ field vllm-drop gsm8k 1.0
 field vllm-drop tok_s "{'1': 100.0}"
 grep -q 'bench c=1: 7/8 requests completed' "$work/results/vllm-drop/server.post.log" \
     || fail "vllm-drop: no bench error"
+grep -q 'Output token throughput' "$work/results/vllm-drop/server.post.log" || fail "vllm-drop: no bench output"
 echo "ok: a bench run that completes fewer requests than it sent fails the quality run and keeps its speed"
+
+write_variant vllm-benchcrash "ok --fake-gsm8k correct" 3 "FAKE_BENCH=crash"
+serve vllm-benchcrash
+field vllm-benchcrash verdict "'POST_FAIL'"
+field vllm-benchcrash tok_s None
+grep -q 'OSError: fake/model is not a local folder' "$work/results/vllm-benchcrash/server.post.log" \
+    || fail "vllm-benchcrash: the client's own error is not in the post log"
+echo "ok: a bench client that fails puts its own output in the post log"
 
 # The hook writes what it was called with and saw, asks the live server, adds a phase, and appends "finished" last.
 # The variant env picks its mode: HOOK=fail fails a command in its middle, HOOK=hang waits like a client that keeps
@@ -458,13 +467,13 @@ if pgrep -fx 'sleep 28.456' >/dev/null; then
 fi
 echo "ok: a process post_smoke leaves running behind it is ended with the run"
 
-[[ $(wc -l <"$work/results/verdicts.jsonl") -eq 23 ]] || fail "verdicts.jsonl should hold one line per run"
+[[ $(wc -l <"$work/results/verdicts.jsonl") -eq 24 ]] || fail "verdicts.jsonl should hold one line per run"
 cmp -s <(tail -n 1 "$work/results/verdicts.jsonl") "$work/results/hook-bg/verdict.json" || fail "verdict.json differs"
 if pgrep -f "$here/fake_server.py" >/dev/null; then
     fail "a fake server outlived its run"
 fi
 [[ $(grep -cxF -- '-9 -f [s]glang[.]launch_server|[s]glang::' "$work/pkill.log") -eq 5 ]] \
     || fail "each sglang run should clean up the server pattern once"
-[[ $(grep -cxF -- '-9 -f [v]llm serve|[V]LLM::' "$work/pkill.log") -eq 18 ]] \
+[[ $(grep -cxF -- '-9 -f [v]llm serve|[V]LLM::' "$work/pkill.log") -eq 19 ]] \
     || fail "each vllm run should clean up the server pattern once"
 echo "ok: one verdict line per run, one cleanup per run, and no server left behind"

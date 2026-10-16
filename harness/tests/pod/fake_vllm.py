@@ -2,11 +2,13 @@
 
 Only the flags quality.sh passes are accepted, each of which vllm bench serve has in v0.25.1 and v0.31.0, so a
 misspelled or dropped one fails here as it would on the pod. FAKE_BENCH=drop completes one request short, the way the
-real client finishes a run with failed requests and still exits 0.
+real client finishes a run with failed requests and still exits 0; FAKE_BENCH=crash fails the way it does when
+--model names no tokenizer it can load.
 """
 import argparse
 import json
 import os
+import sys
 
 parser = argparse.ArgumentParser(prog="vllm")
 parser.add_argument("command", choices=["bench"])
@@ -19,6 +21,8 @@ for flag in ["--port", "--random-input-len", "--random-output-len", "--max-concu
 for flag in ["--ignore-eos", "--save-result"]:
     parser.add_argument(flag, action="store_true")
 args = parser.parse_args()
+if os.environ.get("FAKE_BENCH") == "crash":
+    sys.exit(f"OSError: {args.model} is not a local folder and is not a valid model identifier")
 
 record = {
     "max_concurrency": args.max_concurrency,
