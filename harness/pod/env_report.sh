@@ -5,11 +5,15 @@ set -euo pipefail
 section() { printf '\n## %s\n' "$1"; }
 
 section "GPUs"
-nvidia-smi --query-gpu=index,name,memory.total,compute_cap,driver_version,pcie.link.gen.current,pcie.link.width.current --format=csv
+# A wedged GPU can hang nvidia-smi forever; a healthy one answers in seconds.
+if ! timeout 60 nvidia-smi --query-gpu=index,name,memory.total,compute_cap,driver_version,pcie.link.gen.current,pcie.link.width.current --format=csv; then
+    echo "nvidia-smi failed or did not answer within 60 s" >&2
+    exit 1
+fi
 
 section "Topology"
 # PCIe-only repros need PHB/NODE/SYS between GPUs; NV# means NVLink and invalidates the repro.
-nvidia-smi topo -m || true
+timeout 60 nvidia-smi topo -m || true
 
 section "CUDA"
 nvcc --version 2>/dev/null | tail -n 1 || echo "nvcc not installed"
