@@ -346,7 +346,7 @@ fn get_pod_reads_the_direct_ssh_endpoint_and_treats_404_as_gone() {
         ("203.0.113.7", 40122, PodStatus::Running)
     );
     let container = pod.container().unwrap();
-    assert_eq!(container.uptime, Some(121));
+    assert_eq!(container.uptime, Some(121.0));
     assert_eq!(container.ports[0]["public"], 40122);
     assert!(api.get_pod("gone").unwrap().is_none());
     let targets: Vec<String> = server.seen().into_iter().map(|s| s.target).collect();

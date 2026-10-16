@@ -302,8 +302,9 @@ impl Pod {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct PodRuntime {
+    /// A float, so a fractional uptime cannot fail the decode of the whole pod and end it.
     #[serde(default)]
-    pub uptime: Option<u64>,
+    pub uptime: Option<f64>,
     /// Kept as RunPod sent it: only error messages read it, so a change in its shape must not fail the decode.
     #[serde(default)]
     pub ports: serde_json::Value,
@@ -733,7 +734,7 @@ mod tests {
             serde_json::from_str(include_str!("../tests/fixtures/pod_running.json")).unwrap();
         let pod: Pod = serde_json::from_value(running.clone()).unwrap();
         let container = pod.container().unwrap();
-        assert_eq!(container.uptime, Some(121));
+        assert_eq!(container.uptime, Some(121.0));
         assert_eq!(
             container.ports,
             json!([{"private": 22, "public": 40122, "type": "tcp", "ip": "203.0.113.7"}])

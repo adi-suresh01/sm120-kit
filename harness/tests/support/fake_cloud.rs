@@ -80,7 +80,7 @@ fn container(proxy_only: bool) -> PodRuntime {
         ports.push(json!({"ip": "203.0.113.7", "private": 22, "public": 40122, "type": "tcp"}));
     }
     PodRuntime {
-        uptime: Some(5),
+        uptime: Some(5.0),
         ports: ports.into(),
     }
 }
