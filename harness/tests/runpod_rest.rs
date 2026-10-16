@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use jiff::SignedDuration;
 use sm120_harness::cloud::{
     Cloud, CloudError, CreatePodRequest, GpuRequest, Mounts, PersistentMount, PodStatus, RunpodRest, find_offers,
 };
@@ -16,6 +17,8 @@ use support::FakeClock;
 enum Step {
     Reply(u16, &'static str),
     ReplyWithHeader(u16, &'static str, &'static str, &'static str),
+    /// Promises more body than it sends, then hangs up: a reply cut off mid-body.
+    Truncated(&'static str),
     HangUp,
 }
 
@@ -50,6 +53,11 @@ impl FixtureServer {
                     Step::ReplyWithHeader(status, name, value, body) => {
                         respond(stream, status, Some((name, value)), body)
                     }
+                    Step::Truncated(body) => {
+                        let reply = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}", body.len() + 100);
+                        let mut stream = stream;
+                        stream.write_all(reply.as_bytes()).unwrap();
+                    }
                     Step::HangUp => drop(stream),
                 }
             }
@@ -63,6 +71,12 @@ impl FixtureServer {
 
     fn seen(mut self) -> Vec<Seen> {
         self.handle.take().unwrap().join().unwrap();
+        self.seen.lock().unwrap().clone()
+    }
+
+    /// The requests so far, without waiting for the steps left over: a test that queues a reply the harness must
+    /// never ask for reads this.
+    fn seen_now(&self) -> Vec<Seen> {
         self.seen.lock().unwrap().clone()
     }
 }
@@ -170,14 +184,104 @@ fn creates_a_pod_with_the_v2_body_and_bearer_auth() {
 
 #[test]
 fn never_resends_a_create_after_a_dropped_connection() {
-    let server = FixtureServer::start(vec![Step::HangUp]);
+    // A second reply is queued, so a retry would succeed and the test would see two requests.
+    for first in [Step::HangUp, Step::Truncated(r#"{"id": "kfyq"#)] {
+        let server = FixtureServer::start(vec![first, Step::Reply(201, CREATED)]);
+        let clock = FakeClock::at("2026-10-16T17:03:00Z");
+        let err = RunpodRest::new(&server.base, "k", &clock)
+            .create_pod(&create_request())
+            .unwrap_err();
+        assert!(matches!(err, CloudError::Network(_)), "{err}");
+        assert!(err.create_outcome_unknown());
+        assert_eq!(server.seen_now().len(), 1);
+        assert!(clock.slept.borrow().is_empty());
+    }
+}
+
+#[test]
+fn a_reply_cut_off_mid_body_is_retried_like_a_network_error() {
+    let server = FixtureServer::start(vec![Step::Truncated(r#"{"id": "kfyq"#), Step::Reply(200, RUNNING)]);
     let clock = FakeClock::at("2026-10-16T17:03:00Z");
-    let err = RunpodRest::new(&server.base, "k", &clock)
+    let pod = RunpodRest::new(&server.base, "k", &clock)
+        .get_pod("kfyqcddi6nefdp")
+        .unwrap();
+    assert_eq!(pod.unwrap().id, "kfyqcddi6nefdp");
+    assert_eq!(*clock.slept.borrow(), [Duration::from_secs(1)]);
+    assert_eq!(server.seen().len(), 2);
+}
+
+#[test]
+fn a_whole_reply_that_is_not_json_is_a_decode_error_and_not_retried() {
+    let server = FixtureServer::start(vec![
+        Step::Reply(200, "<html>maintenance</html>"),
+        Step::Reply(200, RUNNING),
+    ]);
+    let clock = FakeClock::at("2026-10-16T17:03:00Z");
+    let err = RunpodRest::new(&server.base, "k", &clock).get_pod("x").unwrap_err();
+    assert!(matches!(err, CloudError::Decode(_)), "{err}");
+    assert_eq!(server.seen_now().len(), 1);
+}
+
+#[test]
+fn a_rate_limited_create_waits_for_the_exhausted_window() {
+    let server = FixtureServer::start(vec![
+        Step::ReplyWithHeader(
+            429,
+            "RateLimit",
+            "\"minute\";r=0;t=12, \"hour\";r=2800;t=1812",
+            r#"{"title":"Too Many Requests","status":429}"#,
+        ),
+        Step::ReplyWithHeader(429, "RateLimit", "\"hour\";r=0;t=1812", r#"{"status":429}"#),
+        Step::Reply(201, CREATED),
+    ]);
+    let clock = FakeClock::at("2026-10-16T17:03:00Z");
+    RunpodRest::new(&server.base, "k", &clock)
         .create_pod(&create_request())
-        .unwrap_err();
-    assert!(matches!(err, CloudError::Network(_)), "{err}");
-    assert!(err.create_outcome_unknown());
-    assert_eq!(server.seen().len(), 1);
+        .unwrap();
+    // The hour window is capped well inside the adopt window.
+    assert_eq!(
+        *clock.slept.borrow(),
+        [Duration::from_secs(12), Duration::from_secs(30)]
+    );
+    assert_eq!(server.seen().len(), 3);
+}
+
+#[test]
+fn the_date_header_measures_the_laptop_clock() {
+    let server = FixtureServer::start(vec![Step::ReplyWithHeader(
+        200,
+        "Date",
+        "Fri, 16 Oct 2026 17:08:00 GMT",
+        RUNNING,
+    )]);
+    let clock = FakeClock::at("2026-10-16T17:03:00Z");
+    let api = RunpodRest::new(&server.base, "k", &clock);
+    assert_eq!(api.clock_skew(), None);
+    api.get_pod("kfyqcddi6nefdp").unwrap();
+    assert_eq!(api.clock_skew(), Some(SignedDuration::from_mins(5)));
+}
+
+#[test]
+fn list_pods_stops_on_a_repeated_cursor_or_too_many_pages() {
+    let again = r#"{"pods": [], "pagination": {"hasNextPage": true, "nextCursor": "same"}}"#;
+    let server = FixtureServer::start(vec![Step::Reply(200, again), Step::Reply(200, again)]);
+    let clock = FakeClock::at("2026-10-16T17:03:00Z");
+    let err = RunpodRest::new(&server.base, "k", &clock).list_pods().unwrap_err();
+    assert!(
+        matches!(err, CloudError::Protocol(_)) && err.to_string().contains("came back twice"),
+        "{err}"
+    );
+    assert_eq!(server.seen().len(), 2);
+    let pages: Vec<Step> = (0..100)
+        .map(|n| {
+            let body = format!(r#"{{"pods": [], "pagination": {{"hasNextPage": true, "nextCursor": "c{n}"}}}}"#);
+            Step::Reply(200, Box::leak(body.into_boxed_str()))
+        })
+        .collect();
+    let server = FixtureServer::start(pages);
+    let err = RunpodRest::new(&server.base, "k", &clock).list_pods().unwrap_err();
+    assert!(err.to_string().contains("after 100 pages"), "{err}");
+    assert_eq!(server.seen().len(), 100);
 }
 
 #[test]

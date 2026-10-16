@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use jiff::SignedDuration;
 use sm120_harness::cloud::{CatalogGpu, Cloud, CloudError, CreatePodRequest, Pod, PodSsh, PodStatus, SshEndpoint};
 use sm120_harness::spec::CloudTier;
 
@@ -45,6 +46,7 @@ pub struct State {
     pub delete_error: Option<u16>,
     pub delete_ignored: bool,
     pub account: Option<String>,
+    pub skew: Option<SignedDuration>,
     pub billing: Option<f64>,
     pub interrupt_on_create: Option<Rc<AtomicBool>>,
     /// Runs right after a pod is made, before the reply: the moment a local failure hurts most.
@@ -85,6 +87,7 @@ impl Default for FakeCloud {
             delete_error: None,
             delete_ignored: false,
             account: Some("org-sm120".into()),
+            skew: Some(SignedDuration::ZERO),
             billing: None,
             interrupt_on_create: None,
             after_create: None,
@@ -242,5 +245,9 @@ impl Cloud for FakeCloud {
 
     fn account(&self) -> Result<Option<String>, CloudError> {
         Ok(self.0.borrow().account.clone())
+    }
+
+    fn clock_skew(&self) -> Option<SignedDuration> {
+        self.0.borrow().skew
     }
 }

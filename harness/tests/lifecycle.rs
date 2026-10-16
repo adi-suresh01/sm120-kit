@@ -475,6 +475,28 @@ fn a_reverted_ledger_cannot_free_the_live_pod_budget() {
 }
 
 #[test]
+fn a_skewed_laptop_clock_reserves_nothing() {
+    for skew in [SignedDuration::from_secs(121), SignedDuration::from_secs(-121)] {
+        let w = World::default();
+        w.cloud.0.borrow_mut().skew = Some(skew);
+        let err = err_text(w.up());
+        assert!(
+            err.contains("s off RunPod's") && err.contains("Nothing was reserved"),
+            "{err}"
+        );
+        assert_eq!(w.cloud.0.borrow().create_calls, 0);
+        assert!(w.ledger().pods.is_empty());
+    }
+    let w = World::default();
+    w.cloud.0.borrow_mut().skew = Some(SignedDuration::from_secs(-120));
+    w.up().unwrap();
+    let w = World::default();
+    w.cloud.0.borrow_mut().skew = None;
+    w.up().unwrap();
+    assert!(w.events().contains("laptop clock went unchecked"));
+}
+
+#[test]
 fn pods_of_another_issue_or_already_ended_do_not_block_up() {
     let w = World::default();
     let stage2 = "vllm-47990-stage2";

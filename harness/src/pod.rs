@@ -196,6 +196,27 @@ fn refuse_untracked(issue: &str, ledger: &Ledger, pods: &[Pod]) -> Result<()> {
     Ok(())
 }
 
+/// The watchdog's deadline epoch comes from the laptop clock, and a pod keeps billing for as long as that clock
+/// is ahead of the real one.
+const MAX_CLOCK_SKEW: SignedDuration = SignedDuration::from_secs(120);
+
+fn refuse_clock_skew(ctx: &Ctx, issue: &str) -> Result<()> {
+    let Some(skew) = ctx.cloud.clock_skew() else {
+        ctx.warn(
+            issue,
+            "RunPod sent no Date header, so the laptop clock went unchecked".into(),
+        );
+        return Ok(());
+    };
+    ensure!(
+        skew.abs() <= MAX_CLOCK_SKEW,
+        "this laptop's clock is {} s off RunPod's, and the pod's watchdog deadline is set from it; fix the clock \
+         (System Settings > Date & Time, or `sudo sntp -sS time.apple.com`) before `up`. Nothing was reserved",
+        -skew.as_secs()
+    );
+    Ok(())
+}
+
 pub fn create_request(spec: &IssueSpec, entry: &PodEntry) -> CreatePodRequest {
     let mut apt: Vec<&str> = REQUIRED_APT.to_vec();
     for package in &spec.pod.apt {
@@ -382,6 +403,7 @@ pub fn up(ctx: &Ctx, spec: &IssueSpec, run_setup: bool, after_failure: AfterFail
         "nothing in the preference list of issues/{issue}/harness.toml is in stock"
     );
     refuse_untracked(issue, &ledger, &ctx.cloud.list_pods()?)?;
+    refuse_clock_skew(ctx, issue)?;
     let (entry, pod) = create_first_available(ctx, spec, &offers)?;
     let ready =
         wait_ready(ctx, issue, &entry, pod).and_then(|target| gate_and_copy(ctx, spec, &target).map(|()| target));

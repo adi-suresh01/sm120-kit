@@ -1,19 +1,34 @@
-use std::collections::BTreeMap;
+use std::cell::Cell;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::time::Duration;
 
+use jiff::fmt::rfc2822::DateTimeParser;
+use jiff::{SignedDuration, Timestamp};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use ureq::http::Response;
+use ureq::http::{HeaderMap, Response};
 use ureq::{Agent, Body};
 
 use crate::clock::Clock;
-use crate::ledger::Offer;
+use crate::ledger::{ADOPT_WINDOW, Offer};
 use crate::spec::{CloudTier, GpuChoice, PodSpec};
 
 const BACKOFF_S: [u64; 5] = [1, 2, 4, 8, 16];
-/// A Retry-After for an hourly window would stall `down`; past this the pod watchdog is the better bet.
-const MAX_RETRY_AFTER_S: u64 = 60;
+/// A request that has not finished in this long is treated as lost; for a create, the name lookup takes over.
+const HTTP_TIMEOUT_S: u64 = 60;
+/// A wait the server asks for is capped: an hourly window would stall `down`, and past this the pod watchdog is
+/// the better bet.
+pub const MAX_RETRY_AFTER_S: u64 = 60;
+/// Lower for creates: their whole retry run has to end inside the adopt window, or a reaper in another harness
+/// process could release the reservation of a create that is still in flight.
+pub const MAX_CREATE_RETRY_AFTER_S: u64 = 30;
+/// Every create attempt running to the timeout, plus every capped wait between them.
+pub const CREATE_WORST_CASE_S: u64 =
+    (BACKOFF_S.len() as u64 + 1) * HTTP_TIMEOUT_S + BACKOFF_S.len() as u64 * MAX_CREATE_RETRY_AFTER_S;
+const _: () = assert!(CREATE_WORST_CASE_S < ADOPT_WINDOW.as_secs() as u64);
+/// RunPod returns up to 1000 pods a page, so 100 pages is far past any real account; more means a loop.
+const MAX_POD_PAGES: usize = 100;
 
 #[derive(Debug)]
 pub enum CloudError {
@@ -24,7 +39,10 @@ pub enum CloudError {
         detail: String,
         retry_after_s: Option<u64>,
     },
+    /// The body arrived whole but is not the JSON the spec promises.
     Decode(String),
+    /// Replies that each decode but together break the protocol, such as a pagination cursor that repeats.
+    Protocol(String),
 }
 
 impl CloudError {
@@ -32,7 +50,7 @@ impl CloudError {
         match self {
             Self::Network(_) => true,
             Self::Http { status, .. } => *status == 429 || *status >= 500,
-            Self::Decode(_) => false,
+            Self::Decode(_) | Self::Protocol(_) => false,
         }
     }
 
@@ -43,7 +61,7 @@ impl CloudError {
     pub fn status(&self) -> Option<u16> {
         match self {
             Self::Http { status, .. } => Some(*status),
-            Self::Network(_) | Self::Decode(_) => None,
+            Self::Network(_) | Self::Decode(_) | Self::Protocol(_) => None,
         }
     }
 
@@ -51,7 +69,7 @@ impl CloudError {
     /// instead of creating again.
     pub fn create_outcome_unknown(&self) -> bool {
         match self {
-            Self::Network(_) | Self::Decode(_) => true,
+            Self::Network(_) | Self::Decode(_) | Self::Protocol(_) => true,
             Self::Http { status, .. } => *status >= 500,
         }
     }
@@ -63,15 +81,19 @@ impl fmt::Display for CloudError {
             Self::Network(e) => write!(f, "RunPod API unreachable: {e}"),
             Self::Http { status, detail, .. } => write!(f, "RunPod API returned {status}: {detail}"),
             Self::Decode(e) => write!(f, "RunPod API response did not decode: {e}"),
+            Self::Protocol(e) => write!(f, "RunPod API broke its protocol: {e}"),
         }
     }
 }
 
 impl std::error::Error for CloudError {}
 
+/// Retries with backoff while `retry_on` holds. A wait the server asked for replaces the backoff step, within
+/// `[step, max_wait_s]`.
 pub fn with_retry<T>(
     sleep: &dyn Fn(Duration),
     retry_on: impl Fn(&CloudError) -> bool,
+    max_wait_s: u64,
     mut call: impl FnMut() -> Result<T, CloudError>,
 ) -> Result<T, CloudError> {
     let mut backoff = BACKOFF_S.iter();
@@ -83,7 +105,7 @@ pub fn with_retry<T>(
                     CloudError::Http {
                         retry_after_s: Some(after),
                         ..
-                    } => (*after).clamp(base, MAX_RETRY_AFTER_S),
+                    } => (*after).clamp(base, max_wait_s.max(base)),
                     _ => base,
                 };
                 sleep(Duration::from_secs(wait));
@@ -91,6 +113,31 @@ pub fn with_retry<T>(
             result => return result,
         }
     }
+}
+
+/// How long the server asked a rate-limited client to wait: `Retry-After`, else `RateLimit-Reset`, else the
+/// longest reset among the exhausted windows of the structured `RateLimit` header the OpenAPI spec documents
+/// (`"minute";r=0;t=12, "hour";r=2800;t=1812`).
+pub fn server_wait(retry_after: Option<&str>, reset: Option<&str>, rate_limit: Option<&str>) -> Option<u64> {
+    let seconds = |value: &str| value.trim().parse::<u64>().ok();
+    retry_after
+        .and_then(seconds)
+        .or_else(|| reset.and_then(seconds))
+        .or_else(|| {
+            rate_limit?
+                .split(',')
+                .filter_map(|member| {
+                    let params: BTreeMap<&str, &str> = member
+                        .split(';')
+                        .skip(1)
+                        .filter_map(|param| param.trim().split_once('='))
+                        .collect();
+                    (params.get("r").and_then(|r| seconds(r)) == Some(0))
+                        .then(|| params.get("t").and_then(|t| seconds(t)))
+                        .flatten()
+                })
+                .max()
+        })
 }
 
 pub trait Cloud {
@@ -106,6 +153,8 @@ pub trait Cloud {
     /// The RunPod organization the key belongs to, or `None` when the key cannot tell (no organization, or no
     /// membership scope).
     fn account(&self) -> Result<Option<String>, CloudError>;
+    /// RunPod's clock minus the laptop's, from the `Date` header of the last reply, if any reply had one.
+    fn clock_skew(&self) -> Option<SignedDuration>;
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -337,19 +386,21 @@ pub struct RunpodRest<'a> {
     base: String,
     authorization: String,
     clock: &'a dyn Clock,
+    skew: Cell<Option<SignedDuration>>,
 }
 
 impl<'a> RunpodRest<'a> {
     pub fn new(base: &str, api_key: &str, clock: &'a dyn Clock) -> Self {
         let config = Agent::config_builder()
             .http_status_as_error(false)
-            .timeout_global(Some(Duration::from_secs(60)))
+            .timeout_global(Some(Duration::from_secs(HTTP_TIMEOUT_S)))
             .build();
         Self {
             agent: Agent::new_with_config(config),
             base: base.trim_end_matches('/').to_string(),
             authorization: format!("Bearer {api_key}"),
             clock,
+            skew: Cell::new(None),
         }
     }
 
@@ -357,22 +408,42 @@ impl<'a> RunpodRest<'a> {
         format!("{}{path}", self.base)
     }
 
+    /// Notes the server's clock from every reply, error replies included.
+    fn observe(&self, response: Result<Response<Body>, ureq::Error>) -> Result<Response<Body>, CloudError> {
+        let response = response.map_err(|e| CloudError::Network(e.to_string()))?;
+        let date = header(response.headers(), "date").and_then(http_date);
+        if let Some(server) = date {
+            self.skew.set(Some(server.duration_since(self.clock.now())));
+        }
+        Ok(response)
+    }
+
     fn get_json<T: DeserializeOwned>(&self, path: &str, query: &[(&str, &str)]) -> Result<T, CloudError> {
-        with_retry(&|d| self.clock.sleep(d), CloudError::retryable, || {
-            let mut request = self
-                .agent
-                .get(self.url(path))
-                .header("Authorization", &self.authorization);
-            for (key, value) in query {
-                request = request.query(*key, *value);
-            }
-            read_json(request.call().map_err(network)?)
-        })
+        with_retry(
+            &|d| self.clock.sleep(d),
+            CloudError::retryable,
+            MAX_RETRY_AFTER_S,
+            || {
+                let mut request = self
+                    .agent
+                    .get(self.url(path))
+                    .header("Authorization", &self.authorization);
+                for (key, value) in query {
+                    request = request.query(*key, *value);
+                }
+                read_json(self.observe(request.call())?)
+            },
+        )
     }
 }
 
-fn network(e: ureq::Error) -> CloudError {
-    CloudError::Network(e.to_string())
+/// HTTP dates (`Fri, 16 Oct 2026 17:03:00 GMT`) are the RFC 2822 form with a GMT zone.
+fn http_date(value: &str) -> Option<Timestamp> {
+    DateTimeParser::new().parse_timestamp(value.trim()).ok()
+}
+
+fn header<'h>(headers: &'h HeaderMap, name: &str) -> Option<&'h str> {
+    headers.get(name).and_then(|value| value.to_str().ok())
 }
 
 fn ensure_success(response: &mut Response<Body>) -> Result<(), CloudError> {
@@ -380,11 +451,12 @@ fn ensure_success(response: &mut Response<Body>) -> Result<(), CloudError> {
     if (200..300).contains(&status) {
         return Ok(());
     }
-    let retry_after_s = response
-        .headers()
-        .get("retry-after")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.trim().parse().ok());
+    let headers = response.headers();
+    let retry_after_s = server_wait(
+        header(headers, "retry-after"),
+        header(headers, "ratelimit-reset"),
+        header(headers, "ratelimit"),
+    );
     let body = response.body_mut().read_to_string().unwrap_or_default();
     Err(CloudError::Http {
         status,
@@ -393,12 +465,15 @@ fn ensure_success(response: &mut Response<Body>) -> Result<(), CloudError> {
     })
 }
 
+/// A body cut off by a timeout or a reset is a network failure, which a GET may retry; only a body that arrived
+/// whole and is not the expected JSON is a decode failure.
 fn read_json<T: DeserializeOwned>(mut response: Response<Body>) -> Result<T, CloudError> {
     ensure_success(&mut response)?;
-    response
+    let text = response
         .body_mut()
-        .read_json()
-        .map_err(|e| CloudError::Decode(e.to_string()))
+        .read_to_string()
+        .map_err(|e| CloudError::Network(format!("reading the reply: {e}")))?;
+    serde_json::from_str(&text).map_err(|e| CloudError::Decode(e.to_string()))
 }
 
 fn problem_detail(body: &str) -> String {
@@ -434,21 +509,22 @@ impl Cloud for RunpodRest<'_> {
 
     /// Only a 429 is retried: RunPod rejects it before doing anything, while any other failure may have made a pod.
     fn create_pod(&self, request: &CreatePodRequest) -> Result<Pod, CloudError> {
-        with_retry(&|d| self.clock.sleep(d), CloudError::rate_limited, || {
+        let sleep = |d| self.clock.sleep(d);
+        with_retry(&sleep, CloudError::rate_limited, MAX_CREATE_RETRY_AFTER_S, || {
             let response = self
                 .agent
                 .post(self.url("/v2/pods"))
                 .header("Authorization", &self.authorization)
-                .send_json(request)
-                .map_err(network)?;
-            read_json(response)
+                .send_json(request);
+            read_json(self.observe(response)?)
         })
     }
 
     fn list_pods(&self) -> Result<Vec<Pod>, CloudError> {
         let mut pods = Vec::new();
         let mut cursor: Option<String> = None;
-        loop {
+        let mut seen = HashSet::new();
+        for _ in 0..MAX_POD_PAGES {
             let query: Vec<(&str, &str)> = cursor.iter().map(|c| ("cursor", c.as_str())).collect();
             let page: PodPage = self.get_json("/v2/pods", &query)?;
             pods.extend(page.pods);
@@ -456,10 +532,20 @@ impl Cloud for RunpodRest<'_> {
                 Some(Pagination {
                     has_next_page: true,
                     next_cursor: Some(next),
-                }) => cursor = Some(next),
+                }) => {
+                    if !seen.insert(next.clone()) {
+                        return Err(CloudError::Protocol(format!(
+                            "pod list cursor {next:?} came back twice"
+                        )));
+                    }
+                    cursor = Some(next);
+                }
                 _ => return Ok(pods),
             }
         }
+        Err(CloudError::Protocol(format!(
+            "pod list still had more after {MAX_POD_PAGES} pages"
+        )))
     }
 
     fn get_pod(&self, id: &str) -> Result<Option<Pod>, CloudError> {
@@ -471,14 +557,13 @@ impl Cloud for RunpodRest<'_> {
     }
 
     fn delete_pod(&self, id: &str) -> Result<(), CloudError> {
-        let result = with_retry(&|d| self.clock.sleep(d), CloudError::retryable, || {
-            let mut response = self
+        let sleep = |d| self.clock.sleep(d);
+        let result = with_retry(&sleep, CloudError::retryable, MAX_RETRY_AFTER_S, || {
+            let request = self
                 .agent
                 .delete(self.url(&format!("/v2/pods/{id}")))
-                .header("Authorization", &self.authorization)
-                .call()
-                .map_err(network)?;
-            ensure_success(&mut response)
+                .header("Authorization", &self.authorization);
+            ensure_success(&mut self.observe(request.call())?)
         });
         match result {
             Err(e) if e.status() == Some(404) => Ok(()),
@@ -500,6 +585,10 @@ impl Cloud for RunpodRest<'_> {
             Err(e) => Err(e),
         }
     }
+
+    fn clock_skew(&self) -> Option<SignedDuration> {
+        self.skew.get()
+    }
 }
 
 #[cfg(test)]
@@ -517,10 +606,18 @@ mod tests {
     }
 
     fn run_with_failures(failures: Vec<CloudError>) -> (Result<u32, CloudError>, Vec<u64>) {
+        run_capped(failures, CloudError::retryable, MAX_RETRY_AFTER_S)
+    }
+
+    fn run_capped(
+        failures: Vec<CloudError>,
+        retry_on: fn(&CloudError) -> bool,
+        max_wait_s: u64,
+    ) -> (Result<u32, CloudError>, Vec<u64>) {
         let slept = RefCell::new(Vec::new());
         let failures = RefCell::new(failures);
         let mut calls = 0;
-        let result = with_retry(&|d| slept.borrow_mut().push(d.as_secs()), CloudError::retryable, || {
+        let result = with_retry(&|d| slept.borrow_mut().push(d.as_secs()), retry_on, max_wait_s, || {
             calls += 1;
             match failures.borrow_mut().pop() {
                 Some(e) => Err(e),
@@ -528,6 +625,30 @@ mod tests {
             }
         });
         (result, slept.into_inner())
+    }
+
+    #[test]
+    fn create_retries_end_inside_the_adopt_window() {
+        // Worst case: every attempt hits the timeout and every 429 asks for an hour.
+        let (result, slept) = run_capped(
+            (0..6).map(|_| http(429, Some(3600))).collect(),
+            CloudError::rate_limited,
+            MAX_CREATE_RETRY_AFTER_S,
+        );
+        assert!(result.is_err());
+        let total = slept.iter().sum::<u64>() + 6 * HTTP_TIMEOUT_S;
+        assert!(total <= CREATE_WORST_CASE_S, "{total}");
+        assert!(CREATE_WORST_CASE_S < ADOPT_WINDOW.as_secs() as u64);
+    }
+
+    #[test]
+    fn the_server_wait_comes_from_retry_after_then_the_ratelimit_headers() {
+        assert_eq!(server_wait(Some("7"), Some("50"), None), Some(7));
+        assert_eq!(server_wait(None, Some(" 50 "), None), Some(50));
+        let limits = "\"minute\";r=0;t=12, \"hour\";r=2800;t=1812, \"day\";r=0;t=45";
+        assert_eq!(server_wait(None, None, Some(limits)), Some(45));
+        assert_eq!(server_wait(Some("soon"), None, Some("\"minute\";r=5;t=12")), None);
+        assert_eq!(server_wait(None, None, None), None);
     }
 
     #[test]
@@ -564,6 +685,7 @@ mod tests {
     fn create_outcome_is_unknown_for_network_5xx_and_garbled_replies() {
         assert!(CloudError::Network("reset".into()).create_outcome_unknown());
         assert!(CloudError::Decode("eof".into()).create_outcome_unknown());
+        assert!(CloudError::Protocol("loop".into()).create_outcome_unknown());
         assert!(http(502, None).create_outcome_unknown());
         assert!(!http(400, None).create_outcome_unknown());
         assert!(!http(429, None).create_outcome_unknown());
