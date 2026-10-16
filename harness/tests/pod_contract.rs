@@ -128,18 +128,18 @@ fn shim(bin: &Path, name: &str, body: &str) {
 }
 
 /// nvidia-smi reports idle GPUs; pkill only logs the cleanup's `-f` kill, which on this machine could match
-/// unrelated processes; setsid and timeout stand in where macOS has none.
+/// unrelated processes; setsid and timeout stand in where macOS has none. The setsid stand-in starts a new session
+/// too, since serve_and_smoke.sh ends POST_SMOKE by its process group.
 fn write_shims(bin: &Path) {
     fs::create_dir_all(bin).unwrap();
     shim(bin, "nvidia-smi", "echo 0\n");
-    let pkill = command_path("pkill").expect("pkill");
-    shim(
-        bin,
-        "pkill",
-        &format!("printf '%s\\n' \"$*\" >>\"$WORK/pkill.log\"\nif [[ $1 == -P ]]; then exec {pkill} \"$@\"; fi\n"),
-    );
+    shim(bin, "pkill", "printf '%s\\n' \"$*\" >>\"$WORK/pkill.log\"\n");
     if command_path("setsid").is_none() {
-        shim(bin, "setsid", "exec \"$@\"\n");
+        shim(
+            bin,
+            "setsid",
+            "exec python3 -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \"$@\"\n",
+        );
     }
     if command_path("timeout").is_none() {
         shim(

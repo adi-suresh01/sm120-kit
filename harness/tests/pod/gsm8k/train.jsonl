@@ -1,0 +1,6 @@
+{"question": "Ann has 3 apples and buys 4 more. How many apples does she have?", "answer": "Ann has 3 + 4 = <<3+4=7>>7 apples.\n#### 7"}
+{"question": "A bus carries 40 people on each trip. How many people does it carry on 3 trips?", "answer": "It carries 40 * 3 = <<40*3=120>>120 people.\n#### 120"}
+{"question": "Sam had 25 marbles and lost 9. How many marbles are left?", "answer": "Sam has 25 - 9 = <<25-9=16>>16 marbles left.\n#### 16"}
+{"question": "A pie is cut into 8 slices and 4 friends share it equally. How many slices does each get?", "answer": "Each friend gets 8 / 4 = <<8/4=2>>2 slices.\n#### 2"}
+{"question": "Lia reads 12 pages a day. How many pages does she read in a week?", "answer": "She reads 12 * 7 = <<12*7=84>>84 pages.\n#### 84"}
+{"question": "A shop sells 6 cakes an hour. How many cakes does it sell in 5 hours?", "answer": "It sells 6 * 5 = <<6*5=30>>30 cakes.\n#### 30"}

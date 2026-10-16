@@ -1,0 +1,4 @@
+{"question": "A box holds 12 pens. How many pens are in 3 boxes?", "answer": "3 boxes hold 3 * 12 = <<3*12=36>>36 pens.\n#### 36"}
+{"question": "Tim saved 1,250 dollars and spent 250. How many dollars are left?", "answer": "Tim has 1,250 - 250 = <<1250-250=1000>>1,000 dollars left.\n#### 1,000"}
+{"question": "It was 5 degrees and the temperature fell 8 degrees. What is it now?", "answer": "It is now 5 - 8 = <<5-8=-3>>-3 degrees.\n#### -3"}
+{"question": "A farm has 7 cows and 9 sheep. How many animals are there?", "answer": "There are 7 + 9 = <<7+9=16>>16 animals.\n#### 16"}

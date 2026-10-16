@@ -1,12 +1,25 @@
 """Stands in for an inference server in the serve_variant.sh tests.
 
-Usage: fake_server.py ok|fatal|hang|smoke_fail|post_die [--fake-mode <mode>] [server flags...]
+Usage: fake_server.py ok|fatal|hang|smoke_fail|post_die [--fake-mode <mode>] [--fake-gsm8k <answers>]
+                      [--served-model-name <name>] [--max-model-len <tokens>] [server flags...]
   --fake-mode replaces the first mode, so a variant's own flags can make the server crash
   ok          answers every request with 200
   fatal       prints a CUDA fault with the frame before it, then hangs like a rank waiting on its peer
   hang        never listens
   smoke_fail  answers /health, fails every chat request with 500
   post_die    answers every request, then exits 1 s after the first chat request, mid-evaluation
+  --fake-gsm8k answers GSM8K chat requests (a prompt ending in "Answer:") from the test split in GSM8K_DIR:
+    correct   with the reference answer
+    garbage   with commas until max_tokens, the way vllm#61100's server answers
+    error     with 500, every try
+    flaky     with 500 on the first try of each question, then the reference answer
+    rambling  with the reference answer, then digit-free garbage until max_tokens
+    thinking  with null content and the reference answer as reasoning, cut off at max_tokens
+    slow      like correct, but the second question gets no reply for 3 s, longer than the tests' client timeout
+    fault     like correct, but the second question logs a CUDA fault after 0.5 s and never answers
+    A GSM8K request that is not greedy and 5-shot gets 400, so a run that scores also checks the prompt. Requests are
+    served on threads, so one that waits holds up no other.
+GET /v1/models lists --served-model-name (default fake/model) with --max-model-len (default 8192), as vLLM does.
 FAKE_SERVER_RECORD=<file> appends one JSON line per start: the full argv, every CONTRACT_* variable, and what the
 fake sglang and fakeinfer packages hold, so a test sees exactly what reached the server.
 """
@@ -23,6 +36,11 @@ parser = argparse.ArgumentParser()
 modes = ["ok", "fatal", "hang", "smoke_fail", "post_die"]
 parser.add_argument("mode", choices=modes)
 parser.add_argument("--fake-mode", choices=modes)
+parser.add_argument(
+    "--fake-gsm8k", choices=["correct", "garbage", "error", "flaky", "rambling", "thinking", "slow", "fault"]
+)
+parser.add_argument("--served-model-name", default="fake/model")
+parser.add_argument("--max-model-len", type=int, default=8192)
 parser.add_argument("--port", type=int, required=True)
 args, _ = parser.parse_known_args()
 args.mode = args.fake_mode or args.mode
@@ -53,26 +71,77 @@ if args.mode in ("fatal", "hang"):
     time.sleep(600)
 
 death = threading.Timer(1.0, os._exit, [3])
+lock = threading.Lock()
+answers = {}
+if args.fake_gsm8k:
+    with open(os.path.join(os.environ["GSM8K_DIR"], "test.jsonl"), encoding="utf-8") as f:
+        answers = {row["question"]: row["answer"] for row in map(json.loads, f)}
+tries = {}
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
-    def _reply(self, code):
+    def _reply(self, code, body=None):
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
-        self.wfile.write(b'{"ok": true}')
+        self.wfile.write(json.dumps({"ok": True} if body is None else body).encode())
 
     def do_GET(self):
-        self._reply(200)
+        if self.path == "/v1/models":
+            card = {"id": args.served_model_name, "object": "model", "max_model_len": args.max_model_len}
+            self._reply(200, {"object": "list", "data": [card]})
+        else:
+            self._reply(200)
 
     def do_POST(self):
-        self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        if args.fake_gsm8k:
+            request = json.loads(body)
+            prompt = request["messages"][-1]["content"]
+            if prompt.endswith("\nAnswer:"):
+                self._gsm8k(request, prompt)
+                return
         self._reply(500 if args.mode == "smoke_fail" else 200)
-        if args.mode == "post_die" and not death.is_alive():
-            death.start()
+        with lock:
+            if args.mode == "post_die" and not death.is_alive():
+                death.start()
+
+    def _gsm8k(self, request, prompt):
+        if request.get("temperature") != 0 or prompt.count("Question: ") != 6:
+            self._reply(400, {"error": "want greedy 5-shot"})
+            return
+        question = prompt.rsplit("Question: ", 1)[1].removesuffix("\nAnswer:")
+        with lock:
+            tries[question] = tries.get(question, 0) + 1
+        if args.fake_gsm8k == "error" or (args.fake_gsm8k == "flaky" and tries[question] == 1):
+            self._reply(500, {"error": "fake failure"})
+            return
+        # Writing a reply to a client that has hung up would only put a traceback in the server log.
+        if question == list(answers)[1] and args.fake_gsm8k == "slow":
+            time.sleep(3)
+            return
+        if question == list(answers)[1] and args.fake_gsm8k == "fault":
+            time.sleep(0.5)
+            print("torch.AcceleratorError: CUDA error: an illegal memory access was encountered", flush=True)
+            time.sleep(600)
+        garbage = "The,,,,,,,,,, and,,, ,,,,"
+        message = {"role": "assistant", "content": answers[question]}
+        finish, tokens = "stop", len(answers[question].split())
+        if args.fake_gsm8k in ("garbage", "rambling", "thinking"):
+            finish, tokens = "length", request["max_tokens"]
+        if args.fake_gsm8k == "garbage":
+            message["content"] = garbage
+        if args.fake_gsm8k == "rambling":
+            message["content"] += " " + garbage
+        if args.fake_gsm8k == "thinking":
+            message.update(content=None, reasoning=answers[question])
+        self._reply(200, {
+            "choices": [{"index": 0, "message": message, "finish_reason": finish}],
+            "usage": {"completion_tokens": tokens},
+        })
 
     def log_message(self, *args):
         pass
 
 
-http.server.HTTPServer(("127.0.0.1", args.port), Handler).serve_forever()
+http.server.ThreadingHTTPServer(("127.0.0.1", args.port), Handler).serve_forever()

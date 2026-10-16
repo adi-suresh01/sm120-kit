@@ -21,7 +21,7 @@ budget Aditya approved for that issue.
 issues/<repo>-<num>/
   harness.toml        what to rent and what to run (below)
   setup.sh            optional: installs and downloads; runs once per pod, after env_report.sh
-  hooks.sh            optional: defines pre_launch and post_stop, each called with the run directory
+  hooks.sh            optional: defines pre_launch, post_smoke, and post_stop (below)
   patches/<name>.diff patches a variant can apply to an installed Python package
   harness-ledger.json written by the harness: budget, pods, cost, RunPod organization. Commit it.
 ```
@@ -70,14 +70,56 @@ env = { MEM_BUDGET_GIB = "31.45" }               # exported for the hooks and th
 smoke_concurrency = 13                           # parallel smoke requests
 ```
 
-With `package = "sglang"`, a variant can also measure quality and speed on the live server: GSM8K first (its
-accept length is the per-request mean), then one `bench_serving` run per `[concurrency, prompts]` pair:
+A variant can also measure quality and speed on the live server: GSM8K on the first `gsm8k` test questions, then one
+benchmark run per `[concurrency, prompts]` pair, random prompts of 1024 tokens in and 512 out:
 
 ```toml
 [variants.a6.quality]
 gsm8k = 200
 bench = [[1, 8], [16, 64], [64, 256]]
 ```
+
+- `sglang`: its own `run_eval` (5-shot, 16k token budget) and `bench_serving`. The verdict also carries the
+  speculative accept length, the per-request mean over GSM8K.
+- `vllm`: `pod/gsm8k_chat.py` and `vllm bench serve`. GSM8K is 5-shot from the first 5 train examples, greedy,
+  through `/v1/chat/completions`, scored on the last number in each reply, with every reply kept in
+  `<variant>/gsm8k_responses.jsonl`; the data is openai/grade-school-math at a pinned commit, checked against pinned
+  sha256s and cached in `/workspace/gsm8k`. `max_tokens` is the smaller of `GSM8K_MAX_TOKENS` (default 4096) and
+  `max_model_len - 2048` from `/v1/models`, and under 256 fails the run: vLLM refuses a prompt plus `max_tokens`
+  over `max_model_len`, and a model generating garbage runs every reply to the cap. Each reply is written as it
+  lands. A request that times out (after 600 s plus 0.25 s per `max_tokens`, or `GSM8K_TIMEOUT_S`) scores as wrong
+  and is counted (a model that never stops ends on `max_tokens`, so a timeout means a slow server; read
+  `timed_out` next to the score), and a run where every request timed out has no score; one that fails (a 5xx or
+  dropped connection after 3 tries, any other error at once) fails the run. The verdict's `gsm8k_counts` carries the
+  counts behind the score: `hit_max_tokens` (with the stop on `Question:` a healthy reply ends on its own, so this
+  flags garbage even after a right answer), `no_number`, `empty_content` (a reasoning model cut off mid-thought;
+  its reasoning is kept in the row but never scored), `timed_out`, `failed`, and `retried`. `gsm8k` is at most
+  1319, and the benchmark loads its tokenizer from `server.model`, so that has to be the checkpoint's id or path,
+  not a `--served-model-name` alias. `vllm bench serve` has no tokenizer revision flag at v0.25.1 or v0.31.0, so for
+  a server pinned with `--revision` the prompts still come from the main revision's tokenizer; both versions then
+  trim any prompt that the server's own tokenizer reads as longer than 1024 tokens.
+
+Either way a GSM8K request that failed, or a benchmark that completed fewer requests than it sent, is `POST_FAIL`,
+not a low score or a slow run.
+
+Quality and `post_smoke` (below) have to finish inside `serve_variant.sh`'s outer limit of
+`server.boot_timeout_s + 3600` seconds, which also covers the boot and the smoke test; a run still going at that
+point ends as `TIMEOUT`. A model generating garbage runs every GSM8K reply to `max_tokens` (4096 by default), which
+is slow, so keep `gsm8k` around 200 or lower on a variant suspected of it.
+
+`hooks.sh` is sourced before each variant and may define any of:
+
+- `pre_launch <run_dir>`: before the server starts.
+- `post_smoke <run_dir> <port> <model>`: on the live server after a passing smoke test, after quality when the
+  variant has it, for the issue's own requests (a reporter's exact prompt, long-context prefills). The watchdog
+  that covers quality covers it too: the server exiting, a `fail_pattern` line in its log, or 15 quiet minutes stop
+  it as `POST_FAIL`, and so does a non-zero exit. It still runs after a failed quality; either failing is
+  `POST_FAIL`. A `hook_start` phase line marks where it begins, so a hook can name its own phases freely.
+- `post_stop <run_dir>`: after the server is killed, on every way out.
+
+`pre_launch` and `post_smoke` see the variant's `env`, the variant file's variables (`VARIANT`, `PORT`, `MODEL`,
+...), and `progress <phase> [detail]`, which adds a phase line to the run's progress; both stop at their first
+failing command.
 
 Unknown keys are errors, and every named patch must exist. Variants run in file order when `run` names none.
 Before every variant the pod restores each package any variant of the issue patches, so patches never leak from
@@ -138,8 +180,8 @@ tail -F results/vllm-47990/events.jsonl | grep --line-buffered -oE '"kind":"(pha
 
 Kinds: `budget, quote, reserve, create, ready, setup, variant_start, phase, verdict, pull, terminate, reap, warn,
 error`. A `phase` line carries `variant, phase, detail, t` as `serve_variant.sh` reports each step. A verdict line
-carries `variant, verdict (OK|BOOT_FAIL|SMOKE_FAIL|POST_FAIL|TIMEOUT), boot_s, fault, where, gsm8k, accept,
-tok_s, result`. An `error` line for a pod that is still up adds `pod, id, deadline, deadline_local, next`.
+carries `variant, verdict (OK|BOOT_FAIL|SMOKE_FAIL|POST_FAIL|TIMEOUT), boot_s, fault, where, gsm8k, gsm8k_counts,
+accept, tok_s, result`. An `error` line for a pod that is still up adds `pod, id, deadline, deadline_local, next`.
 
 ## On the pod
 
@@ -156,4 +198,4 @@ shellcheck pod/*.sh tests/pod/*.sh
 ```
 
 `cargo test` also runs the bash tests in `tests/pod/` (watchdog, package snapshot, `serve_variant.sh` against a
-fake server, and stage 2 log replay) and the job start and poll scripts in local bash.
+fake server with both quality protocols, and stage 2 log replay) and the job start and poll scripts in local bash.

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Prints the verdict line for a finished variant run: serve_and_smoke's RESULT line plus what the run's logs say.
 # Usage: verdict.sh <run_dir> <variant> <result_line>
-# Output: exactly one JSON object with variant, verdict, boot_s, fault, where, gsm8k, accept, tok_s, result, and
-# verdict_error (null, or what could not be parsed). A run is only counted once a verdict line exists, so a log or
-# result file of an unexpected shape must still produce one.
+# Output: exactly one JSON object with variant, verdict, boot_s, fault, where, gsm8k, gsm8k_counts, accept, tok_s,
+# result, and verdict_error (null, or what could not be parsed). A run is only counted once a verdict line exists,
+# so a log or result file of an unexpected shape must still produce one.
 set -euo pipefail
 
 usage="usage: $0 <run_dir> <variant> <result_line>"
@@ -30,12 +30,17 @@ where=$(awk '
     /illegal memory access|cudaErrorIllegalAddress|CUDA error: / && f != "" { c = f; exit }
     /Error: / && g == "" && f != "" { g = f }
     END { w = (c != "" ? c : g); sub(/.*\//, "", w); print w }' "$log" 2>/dev/null || true)
-# The per-request mean over GSM8K only; the server log's last value would come from whatever bench ran last.
+# The per-request mean over GSM8K only; the server log's last value would come from whatever bench ran last. Only
+# sglang's run_eval logs it; gsm8k_chat.py (vllm) writes the same Score line and no accept length.
 accept=$(grep -a -m1 -oE 'from meta_info\): n=[0-9]+ mean=[0-9.]+' "$run_dir/gsm8k.txt" 2>/dev/null \
     | sed 's/.*mean=//' || true)
 score=$(grep -a -m1 -oE '^Score: [0-9.]+' "$run_dir/gsm8k.txt" 2>/dev/null | awk '{print $2}' || true)
+# gsm8k_chat.py's counts. A score alone hides a reply that was right and then ran on as garbage to max_tokens, and
+# retries that hid a server's intermittent errors. run_eval writes no such line, so sglang's gsm8k_counts is null.
+counts=$(grep -a -m1 -E '^gsm8k: answered=' "$run_dir/gsm8k.txt" 2>/dev/null || true)
 
-if line=$(python3 -I - "$variant" "$result" "${fault:0:200}" "$where" "$score" "$accept" "$run_dir/bench.jsonl" <<'EOF'
+if line=$(python3 -I - "$variant" "$result" "${fault:0:200}" "$where" "$score" "$accept" "$counts" \
+    "$run_dir/bench.jsonl" <<'EOF'
 import json
 import os
 import re
@@ -48,7 +53,7 @@ def text(value):
     return value.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
 
 
-variant, result, fault, where, score, accept, bench = (text(arg) for arg in sys.argv[1:])
+variant, result, fault, where, score, accept, counts, bench = (text(arg) for arg in sys.argv[1:])
 errors = []
 
 
@@ -59,6 +64,16 @@ def number(name, value):
         return float(value)
     except ValueError:
         errors.append(f"gsm8k.txt {name}: not a number: {value!r}")
+        return None
+
+
+def tally(line):
+    if not line:
+        return None
+    try:
+        return {key: int(value) for key, value in (word.split("=", 1) for word in line.split()[1:])}
+    except ValueError as e:
+        errors.append(f"gsm8k.txt counts: {e}: {line!r}")
         return None
 
 
@@ -86,6 +101,7 @@ print(json.dumps({
     "fault": fault or None,
     "where": where or None,
     "gsm8k": number("score", score),
+    "gsm8k_counts": tally(counts),
     "accept": number("accept length", accept),
     "tok_s": speeds(bench),
     "result": result,

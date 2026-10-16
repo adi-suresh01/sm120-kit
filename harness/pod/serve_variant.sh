@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # Runs one variant rendered by `harness exec`: restores every snapshotted package, applies the variant's patches,
-# waits for idle GPUs, boots and smoke-tests the server, runs quality.sh on the live server when asked, and writes
-# one verdict.
+# waits for idle GPUs, boots and smoke-tests the server, runs quality.sh and the post_smoke hook on the live server
+# when asked (see post_smoke.sh), and writes one verdict.
 # Usage: serve_variant.sh <issue_dir> <variant_file> <results_dir>
 #   <variant_file>  sets VARIANT, PACKAGE, MODEL, PORT, FAIL_PATTERN, BOOT_TIMEOUT, CONCURRENCY, GSM8K, and the
 #                   arrays SERVER_CMD, VARIANT_ENV, BENCH, SNAPSHOT_PKGS (the server package first, then every
 #                   package any variant of the issue patches), and PATCH_FILES, PATCH_PKGS, PATCH_STRIPS (patch i
 #                   is <issue_dir>/patches/<PATCH_FILES[i]>.diff, applied to the import name PATCH_PKGS[i] at
 #                   -p<PATCH_STRIPS[i]>)
-#   <issue_dir>/hooks.sh, when present, may define pre_launch and post_stop; each gets the run directory.
+#   <issue_dir>/hooks.sh, when present, may define pre_launch <run_dir> (before the boot), post_smoke <run_dir>
+#                   <port> <model> (on the live server, after quality), and post_stop <run_dir> (after the kill).
 # Writes <results_dir>/<variant>/verdict.json, appends the same line to <results_dir>/verdicts.jsonl, and appends
 # phase lines (see progress.sh) to <results_dir>/<variant>/progress.jsonl, the verdict line last.
 set -euo pipefail
@@ -16,7 +17,8 @@ set -euo pipefail
 usage="usage: $0 <issue_dir> <variant_file> <results_dir>"
 here=$(cd "$(dirname "$0")" && pwd)
 issue_dir=$(cd "${1:?$usage}" && pwd)
-variant_file=${2:?$usage}
+# Absolute, since post_smoke.sh sources it again after pre_launch, which may change directory.
+variant_file=$(cd "$(dirname "${2:?$usage}")" && pwd)/$(basename "$2")
 results_dir=$(mkdir -p "${3:?$usage}" && cd "$3" && pwd)
 # shellcheck source=/dev/null
 source "$variant_file"
@@ -83,8 +85,8 @@ if (( ${#VARIANT_ENV[@]} )); then
 fi
 
 post=""
-if [[ -n $GSM8K ]]; then
-    post=$(printf '%q ' bash "$here/quality.sh" "$PORT" "$run_dir" "$GSM8K" "${BENCH[@]}")
+if [[ -n $GSM8K ]] || declare -F post_smoke >/dev/null; then
+    post=$(printf '%q ' bash "$here/post_smoke.sh" "$issue_dir" "$variant_file" "$results_dir")
 fi
 
 progress idle_wait

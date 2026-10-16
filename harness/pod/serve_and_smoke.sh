@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Boots an OpenAI-compatible server, sends one chat request, and reports a single verdict line:
 #   RESULT=OK | RESULT=BOOT_FAIL | RESULT=SMOKE_FAIL | RESULT=POST_FAIL | RESULT=TIMEOUT
-# POST_SMOKE="<command>" runs after a passing smoke test while the server is still up; its output goes to
-# <log_file minus .log>.post.log. It is stopped as POST_FAIL if the server dies, the log matches FAIL_PATTERN,
-# or the log goes quiet for STALL_MINUTES (default 15).
+# POST_SMOKE="<command>" runs after a passing smoke test while the server is still up, in a session of its own; its
+# output goes to <log_file minus .log>.post.log. It is stopped as POST_FAIL if the server dies, the log matches
+# FAIL_PATTERN, or the log goes quiet for STALL_MINUTES (default 15). Whatever it started is ended when this script
+# exits, however it exits.
 # FAIL_PATTERN="<ERE>" ends the boot wait as soon as the log matches it, reported as BOOT_FAIL exit_code=pattern.
 # PROGRESS_FILE, when set, gets the boot, smoke, and quality phases (see progress.sh).
 # BOOT_POLL_S, POST_POLL_S, STOP_POLL_S (default 5, 10, 1) set the polling intervals; tests shorten them.
@@ -41,7 +42,29 @@ stop_server() {
     kill -9 "$server_pid" 2>/dev/null || true
     wait "$server_pid" 2>/dev/null || true
 }
-trap stop_server EXIT
+
+# POST_SMOKE's clients sit several processes down, and a hook can background one or leave one whose parent died; a
+# walk of the process tree misses those and races a parent that starts its next step. setsid makes POST_SMOKE's pid
+# the id of a process group that holds all of it (as a background job of a shell without job control it is no group
+# leader, so setsid does not fork). The outer timeout signals only its own group, so this runs on every exit: an
+# orphan left running could hit the next variant's server on the same port.
+post_pid=""
+stop_post() {
+    if [[ -z $post_pid ]] || ! kill -TERM -- "-$post_pid" 2>/dev/null; then
+        return 0
+    fi
+    for _ in $(seq 50); do
+        kill -0 -- "-$post_pid" 2>/dev/null || return 0
+        sleep 0.1
+    done
+    kill -KILL -- "-$post_pid" 2>/dev/null || true
+}
+# The post group goes first: the outer timeout kills this script 30 s after its TERM, and stop_server can take
+# longer than that.
+trap 'stop_post; stop_server' EXIT
+# GNU timeout sends TERM to this script and then to its group; bash dying of that second signal often skips the EXIT
+# trap, which would leave the post group running. Exiting on the signal makes the EXIT trap run.
+trap 'exit 143' TERM INT HUP
 
 fatal_in_log() {
     [[ -n ${FAIL_PATTERN:-} ]] && grep -qE "$FAIL_PATTERN" "$log_file"
@@ -106,7 +129,7 @@ progress smoke_ok "requests=${concurrency}"
 # clients retry a dead server for up to an hour, so the server is watched while they run.
 if [[ -n ${POST_SMOKE:-} ]]; then
     progress quality_start
-    bash -c "$POST_SMOKE" >"${log_file%.log}.post.log" 2>&1 &
+    setsid bash -c "$POST_SMOKE" >"${log_file%.log}.post.log" 2>&1 &
     post_pid=$!
     stall_minutes=${STALL_MINUTES:-15}
     while kill -0 "$post_pid" 2>/dev/null; do
@@ -119,8 +142,7 @@ if [[ -n ${POST_SMOKE:-} ]]; then
             reason=stall
         fi
         if [[ -n $reason ]]; then
-            pkill -P "$post_pid" 2>/dev/null || true
-            kill "$post_pid" 2>/dev/null || true
+            stop_post
             progress quality_done "post_exit=${reason}"
             echo "RESULT=POST_FAIL boot_seconds=${boot_seconds} requests=${concurrency} post_exit=${reason}"
             exit 1
