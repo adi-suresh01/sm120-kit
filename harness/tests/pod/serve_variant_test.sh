@@ -6,7 +6,7 @@
 # answers, HTTP 500s, a retried failure, a timeout, right answers that run on as garbage, a reasoning model cut off
 # mid-thought, a fault mid-GSM8K, a max_model_len too short to answer in, a fixture hash mismatch, hash overrides on
 # pod data, a bench run that drops a request, and one that fails outright. Last, an issue whose hooks.sh defines post_smoke: alone, failing, after quality, under
-# a server that dies, and leaving a process running behind it.
+# a server that dies, leaving a process running behind it, and holding the server up while the memory guard fires.
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -58,6 +58,13 @@ EOF
 chmod +x "$work/bin/"*
 export PATH="$work/bin:$PATH" PYTHONPATH="$work/site" PKG_SNAPSHOT_DIR="$work/snap" WORK="$work"
 export BOOT_POLL_S=0.2 POST_POLL_S=0.2 STOP_POLL_S=0.1
+# Every run's memory guard reads a fake cgroup at 10% of its limit; the hook-guard run raises it over the kill line.
+# HF_HOME keeps its trims off this machine's own HF cache.
+mkdir -p "$work/cgroup"
+echo 1000000 >"$work/cgroup/memory.max"
+echo 100000 >"$work/cgroup/memory.current"
+printf 'anon 1\nfile 2\n' >"$work/cgroup/memory.stat"
+export MEM_GUARD_CGROUP="$work/cgroup" MEM_GUARD_POLL_S=0.1 HF_HOME="$work/hf"
 cat >"$work/issue/hooks.sh" <<'EOF'
 pre_launch() { printf '%s|%s|%s\n' "$1" "${FAKE_ENV:-}" "$(cat "$WORK/site/fakeinfer/core.py")" >>"$WORK/pre.txt"; }
 post_stop() { printf '%s\n' "$1" >>"$WORK/post.txt"; }
@@ -165,7 +172,13 @@ grep -q 'patched' "$work/site/fakeinfer/core.py" || fail "fakeinfer patch not ap
 grep -q "^$work/results/healthy|from the variant|" "$work/pre.txt" || fail "pre_launch did not see the run dir and env"
 [[ $(wc -l <"$work/post.txt") -eq 1 ]] || fail "post_stop should run once"
 phases healthy "restore patch patch idle_wait launch boot_ok smoke_ok quality_start quality_done stop"
-echo "ok: healthy boot with quality, a patch to each of two packages, hooks, and progress"
+field healthy mem_guard None
+grep -q '"current": 100000, "max": 1000000' "$work/results/healthy/memory.jsonl" || fail "healthy: the guard logged nothing"
+[[ -f $work/results/healthy/mem_guard.log ]] || fail "healthy: no mem_guard.log"
+if pgrep -f "mem_guard[.]py $work/results/healthy" >/dev/null; then
+    fail "healthy: the memory guard outlived its run"
+fi
+echo "ok: healthy boot with quality, a patch to each of two packages, hooks, progress, and a guard that only logged"
 
 write_variant faulty fatal "" ""
 serve faulty
@@ -401,6 +414,13 @@ post_smoke() {
     if [[ ${HOOK:-} == background ]]; then
         sleep 28.456 &
     fi
+    if [[ ${HOOK:-} == guard ]]; then
+        # Over the kill line only now, so the guard fires on a live server under this hook.
+        echo 950000 >"$WORK/cgroup/memory.current"
+        for _ in $(seq 100); do
+            sleep 0.1
+        done
+    fi
     printf '%s|%s|%s|%s|%s\n' "$1" "$2" "$3" "$VARIANT" "${HOOK:-}" >"$1/hook.txt"
     curl -sf -w '\n' "http://127.0.0.1:$2/health" >>"$1/hook.txt"
     if [[ -f $1/gsm8k.txt ]]; then
@@ -467,13 +487,39 @@ if pgrep -fx 'sleep 28.456' >/dev/null; then
 fi
 echo "ok: a process post_smoke leaves running behind it is ended with the run"
 
-[[ $(wc -l <"$work/results/verdicts.jsonl") -eq 24 ]] || fail "verdicts.jsonl should hold one line per run"
-cmp -s <(tail -n 1 "$work/results/verdicts.jsonl") "$work/results/hook-bg/verdict.json" || fail "verdict.json differs"
+# The hook raises the usage over the kill line under a live server. The guard kills the server by its pid, not the
+# pkill stand-in, so serve_and_smoke.sh and the timeout above it live on to report.
+write_variant hook-guard ok "" "HOOK=guard"
+serve hook-guard
+echo 100000 >"$work/cgroup/memory.current"
+guarded=$work/results/hook-guard
+field hook-guard verdict "'POST_FAIL'"
+grep -q '"result": "RESULT=POST_FAIL boot_seconds=[0-9]* requests=2 post_exit=server_exit"' "$guarded/verdict.json" \
+    || fail "hook-guard: serve_and_smoke.sh did not report the server's death"
+grep -q '"mem_guard": "fired [0-9T:-]*Z: memory.current 0.0 GiB is 95.0% of memory.max 0.0 GiB' \
+    "$guarded/verdict.json" || fail "hook-guard: the verdict does not carry the guard's reading"
+grep -qx "SIGKILL sent to \[$(<"$guarded/server.pid")\]" "$guarded/memory_guard.txt" \
+    || fail "hook-guard: the guard did not kill the server by its pid"
+grep -q '"phase": "mem_guard", "t": [0-9]*, "detail": "fired ' "$guarded/progress.jsonl" \
+    || fail "hook-guard: no mem_guard phase"
+cmp -s <(tail -n 1 "$guarded/progress.jsonl") "$guarded/verdict.json" \
+    || fail "hook-guard: the verdict is not the last progress line"
+grep -q '"fired": true' "$guarded/memory.jsonl" || fail "hook-guard: memory.jsonl has no fired line"
+grep -q '"after_kill": {"live": \[\]' "$guarded/memory.jsonl" || fail "hook-guard: the server outlived the kill"
+grep -q '"after_drop": {' "$guarded/memory.jsonl" || fail "hook-guard: no cache drop after the kill"
+echo "ok: a guard that fires kills the server alone, and the run ends as POST_FAIL with the guard in its verdict"
+
+[[ $(wc -l <"$work/results/verdicts.jsonl") -eq 25 ]] || fail "verdicts.jsonl should hold one line per run"
+cmp -s <(tail -n 1 "$work/results/verdicts.jsonl") "$work/results/hook-guard/verdict.json" \
+    || fail "verdict.json differs"
 if pgrep -f "$here/fake_server.py" >/dev/null; then
     fail "a fake server outlived its run"
 fi
+if pgrep -f "mem_guard[.]py $work" >/dev/null; then
+    fail "a memory guard outlived its run"
+fi
 [[ $(grep -cxF -- '-9 -f [s]glang[.]launch_server|[s]glang::' "$work/pkill.log") -eq 5 ]] \
     || fail "each sglang run should clean up the server pattern once"
-[[ $(grep -cxF -- '-9 -f [v]llm serve|[V]LLM::' "$work/pkill.log") -eq 19 ]] \
+[[ $(grep -cxF -- '-9 -f [v]llm serve|[V]LLM::' "$work/pkill.log") -eq 20 ]] \
     || fail "each vllm run should clean up the server pattern once"
-echo "ok: one verdict line per run, one cleanup per run, and no server left behind"
+echo "ok: one verdict line per run, one cleanup per run, and no server or guard left behind"

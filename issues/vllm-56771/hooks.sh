@@ -12,7 +12,7 @@ post_smoke() {
 # Core dumps are tens of GB, so only their names and sizes come back with the results.
 post_stop() {
     local run_dir=$1
-    ls -la /workspace/cores >"$run_dir/cores.txt" 2>&1 || true
+    ls -la /root/cores >"$run_dir/cores.txt" 2>&1 || true
     grep -E 'SpecDecoding metrics|Mean acceptance length|Avg prompt throughput' "$run_dir/server.log" \
         | tail -n 20 >"$run_dir/spec_metrics.txt" || true
 }

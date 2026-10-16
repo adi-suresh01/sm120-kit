@@ -231,6 +231,28 @@ fn a_reply_cut_off_mid_body_is_retried_like_a_network_error() {
 }
 
 #[test]
+fn a_single_pod_read_never_retries_or_sleeps() {
+    let server = FixtureServer::start(vec![
+        Step::HangUp,
+        Step::Reply(404, r#"{"status":404}"#),
+        Step::Reply(200, RUNNING),
+    ]);
+    let clock = FakeClock::at("2026-10-16T17:03:00Z");
+    let api = RunpodRest::new(&server.base, "k", &clock);
+    assert!(matches!(
+        api.get_pod_once("kfyqcddi6nefdp"),
+        Err(CloudError::Network(_))
+    ));
+    assert!(api.get_pod_once("kfyqcddi6nefdp").unwrap().is_none());
+    assert_eq!(
+        api.get_pod_once("kfyqcddi6nefdp").unwrap().unwrap().id,
+        "kfyqcddi6nefdp"
+    );
+    assert!(clock.slept.borrow().is_empty());
+    assert_eq!(server.seen().len(), 3);
+}
+
+#[test]
 fn a_whole_reply_that_is_not_json_is_a_decode_error_and_not_retried() {
     let server = FixtureServer::start(vec![
         Step::Reply(200, "<html>maintenance</html>"),

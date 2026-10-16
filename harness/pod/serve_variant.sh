@@ -12,6 +12,9 @@
 #                   <port> <model> (on the live server, after quality), and post_stop <run_dir> (after the kill).
 # Writes <results_dir>/<variant>/verdict.json, appends the same line to <results_dir>/verdicts.jsonl, and appends
 # phase lines (see progress.sh) to <results_dir>/<variant>/progress.jsonl, the verdict line last.
+# From the launch to the kill, mem_guard.py watches the container's memory (memory.jsonl, mem_guard.log, and
+# memory_guard.txt when it fires, in <results_dir>/<variant>); MEM_GUARD_POLL_S, MEM_GUARD_TRIM_FRACTION, and
+# MEM_GUARD_KILL_FRACTION in the variant's env tune it.
 set -euo pipefail
 
 usage="usage: $0 <issue_dir> <variant_file> <results_dir>"
@@ -60,10 +63,29 @@ if [[ -f $issue_dir/hooks.sh ]]; then
     source "$issue_dir/hooks.sh"
 fi
 
+guard_pid=""
+# A guard left running would write into this run's files after its verdict. On SIGTERM it exits at once, or finishes
+# a kill in progress well inside the 5 s here; one stuck in a read on a wedged FUSE mount cannot die until the read
+# returns, so the run does not wait on it past the SIGKILL.
+stop_guard() {
+    if [[ -z $guard_pid ]]; then
+        return 0
+    fi
+    kill "$guard_pid" 2>/dev/null || true
+    for _ in $(seq 50); do
+        kill -0 "$guard_pid" 2>/dev/null || break
+        sleep 0.1
+    done
+    kill -9 "$guard_pid" 2>/dev/null || true
+    guard_pid=""
+}
+
 # Scheduler and detokenizer children can outlive the launcher after a fault and hold GPU memory, which would fail
-# the next variant's idle check.
+# the next variant's idle check. The guard goes first, so it writes nothing after the verdict. pkill reads every
+# process's command line, which blocks on a process stuck in a page fault, so it is bounded.
 cleanup() {
-    pkill -9 -f "$server_procs" || true
+    stop_guard
+    timeout -s KILL 30 pkill -9 -f "$server_procs" || true
     if declare -F post_stop >/dev/null; then
         post_stop "$run_dir" || true
     fi
@@ -94,6 +116,12 @@ bash "$here/wait_gpu_idle.sh" 300
 if declare -F pre_launch >/dev/null; then
     pre_launch "$run_dir"
 fi
+# RunPod stops a container at about 98% of its memory limit and removes it with every log on it. The guard records
+# what fills the memory, drops the weights from the page cache, and ends the server before that (see mem_guard.py).
+# huggingface_hub keeps the weights in HF_HUB_CACHE, by default HF_HOME's hub.
+hub_cache=${HF_HUB_CACHE:-${HF_HOME:-$HOME/.cache/huggingface}/hub}
+python3 -I "$here/mem_guard.py" "$run_dir" "$$" "$hub_cache" >"$run_dir/mem_guard.log" 2>&1 &
+guard_pid=$!
 launch_cmd=("${SERVER_CMD[@]}" --host 127.0.0.1 --port "$PORT")
 progress launch "${launch_cmd[*]}"
 echo ">>> $VARIANT patches=[${PATCH_FILES[*]}]: ${launch_cmd[*]}"

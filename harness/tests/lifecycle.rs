@@ -1190,6 +1190,154 @@ fn a_variant_pulls_only_its_own_results_into_a_cleared_folder() {
     );
 }
 
+fn exec_baseline(w: &World, live: &pod::LivePod) -> anyhow::Result<()> {
+    let spec = w.spec();
+    w.with(|ctx| exec::exec(ctx, &spec, live, &["baseline".to_string()]))
+}
+
+/// Polls of the baseline variant's job, answered or not.
+fn variant_polls(w: &World) -> usize {
+    w.remote
+        .scripts
+        .borrow()
+        .iter()
+        .filter(|s| s.contains(".exit ]]") && s.contains("baseline/progress.jsonl"))
+        .count()
+}
+
+#[test]
+fn a_running_variant_is_pulled_every_five_minutes() {
+    let w = World::default();
+    w.remote.variant_polls.set(65);
+    run(&w, &[]).unwrap();
+    let events: Vec<serde_json::Value> = w
+        .events()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let at = |event: &serde_json::Value| event["ts"].as_str().unwrap().parse::<jiff::Timestamp>().unwrap();
+    let start = events.iter().position(|e| e["kind"] == "variant_start").unwrap();
+    let pulls: Vec<(i64, serde_json::Value)> = events[start..]
+        .iter()
+        .filter(|e| e["kind"] == "pull")
+        .map(|e| (at(e).duration_since(at(&events[start])).as_secs(), e["paths"].clone()))
+        .collect();
+    let so_far = serde_json::json!(["results/vllm-47990/baseline"]);
+    let last = serde_json::json!([
+        "results/vllm-47990/baseline",
+        "results/vllm-47990/jobs",
+        "results/vllm-47990/verdicts.jsonl"
+    ]);
+    // Polls come 10 s apart and the variant answers 65 of them; `down` pulls everything once more.
+    assert_eq!(
+        pulls,
+        [
+            (300, so_far.clone()),
+            (600, so_far),
+            (650, last),
+            (650, serde_json::json!(["results/vllm-47990"]))
+        ]
+    );
+    let limits: Vec<Duration> = w
+        .remote
+        .downloads
+        .borrow()
+        .iter()
+        .filter(|(paths, _)| paths.len() == 1 && paths[0].ends_with("/baseline"))
+        .map(|(_, limit)| *limit)
+        .collect();
+    assert_eq!(limits, [Duration::from_secs(120); 2]);
+    assert_down(&w);
+}
+
+#[test]
+fn a_pod_stopped_mid_variant_ends_the_wait_and_keeps_what_the_pulls_brought_back() {
+    let w = World::default();
+    let live = w.up().unwrap();
+    let id = live.entry.id.clone().unwrap();
+    let stale = w.repo.path().join("results/vllm-47990/baseline/stale.log");
+    fs::create_dir_all(stale.parent().unwrap()).unwrap();
+    fs::write(&stale, "from an earlier attempt").unwrap();
+    // As on vllm-56771 attempt 6: the variant hangs, one pull at 300 s brings its log back, then RunPod stops the
+    // container.
+    w.cloud.set_status(&id, PodStatus::Exited);
+    w.remote.variant_hangs.set(true);
+    w.remote.downloads_write.set(true);
+    w.remote.die_after(35);
+    let err = err_text(exec_baseline(&w, &live));
+    assert!(
+        err.contains(&format!(
+            "RunPod reports pod {} (id {id}) Exited while variant-baseline ran: its container is gone",
+            live.entry.name
+        )),
+        "{err}"
+    );
+    assert!(
+        err.contains("run `harness down vllm-47990`, since a stopped pod still bills its disk"),
+        "{err}"
+    );
+    assert_eq!(variant_polls(&w), 36, "the first failed poll ends the wait");
+    let downloads: Vec<usize> = w
+        .remote
+        .downloads
+        .borrow()
+        .iter()
+        .map(|(paths, _)| paths.len())
+        .collect();
+    assert_eq!(
+        downloads,
+        [1, 1, 3],
+        "setup, the pull while running, and the last pull, which fails"
+    );
+    assert!(w.events().contains("pull failed"));
+    // Cleared when the variant started, and not again by the last pull that failed.
+    assert!(!stale.exists());
+    let log = w.repo.path().join("results/vllm-47990/baseline/server.log");
+    assert_eq!(fs::read_to_string(log).unwrap(), "pull 2");
+}
+
+#[test]
+fn a_pod_runpod_no_longer_lists_ends_the_wait_on_the_first_failed_poll() {
+    let w = World::default();
+    let live = w.up().unwrap();
+    let id = live.entry.id.clone().unwrap();
+    w.cloud.remove_outside_harness(&id);
+    w.remote.die_after(0);
+    let err = err_text(exec_baseline(&w, &live));
+    assert!(
+        err.contains(&format!(
+            "RunPod no longer lists pod {} (id {id}) while variant-baseline ran",
+            live.entry.name
+        )),
+        "{err}"
+    );
+    assert_eq!(variant_polls(&w), 1);
+}
+
+#[test]
+fn failed_polls_of_a_pod_runpod_shows_running_or_cannot_read_wait_out_the_limit() {
+    // Running, a GET that fails, and a GET that answers 404 for a pod the list still shows.
+    for (cloud_fails, get_not_found) in [(false, false), (true, false), (false, true)] {
+        let w = World::default();
+        let live = w.up().unwrap();
+        w.remote.die_after(0);
+        if cloud_fails {
+            w.cloud.0.borrow_mut().get_error = Some(503);
+        }
+        w.cloud.0.borrow_mut().get_not_found = get_not_found;
+        let err = err_text(exec_baseline(&w, &live));
+        assert!(
+            err.contains("lost contact with the pod while variant-baseline ran"),
+            "{err}"
+        );
+        assert_eq!(variant_polls(&w), 30);
+        let warned = w
+            .events()
+            .contains("after a failed poll failed: RunPod API returned 503");
+        assert_eq!(warned, cloud_fails);
+    }
+}
+
 #[test]
 fn a_progress_line_that_is_not_a_phase_or_verdict_only_warns() {
     let w = World::default();

@@ -8,6 +8,7 @@
 # FAIL_PATTERN="<ERE>" ends the boot wait as soon as the log matches it, reported as BOOT_FAIL exit_code=pattern.
 # PROGRESS_FILE, when set, gets the boot, smoke, and quality phases (see progress.sh).
 # BOOT_POLL_S, POST_POLL_S, STOP_POLL_S (default 5, 10, 1) set the polling intervals; tests shorten them.
+# Writes the server's pid to <log_file minus .log>.pid as it starts it.
 # Usage: serve_and_smoke.sh <log_file> <port> <model> -- <server command...>
 set -euo pipefail
 
@@ -31,6 +32,9 @@ progress() {
 
 "$@" >"$log_file" 2>&1 &
 server_pid=$!
+# mem_guard.py ends the server by this pid and its descendants. Matching command lines would also hit this script
+# and the timeout above it, whose arguments name the server, and lose the RESULT line.
+echo "$server_pid" >"${log_file%.log}.pid"
 
 stop_server() {
     kill "$server_pid" 2>/dev/null || true

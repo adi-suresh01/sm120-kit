@@ -1,5 +1,6 @@
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
+use std::fs;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -28,6 +29,14 @@ pub struct FakeRemote {
     pub files: RefCell<Vec<(String, String)>>,
     pub downloads: RefCell<Vec<(Vec<String>, Duration)>>,
     pub download_fails: Cell<bool>,
+    /// Each download that succeeds writes `pull <n>` to server.log under its first path, as a pull of a live variant
+    /// brings back its log so far.
+    pub downloads_write: Cell<bool>,
+    /// The container is gone once this many polls were answered: later polls and downloads fail, as on a pod RunPod
+    /// stopped.
+    dies_after_polls: Cell<u32>,
+    /// RUNNING replies a variant job gives before it exits.
+    pub variant_polls: Cell<u32>,
     /// The next job is killed without writing an exit code.
     pub job_dies: Cell<bool>,
     /// Variant jobs never exit, like a server that hangs past every timeout.
@@ -60,6 +69,9 @@ impl Default for FakeRemote {
             files: RefCell::new(Vec::new()),
             downloads: RefCell::new(Vec::new()),
             download_fails: Cell::new(false),
+            downloads_write: Cell::new(false),
+            dies_after_polls: Cell::new(u32::MAX),
+            variant_polls: Cell::new(1),
             job_dies: Cell::new(false),
             variant_hangs: Cell::new(false),
             interrupt_on_job: RefCell::new(None),
@@ -109,6 +121,15 @@ impl FakeRemote {
     pub fn download_count(&self) -> usize {
         self.downloads.borrow().len()
     }
+
+    /// The container goes away after `more` further polls are answered.
+    pub fn die_after(&self, more: u32) {
+        self.dies_after_polls.set(self.polls.get() + more);
+    }
+
+    fn dead(&self) -> bool {
+        self.polls.get() >= self.dies_after_polls.get()
+    }
 }
 
 impl Remote for FakeRemote {
@@ -138,7 +159,12 @@ impl Remote for FakeRemote {
         }
         if script.contains("setsid nohup") {
             self.jobs.borrow_mut().push(script.to_string());
-            self.polls_before_exit.set(1);
+            let running = if script.contains("serve_variant.sh") {
+                self.variant_polls.get()
+            } else {
+                1
+            };
+            self.polls_before_exit.set(running);
             self.exit.set(self.exits.borrow_mut().pop_front().unwrap_or(0));
             if let Some(flag) = self.interrupt_on_job.borrow().as_ref() {
                 flag.store(true, Ordering::SeqCst);
@@ -146,6 +172,9 @@ impl Remote for FakeRemote {
             return Ok("STARTED\n".into());
         }
         if script.contains(".exit ]]") {
+            if self.dead() {
+                bail!("ssh: connect to host 203.0.113.7 port 40122: Connection refused");
+            }
             return Ok(self.poll(script));
         }
         Ok(String::new())
@@ -170,12 +199,20 @@ impl Remote for FakeRemote {
         Ok(())
     }
 
-    fn download(&self, _: &Target, paths: &[&str], _: &Path, limit: Duration) -> Result<()> {
+    fn download(&self, _: &Target, paths: &[&str], local_root: &Path, limit: Duration) -> Result<()> {
         self.downloads
             .borrow_mut()
             .push((paths.iter().map(|p| p.to_string()).collect(), limit));
+        if self.dead() {
+            bail!("pulling {paths:?} failed (ssh: connect to host 203.0.113.7 port 40122: Connection refused)");
+        }
         if self.download_fails.get() {
             bail!("pulling {paths:?} ran past its {limit:?} limit and was killed");
+        }
+        if self.downloads_write.get() {
+            let dir = local_root.join(paths[0]);
+            fs::create_dir_all(&dir)?;
+            fs::write(dir.join("server.log"), format!("pull {}", self.download_count()))?;
         }
         Ok(())
     }

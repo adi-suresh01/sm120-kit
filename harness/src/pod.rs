@@ -19,7 +19,7 @@ use crate::cloud::{
 };
 use crate::events::{Events, Kind};
 use crate::ledger::{ADOPT_WINDOW, Ledger, LedgerStore, PodEntry, PodState, check_accounts};
-use crate::session::{Remote, TRANSFER_LIMIT, Target, start_job, wait_job};
+use crate::session::{Remote, TRANSFER_LIMIT, Target, Watch, start_job, wait_job};
 use crate::spec::IssueSpec;
 
 pub const ENTRYPOINT: &str = include_str!("../pod/entrypoint.sh");
@@ -755,7 +755,11 @@ fn setup(ctx: &Ctx, spec: &IssueSpec, entry: &PodEntry, target: &Target, run_set
         command.push_str(&format!(" && bash issues/{issue}/setup.sh"));
     }
     start_job(ctx.remote, target, issue, "setup", &command)?;
-    let code = wait_job(ctx, issue, entry, target, "setup", "/dev/null", &mut |_| {})?;
+    let watch = Watch {
+        on_line: &mut |_| {},
+        every: None,
+    };
+    let code = wait_job(ctx, issue, entry, target, "setup", "/dev/null", watch)?;
     if let Err(e) = pull(ctx, issue, target, TRANSFER_LIMIT) {
         ctx.warn(issue, format!("pulling setup output failed: {e:#}"));
     }

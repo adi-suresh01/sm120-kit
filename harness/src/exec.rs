@@ -1,6 +1,7 @@
 use std::fmt::Write as _;
 use std::fs;
 use std::io::ErrorKind;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
@@ -8,7 +9,7 @@ use serde_json::{Value, json};
 use crate::events::Kind;
 use crate::pod::{self, AfterFailure, Ctx, LivePod, StillLive};
 use crate::reap;
-use crate::session::{TRANSFER_LIMIT, shell_quote, start_job, wait_job};
+use crate::session::{TRANSFER_LIMIT, Watch, shell_quote, start_job, wait_job};
 use crate::spec::{IssueSpec, Variant};
 
 /// The variant as a bash file that `serve_variant.sh` sources. Every value is single-quoted, so spaces, quotes,
@@ -130,6 +131,12 @@ fn run_planned(ctx: &Ctx, spec: &IssueSpec, live: &LivePod, planned: &[Planned])
     Ok(())
 }
 
+/// How often a running variant's results come back, so a container that dies mid-run (RunPod stops one at about 98%
+/// of its memory limit) leaves the run's logs up to then on the laptop.
+const PULL_EVERY: Duration = Duration::from_secs(5 * 60);
+/// A pull while the variant runs holds up its polls; the pull after it gets the full transfer limit.
+const PULL_WHILE_RUNNING: Duration = Duration::from_secs(2 * 60);
+
 fn run_variant(ctx: &Ctx, spec: &IssueSpec, live: &LivePod, planned: &Planned) -> Result<()> {
     let issue = spec.issue.as_str();
     let variant = planned.variant;
@@ -138,6 +145,7 @@ fn run_variant(ctx: &Ctx, spec: &IssueSpec, live: &LivePod, planned: &Planned) -
     // The first poll can come before serve_variant.sh clears the last attempt, so its progress goes first.
     ctx.remote
         .run(&live.target, &format!("rm -rf results/{issue}/{name}"))?;
+    clear_local(ctx, issue, name)?;
     ctx.remote.write_file(&live.target, &file, &planned.rendered)?;
     ctx.events.emit(
         Some(issue),
@@ -149,14 +157,25 @@ fn run_variant(ctx: &Ctx, spec: &IssueSpec, live: &LivePod, planned: &Planned) -
     start_job(ctx.remote, &live.target, issue, &job, &command)?;
     let mut verdicts = 0;
     let progress = format!("results/{issue}/{name}/progress.jsonl");
-    let code = wait_job(ctx, issue, &live.entry, &live.target, &job, &progress, &mut |line| {
-        if progress_line(ctx, issue, name, line) {
-            verdicts += 1;
-        }
-    })?;
+    let so_far = [format!("results/{issue}/{name}")];
+    let watch = Watch {
+        on_line: &mut |line| {
+            if progress_line(ctx, issue, name, line) {
+                verdicts += 1;
+            }
+        },
+        every: Some((PULL_EVERY, &mut || {
+            if let Err(e) = pod::pull_paths(ctx, issue, &live.target, &so_far, PULL_WHILE_RUNNING) {
+                ctx.warn(issue, format!("pull while {name} runs failed: {e:#}"));
+            }
+        })),
+    };
+    let waited = wait_job(ctx, issue, &live.entry, &live.target, &job, &progress, watch);
+    // Also after a lost job or a stopped pod: whatever the pod still holds is all that is left of the run.
     if let Err(e) = pull_variant(ctx, issue, live, name) {
         ctx.warn(issue, format!("pull failed: {e:#}"));
     }
+    let code = waited?;
     // A server crash is a verdict (BOOT_FAIL); a variant that never reached one is a harness error.
     ensure!(
         code == 0 && verdicts == 1,
@@ -193,17 +212,19 @@ fn progress_line(ctx: &Ctx, issue: &str, variant: &str, line: &str) -> bool {
     }
 }
 
-/// Only this variant's results, the job logs, and the verdict table come back, so a long session does not pull
-/// every earlier variant again. The local copy of the variant is cleared first, so files from an earlier attempt
-/// cannot mix with this one.
-fn pull_variant(ctx: &Ctx, issue: &str, live: &LivePod, variant: &str) -> Result<()> {
+/// Files from an earlier attempt must not mix with this one's. The local copy is cleared before the run rather than
+/// at its last pull, since that pull fails on a container that died and would then leave nothing of the run.
+fn clear_local(ctx: &Ctx, issue: &str, variant: &str) -> Result<()> {
     let local = ctx.repo.join("results").join(issue).join(variant);
     match fs::remove_dir_all(&local) {
-        Err(e) if e.kind() != ErrorKind::NotFound => {
-            return Err(e).with_context(|| format!("clearing {}", local.display()));
-        }
-        _ => {}
+        Err(e) if e.kind() != ErrorKind::NotFound => Err(e).with_context(|| format!("clearing {}", local.display())),
+        _ => Ok(()),
     }
+}
+
+/// Only this variant's results, the job logs, and the verdict table come back, so a long session does not pull
+/// every earlier variant again. It writes over what the pulls during the run brought back and deletes nothing.
+fn pull_variant(ctx: &Ctx, issue: &str, live: &LivePod, variant: &str) -> Result<()> {
     let paths = [
         format!("results/{issue}/{variant}"),
         format!("results/{issue}/jobs"),

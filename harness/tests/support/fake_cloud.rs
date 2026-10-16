@@ -154,6 +154,14 @@ impl FakeCloud {
         self.0.borrow_mut().pods.retain(|fake| fake.pod.id != id);
     }
 
+    /// The pod reports `status` on every read from now on, as one RunPod stopped does.
+    pub fn set_status(&self, id: &str, status: PodStatus) {
+        let mut state = self.0.borrow_mut();
+        let fake = state.pods.iter_mut().find(|fake| fake.pod.id == id).unwrap();
+        fake.boot = VecDeque::from([status]);
+        fake.pod.status = status;
+    }
+
     fn make(&self, request: &CreatePodRequest, listed: bool) -> Pod {
         let mut state = self.0.borrow_mut();
         state.next_id += 1;

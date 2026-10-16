@@ -55,7 +55,9 @@ RunPod stops a container itself at about 98% of its memory limit (system log: `W
 utilization`, then `stop container`), and the pod goes to EXITED. The limit is RunPod's allotment (754 GB for 4x
 PRO 6000 on EU-CZ-1, shown as 702.2 GiB), not the host RAM that `free -g` prints inside the container; read
 `/sys/fs/cgroup/memory.max`. `mcp__runpod__stream-pod-logs` with source `system` shows these lines after the
-container is gone.
+container is gone. The harness's memory guard (`harness/README.md`, Memory guard) logs the cgroup's usage while a
+variant runs, trims page cache at 80% of the limit, and kills the server at 93%, so the run ends with its logs and a
+report of what filled the memory still on the pod; `exec` also pulls a running variant every 5 minutes.
 
 ## Rules
 

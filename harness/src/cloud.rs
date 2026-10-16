@@ -147,6 +147,10 @@ pub trait Cloud {
     fn list_pods(&self) -> Result<Vec<Pod>, CloudError>;
     /// `None` on 404, which RunPod also answers for a pod this key cannot see: never proof on its own.
     fn get_pod(&self, id: &str) -> Result<Option<Pod>, CloudError>;
+    /// As `get_pod`, in one attempt without retries, for a check inside a loop that has to stay prompt.
+    fn get_pod_once(&self, id: &str) -> Result<Option<Pod>, CloudError> {
+        self.get_pod(id)
+    }
     /// Also succeeds on 404, for the same reason not proof that the pod is gone.
     fn delete_pod(&self, id: &str) -> Result<(), CloudError>;
     fn pod_billing_usd(&self, id: &str) -> Result<Option<f64>, CloudError>;
@@ -484,17 +488,27 @@ impl<'a> RunpodRest<'a> {
             &|d| self.clock.sleep(d),
             CloudError::retryable,
             MAX_RETRY_AFTER_S,
-            || {
-                let mut request = self
-                    .agent
-                    .get(self.url(path))
-                    .header("Authorization", &self.authorization);
-                for (key, value) in query {
-                    request = request.query(*key, *value);
-                }
-                read_json(self.observe(request.call())?)
-            },
+            || self.get_json_once(path, query),
         )
+    }
+
+    fn get_json_once<T: DeserializeOwned>(&self, path: &str, query: &[(&str, &str)]) -> Result<T, CloudError> {
+        let mut request = self
+            .agent
+            .get(self.url(path))
+            .header("Authorization", &self.authorization);
+        for (key, value) in query {
+            request = request.query(*key, *value);
+        }
+        read_json(self.observe(request.call())?)
+    }
+}
+
+fn found_or_gone(result: Result<Pod, CloudError>) -> Result<Option<Pod>, CloudError> {
+    match result {
+        Ok(pod) => Ok(Some(pod)),
+        Err(e) if e.status() == Some(404) => Ok(None),
+        Err(e) => Err(e),
     }
 }
 
@@ -618,11 +632,11 @@ impl Cloud for RunpodRest<'_> {
     }
 
     fn get_pod(&self, id: &str) -> Result<Option<Pod>, CloudError> {
-        match self.get_json(&format!("/v2/pods/{id}"), &[]) {
-            Ok(pod) => Ok(Some(pod)),
-            Err(e) if e.status() == Some(404) => Ok(None),
-            Err(e) => Err(e),
-        }
+        found_or_gone(self.get_json(&format!("/v2/pods/{id}"), &[]))
+    }
+
+    fn get_pod_once(&self, id: &str) -> Result<Option<Pod>, CloudError> {
+        found_or_gone(self.get_json_once(&format!("/v2/pods/{id}"), &[]))
     }
 
     fn delete_pod(&self, id: &str) -> Result<(), CloudError> {

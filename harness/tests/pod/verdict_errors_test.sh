@@ -47,8 +47,16 @@ printf 'Score: 0.950\nSpeculative accept length (per-request, from meta_info): n
     >"$work/clean/gsm8k.txt"
 printf '{"max_concurrency": 1, "completed": 8, "output_throughput": 99.94}\n' >"$work/clean/bench.jsonl"
 check clean "{'verdict': 'OK', 'boot_s': 42, 'gsm8k': 0.95, 'gsm8k_counts': None, 'accept': 2.5, \
-'tok_s': {'1': 99.9}}" ""
+'tok_s': {'1': 99.9}, 'mem_guard': None}" ""
 echo "ok: a clean run has a null verdict_error"
+
+mkdir -p "$work/guarded" "$work/guardcut"
+reading='fired 2026-10-16T18:05:01Z: memory.current 690.1 GiB is 98.3% of memory.max 702.2 GiB'
+printf '%s\n\n## memory.stat\nanon 1\n' "$reading" >"$work/guarded/memory_guard.txt"
+check guarded "{'mem_guard': '$reading'}" ""
+: >"$work/guardcut/memory_guard.txt"
+check guardcut "{'mem_guard': 'fired'}" ""
+echo "ok: a memory guard that fired puts its reading in the verdict, and an empty report still counts"
 
 mkdir -p "$work/torn"
 printf '{"max_concurrency": 1, "completed": 8, "output_throughput": 99.9}\n{"max_concurr' >"$work/torn/bench.jsonl"

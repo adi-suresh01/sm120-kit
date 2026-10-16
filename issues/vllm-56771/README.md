@@ -85,8 +85,10 @@ or a5 by the a1 result, then `harness down`. Stop rule: nothing boots within 60 
 US-NE-1, host CUDA 13.2). Setup: image about 3 min, 510.3 GB of weights about 10 min at our measured 0.83 GB/s,
 prompts under a minute. Variants: g0 about 5 min, a1 cold boot plus prompts about 25 min, a0 about 15 min, two
 follow-ups about 30 min. Expected 2-2.6 h, about $20-26; `planned_hours = 3.5` caps it at $38.35 worst case.
-Host RAM must be at least 256 GB for the pinned Engram tables; `setup.sh` stops before the download otherwise
-(then `harness down`).
+The container's memory limit (the cgroup's, not the host RAM `free` shows) must be at least 256 GiB for the pinned
+Engram tables; `setup.sh` stops before the download otherwise, and also after it when a cold read of the largest
+shard runs under 500 MB/s (then `harness down`). The weights live on container disk (`container_disk_gb = 600`), not
+the FUSE volume.
 
 ## Results
 
@@ -122,6 +124,10 @@ The harness now takes `avoid_data_centers` (0ba8c45); 4x stock showed up in EU-C
   from the 510 GB download counted against the container. Not a result about the reporter's bug: the server
   never reached the first prompt.
 
-Before the next attempt: drop the downloaded blobs from the page cache in `setup.sh` (posix_fadvise DONTNEED),
-gate on the cgroup's `memory.max` instead of `free -g`, and stream server.log back while it boots. Total for
-this issue: $33.13 of $40, $6.87 left, not enough for another 4x boot.
+For the next attempt (`feat/harness-memory-guard`): `setup.sh` gates on the cgroup's limit instead of `free -g`,
+keeps the weights on container disk behind `$HF_HOME/hub`, drops them from the page cache after the download (sync,
+then posix_fadvise DONTNEED), stops under a 500 MB/s cold read, and installs py-spy. Every variant runs the memory
+guard (`harness/README.md`), which logs memory.jsonl every 5 s and, at 93% of the limit, stops the server's process
+tree, writes memory_guard.txt, and kills it before RunPod's 98%; `exec` pulls the variant every 5 minutes and stops
+waiting on a pod RunPod reports EXITED. Total for this issue: $33.13 of $40, $6.87 left, not enough for another 4x
+boot.
