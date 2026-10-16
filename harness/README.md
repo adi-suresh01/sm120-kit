@@ -94,7 +94,9 @@ bench = [[1, 8], [16, 64], [64, 256]]
   flags garbage even after a right answer), `no_number`, `empty_content` (a reasoning model cut off mid-thought;
   its reasoning is kept in the row but never scored), `timed_out`, `failed`, and `retried`. `gsm8k` is at most
   1319, and the benchmark loads its tokenizer from `server.model`, so that has to be the checkpoint's id or path,
-  not a `--served-model-name` alias.
+  not a `--served-model-name` alias. `vllm bench serve` has no tokenizer revision flag at v0.25.1 or v0.31.0, so for
+  a server pinned with `--revision` the prompts still come from the main revision's tokenizer; both versions then
+  trim any prompt that the server's own tokenizer reads as longer than 1024 tokens.
 
 Either way a GSM8K request that failed, or a benchmark that completed fewer requests than it sent, is `POST_FAIL`,
 not a low score or a slow run.
