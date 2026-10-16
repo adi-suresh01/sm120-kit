@@ -190,14 +190,51 @@ tail -F results/vllm-47990/events.jsonl | grep --line-buffered -oE '"kind":"(pha
 Kinds: `budget, quote, reserve, create, ready, setup, variant_start, phase, verdict, pull, terminate, reap, warn,
 error`. A `phase` line carries `variant, phase, detail, t` as `serve_variant.sh` reports each step. A verdict line
 carries `variant, verdict (OK|BOOT_FAIL|SMOKE_FAIL|POST_FAIL|TIMEOUT), boot_s, fault, where, gsm8k, gsm8k_counts,
-accept, tok_s, result`. An `error` line for a pod that is still up adds `pod, id, deadline, deadline_local, next`.
+accept, tok_s, mem_guard, result`; `mem_guard` is null unless the memory guard (below) fired, and then holds the
+reading it fired at. An `error` line for a pod that is still up adds `pod, id, deadline, deadline_local, next`.
+
+When a poll of a running job fails, the harness asks RunPod about the pod. A pod RunPod reports `EXITED`, `ERROR`, or
+`TERMINATED`, or no longer lists, ends `exec` (and `up` during setup) at once: its container is gone, and with it
+every file on the pod that was not pulled, and the error says to run `harness down <issue>`, since a stopped pod still
+bills its disk. A RunPod read that fails only warns; 30 failed polls in a row (about 5 minutes) still end the wait.
 
 ## On the pod
 
 The kit lands in `/workspace/sm120-kit` (only `harness/pod/` and the issue folder), `HF_HOME=/workspace/hf`, and
 results in `/workspace/sm120-kit/results/<issue>/`: `env.txt`, `jobs/<job>.log` (plus `.pid` and `.exit`),
-`<variant>/` (server log, responses, quality output, `progress.jsonl`, `verdict.json`), and `verdicts.jsonl`.
-After each variant the harness pulls that variant's folder, `jobs/`, and `verdicts.jsonl`.
+`<variant>/` (server log, responses, quality output, `progress.jsonl`, `verdict.json`, and the memory guard's
+`memory.jsonl`, `mem_guard.log`, and `memory_guard.txt`), and `verdicts.jsonl`.
+`exec` clears the laptop's copy of a variant's folder when the variant starts, pulls the folder every 5 minutes while
+it runs (2 minute limit, a failure only warns), so a container that dies mid-run leaves its logs up to then on the
+laptop, and after it pulls the folder, `jobs/`, and `verdicts.jsonl` over that copy. The last pull also runs when the
+wait fails, and deletes nothing.
+
+### Memory guard
+
+RunPod stops a container at about 98% of its memory limit (`docs/runpod.md`) and removes it with every file on it.
+From just before the launch until the server is killed, `serve_variant.sh` runs `pod/mem_guard.py`, which reads the
+container's cgroup (v2, or v1's names mapped to v2's) and writes `<variant>/memory.jsonl`:
+
+- First a `controls` line: whether `memory.reclaim` and `memory.high` exist and are writable in this container.
+- Every `MEM_GUARD_POLL_S` seconds (default 15) `t, current, max` (null for no limit) and the `memory.stat` counters
+  `anon, file, active_file, inactive_file, shmem, file_mapped, file_dirty, unevictable` in bytes.
+- At `MEM_GUARD_TRIM_FRACTION` of the limit (default 0.80), at most once a minute, a trim: `posix_fadvise(DONTNEED)`
+  over the HF hub cache (`HF_HUB_CACHE`, else `$HF_HOME/hub`), then a write of the bytes over that line to
+  `memory.reclaim` where the container may write it, since fadvise skips page cache a process has mapped. The line
+  carries `trim: {fadvise, reclaim}` (`reclaim` is `ok`, `unavailable`, or an errno name) and `after_trim`, the usage
+  after. The guard never writes `memory.high` or `memory.max`.
+- At `MEM_GUARD_KILL_FRACTION` (default 0.93, under RunPod's 98%) on a poll after a trim, it fires: a `mem_guard`
+  phase line, then `<variant>/memory_guard.txt` (the reading on its first line, all of `memory.stat`, the 40 largest
+  processes, each server process's `VmRSS`, `VmLck`, `VmPin`, and `Rss*` lines, and a `py-spy dump --nonblocking` of
+  each when `py-spy` is on PATH, all bounded at 60 s), then `pkill -9 -f` of the server's process pattern, and it
+  exits. The run then ends the usual way, most likely as `BOOT_FAIL` or `POST_FAIL`, with `mem_guard` in its verdict,
+  while the container and its logs still exist.
+- With no limit, or one it cannot read, it writes one `warn` line and only logs.
+
+Its own errors go to `<variant>/mem_guard.log` and never fail the run. `serve_variant.sh` stops it on every way out,
+and it exits by itself once its parent is gone, so it cannot outlive its variant and kill the next one's server. The
+three knobs go in a variant's `env`. `mem_guard.py --drop-cache <path>...` does the fadvise pass once and prints a
+summary; `issues/vllm-56771/setup.sh` runs it on `$HF_HOME` after the weights download.
 
 ## Tests
 
@@ -207,4 +244,5 @@ shellcheck pod/*.sh tests/pod/*.sh
 ```
 
 `cargo test` also runs the bash tests in `tests/pod/` (watchdog, package snapshot, `serve_variant.sh` against a
-fake server with both quality protocols, and stage 2 log replay) and the job start and poll scripts in local bash.
+fake server with both quality protocols, the memory guard against fake cgroup directories, and stage 2 log replay)
+and the job start and poll scripts in local bash.
