@@ -45,7 +45,7 @@ trap 'if [[ -n $ballast_pid ]]; then kill "$ballast_pid" 2>/dev/null || true; fi
 
 start_ballast() {
     local ballast_log=$1
-    python3 "$repo_root/scripts/vram_ballast.py" "$MEM_BUDGET_GIB" >"$ballast_log" 2>&1 &
+    python3 "$repo_root/harness/pod/vram_ballast.py" "$MEM_BUDGET_GIB" >"$ballast_log" 2>&1 &
     ballast_pid=$!
     until grep -q '^holding' "$ballast_log"; do
         if ! kill -0 "$ballast_pid" 2>/dev/null; then cat "$ballast_log" >&2; exit 1; fi
@@ -108,12 +108,12 @@ run_variant() {
 
     echo ">>> $label (pr60069: $(bash "$here/patch.sh" status pr60069), fi4827: $(bash "$here/patch.sh" status fi4827)," \
         "pr57946: $(bash "$here/patch.sh" status pr57946), env: ${env_prefix[*]:-none}, gpu util: $util)"
-    bash "$repo_root/scripts/wait_gpu_idle.sh"
+    bash "$repo_root/harness/pod/wait_gpu_idle.sh"
     mkdir -p "$(dirname "$log")"
     if [[ -n ${MEM_BUDGET_GIB:-} ]]; then start_ballast "${log%.log}.ballast.log"; fi
 
     local verdict
-    verdict=$(bash "$repo_root/scripts/serve_and_smoke.sh" "$log" "$port" "$model" -- "${cmd[@]}" || true)
+    verdict=$(bash "$repo_root/harness/pod/serve_and_smoke.sh" "$log" "$port" "$model" -- "${cmd[@]}" || true)
     stop_ballast
     echo "$verdict"
 

@@ -57,7 +57,7 @@ What this changes:
 - b12x with CUDA graphs served on 0.25.1. A graphs crash on unpatched 0.31 would be a regression between
   0.25.1 and 0.31, which weakens H4 as a property of b12x on sm_120 in general.
 - `--gpu-memory-utilization` does not bound the profiling peak, so scaling it down on a 96 GB card cannot
-  reproduce the 5090 OOM. `MEM_BUDGET_GIB` now also starts `scripts/vram_ballast.py`, which holds memory so
+  reproduce the 5090 OOM. `MEM_BUDGET_GIB` now also starts `harness/pod/vram_ballast.py`, which holds memory so
   only 31.45 GiB is free before vLLM starts.
 
 ## Hypotheses
@@ -137,7 +137,7 @@ On the pod, inside tmux:
 ```
 cd /workspace/sm120-kit
 export HF_HOME=/workspace/hf
-mkdir -p results && bash scripts/env_report.sh | tee results/env.txt
+mkdir -p results && bash harness/pod/env_report.sh | tee results/env.txt
 bash issues/vllm-49476/setup.sh
 bash issues/vllm-49476/run.sh all
 for v in baseline-eager patched-eager patched-graphs; do
@@ -168,7 +168,7 @@ figure was stale.
 |---|---|---|---|---|---|
 | 2026-10-15 | qkt9wl9ihcqstz | 1x RTX PRO 6000 Server, secure, US-NC-1, host CUDA 13.2, $2.49/hr (WK community had no stock) | 06:24:43Z | 06:51Z (terminated) | ~$1.09 (26.3 min x $2.49/hr; billing read had no records yet at 06:51Z) |
 
-## Environment (pod qkt9wl9ihcqstz, `scripts/env_report.sh`)
+## Environment (pod qkt9wl9ihcqstz, `harness/pod/env_report.sh`)
 
 ```
 GPU        : 1x NVIDIA RTX PRO 6000 Blackwell Server Edition, 97887 MiB, cc 12.0, driver 595.91.07

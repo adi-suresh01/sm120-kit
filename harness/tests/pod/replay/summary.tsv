@@ -1,0 +1,5 @@
+2026-10-15T10:36:59Z	a1	-	RESULT=BOOT_FAIL exit_code=137 boot_seconds=221	-	-	CUDA error: an illegal memory access was encountered	ple_state_pool.py", line 113, in reset_slots
+2026-10-15T10:39:43Z	a2	-	RESULT=BOOT_FAIL exit_code=pattern boot_seconds=157	-	-	illegal memory access	driver.py", line 331, in __call__
+2026-10-15T11:13:24Z	a5	-	RESULT=OK boot_seconds=197 requests=9	2.9374	0.970	-	-
+2026-10-15T11:22:31Z	b1	-	RESULT=BOOT_FAIL exit_code=137 boot_seconds=146	-	-	ValueError: The output_size of gate's and up's weight = 320 is not divisible by weight quantization block_n = 128	fp8.py", line 1479, in create_fp8_moe_weight_
+2026-10-15T12:26:40Z	d-a5	-	RESULT=BOOT_FAIL exit_code=1 boot_seconds=226	-	-	RuntimeError: Rank 0 scheduler died during initialization (exit code: -6)	engine.py", line 1999, in _wait_for_scheduler_ready

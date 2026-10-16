@@ -1,0 +1,3 @@
+{"max_concurrency": 1, "completed": 8, "output_throughput": 182.72582432463014}
+{"max_concurrency": 16, "completed": 64, "output_throughput": 960.1263333452391}
+{"max_concurrency": 64, "completed": 256, "output_throughput": 1358.4697199083957}

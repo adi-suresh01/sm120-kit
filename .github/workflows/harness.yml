@@ -1,0 +1,19 @@
+name: harness
+
+on: [push, pull_request]
+
+jobs:
+  gates:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: harness
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.89.0
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
+      - run: shellcheck pod/*.sh tests/pod/*.sh

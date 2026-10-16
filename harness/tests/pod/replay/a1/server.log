@@ -1,0 +1,3 @@
+[2026-10-15 10:36:56 TP0 EP0] AcceleratorError: CUDA error: an illegal memory access was encountered
+  File "/sgl-workspace/sglang/python/sglang/srt/mem_cache/ple_state_pool.py", line 113, in reset_slots
+torch.AcceleratorError: CUDA error: an illegal memory access was encountered

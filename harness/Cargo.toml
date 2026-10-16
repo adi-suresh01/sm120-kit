@@ -1,0 +1,20 @@
+[package]
+name = "sm120-harness"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+publish = false
+
+[[bin]]
+name = "harness"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.7", features = ["derive"] }
+ctrlc = { version = "3.5.2", features = ["termination"] }
+jiff = { version = "0.2.38", features = ["serde"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
+toml = { version = "1.1.8", features = ["preserve_order"] }
+ureq = { version = "3.4.2", features = ["json"] }

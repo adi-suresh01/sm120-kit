@@ -18,4 +18,4 @@ case ${2:-pr60069} in
     *) echo "unknown patch: $2" >&2; exit 2 ;;
 esac
 
-exec bash "$here/../../scripts/patch_pkg.sh" "${1:-status}" "$patch_file" "$pkg" 1
+exec bash "$here/../../harness/pod/patch_pkg.sh" "${1:-status}" "$patch_file" "$pkg" 1

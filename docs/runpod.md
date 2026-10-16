@@ -1,19 +1,27 @@
 # RunPod setup and spend rules
 
+Pods are rented, run, and terminated by `harness` (see `harness/README.md`). This page covers the account setup
+it needs and the spend rules it enforces.
+
 ## One-time setup (Aditya)
 
 1. Create an account at runpod.io and add prepaid credit ($50 to start; prepaid credit is the spend cap).
-2. Settings -> SSH Public Keys: paste `~/.ssh/id_rsa.pub`.
-3. Settings -> API Keys: create a read/write key.
-4. In a normal terminal (not an AI chat, so the key is never in a transcript):
+2. Settings -> SSH Public Keys: paste `~/.ssh/id_rsa.pub`. Load the key into ssh-agent with `ssh-add`: the
+   harness runs ssh in batch mode and cannot answer a passphrase prompt.
+3. Settings -> API Keys: create a Restricted key with the management API (`api.runpod.io`) on read/write and
+   `api.runpod.ai` on none. In a normal terminal (not an AI chat, so the key never lands in a transcript),
+   store it in the Keychain; `-w` given last makes `security` prompt for the value:
    ```
-   brew install runpod/runpodctl/runpodctl
-   runpodctl config --apiKey <key>
+   security add-generic-password -a "$USER" -s runpod-api-key -w
    ```
-5. Verify: `runpodctl get pod` returns an empty list without errors.
-
-CLI flags change between runpodctl versions. Check `runpodctl create pod --help` before scripting a launch
-instead of trusting flags written here from memory.
+4. Add to `~/.zshrc`:
+   ```
+   export RUNPOD_API_KEY="$(security find-generic-password -a "$USER" -s runpod-api-key -w)"
+   ```
+5. For issues with gated models: Settings -> Secrets, create `hf_token` holding the Hugging Face token. A
+   `harness.toml` with `needs_hf_token = true` passes it to the pod as a secret reference, never as a value.
+6. Verify in a new shell: `cd ~/Desktop/sm120-kit/harness && cargo run --release -- reap` exits 0.
+7. Optional, for looking at pods by hand: `brew install runpod/runpodctl/runpodctl`.
 
 ## Pod choices
 
@@ -25,19 +33,20 @@ instead of trusting flags written here from memory.
 | TP=8 repros | 8x RTX PRO 6000 | $13.52 / $19.92 |
 
 Community stock is often LOW or empty on hosts with CUDA >= 13.0; secure had stock in 12 data centers.
-Re-read the catalog before quoting a launch.
+`harness quote <issue>` reads the live catalog.
 
-Template: a PyTorch / CUDA 13 image, then `pip install` the exact vLLM / SGLang version from the issue. When the
-reporter used an official image (e.g. `vllm/vllm-openai:vX`), use that image instead and override the entrypoint
-to start sshd; such images do not read `PUBLIC_KEY`. See `issues/vllm-49476/README.md` for the command.
-If the image runs Python from a venv set through its ENV (lmsysorg/sglang does), SSH sessions do not inherit
-it; export `/proc/1/environ` to a file and source it in every command (see `issues/sglang-44291/README.md`).
-Attach a network volume for `HF_HOME` so model weights download once.
+Image: the reporter's official image when there is one (e.g. `vllm/vllm-openai:vX`), pinned by digest; otherwise
+a PyTorch / CUDA 13 image plus a `setup.sh` that installs the exact vLLM / SGLang version from the issue. The
+harness replaces the entrypoint with `harness/pod/entrypoint.sh` (sshd, the container env saved for SSH sessions,
+the deadline watchdog), so any Debian-based image with bash works. Weights go to the pod's volume
+(`HF_HOME=/workspace/hf`).
 
 ## Rules
 
-- Every pod launch needs Aditya's explicit approval: GPU, count, $/hr, hours, total.
-- Stop the pod as soon as a run ends; terminate when the issue is done. Volumes cost money too; delete when
-  the cluster of issues is finished.
-- Never store the API key or HF token in the repo. Export them on the pod for the session only.
-- Log pod id, start, stop, and actual cost in the issue README.
+- Each issue's GPU budget needs Aditya's explicit approval (GPU, count, $/hr, hours, total), recorded with
+  `harness budget set <issue> <usd> --note <text>`. The harness sizes every pod's deadline to fit it.
+- `harness down` (or `harness run`, which ends with it) terminates the pod when a run ends. The volume goes
+  with the pod.
+- Never store the API key or HF token in the repo or pass them to a pod as plain values.
+- The ledger (`issues/<x>/harness-ledger.json`) records pod id, start, deadline, end, and cost; copy the totals
+  into the issue README.

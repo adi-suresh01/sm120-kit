@@ -113,7 +113,7 @@ Branches:
 - PR patches are vendored with only their `python/sglang/` hunks and checked against a6a8c5601 alone and in the
   combinations C needs (#40172 and #43330 conflict and are never combined). Every run restores a pristine copy
   of the package before applying its set.
-- First five minutes: `nvidia-smi topo -m` shows SYS/PHB/NODE (not NV#), `scripts/env_report.sh`, then
+- First five minutes: `nvidia-smi topo -m` shows SYS/PHB/NODE (not NV#), `harness/pod/env_report.sh`, then
   `ulimit -l`, `free -g`, `numactl -H`. The cookbook says the pinned table needs `--ulimit memlock=-1` under
   Docker; if memlock is limited, record it and try, since the first pinned load shows whether it matters.
 
@@ -123,7 +123,7 @@ Branches:
   against the image's sglang commit, and note which combinations conflict.
 - Resolve the RadixArk MTP shard list and the exact draft-path flags from the safetensors index and the
   cookbook's two-node cell.
-- Write the scripts below; reuse `scripts/serve_and_smoke.sh`, `scripts/wait_gpu_idle.sh`, `scripts/patch_pkg.sh`.
+- Write the scripts below; reuse `harness/pod/serve_and_smoke.sh`, `harness/pod/wait_gpu_idle.sh`, `harness/pod/patch_pkg.sh`.
 
 ## Time, cost, stop rules
 

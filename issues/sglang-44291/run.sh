@@ -47,11 +47,11 @@ cmd=(env "${alloc_env[@]}" "${extra_env[@]}"
     python3 -m sglang.launch_server --model-path "$model" --tp-size 2
     --host 127.0.0.1 --port "$port" --log-level debug "${extra[@]}")
 
-bash "$repo_root/scripts/wait_gpu_idle.sh"
+bash "$repo_root/harness/pod/wait_gpu_idle.sh"
 echo ">>> $label: ${cmd[*]}"
 # A server wedged in a faulted kernel can block serve_and_smoke's shutdown wait; timeout kills the whole group.
 verdict=$(BOOT_TIMEOUT=${BOOT_TIMEOUT:-600} timeout -k 15 900 \
-    bash "$repo_root/scripts/serve_and_smoke.sh" "$log" "$port" "$model" -- "${cmd[@]}" || true)
+    bash "$repo_root/harness/pod/serve_and_smoke.sh" "$log" "$port" "$model" -- "${cmd[@]}" || true)
 verdict=${verdict:-RESULT=TIMEOUT outer=900s}
 echo "$verdict"
 

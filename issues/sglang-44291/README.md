@@ -118,7 +118,7 @@ approves the PR body and the #44291 comment before anything is opened or posted.
 |---|---|
 | `README.md` | This spec, then results |
 | `setup.sh` | Version check (sglang, torch, flashinfer, driver) and model download |
-| `run.sh` | Server variants S1-S4, reusing `scripts/serve_and_smoke.sh` (sglang serves `/health` and `/v1/chat/completions`) |
+| `run.sh` | Server variants S1-S4, reusing `harness/pod/serve_and_smoke.sh` (sglang serves `/health` and `/v1/chat/completions`) |
 | `ar_repro.py` | Minimal `CustomAllreduce` + graph-capture repro and latency table; becomes the PR's regression test |
 | `ar_matrix.sh` | Runs `ar_repro.py` over modes x allocators x repeats with timeouts, keeping the full log |
 

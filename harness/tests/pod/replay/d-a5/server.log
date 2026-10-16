@@ -1,0 +1,2 @@
+  File "/sgl-workspace/sglang/python/sglang/srt/entrypoints/engine.py", line 1999, in _wait_for_scheduler_ready
+RuntimeError: Rank 0 scheduler died during initialization (exit code: -6). If exit code is -9 (SIGKILL), a common cause is the OS OOM killer. Run `dmesg -T | grep -i oom` to check.

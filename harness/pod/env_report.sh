@@ -15,7 +15,9 @@ section "CUDA"
 nvcc --version 2>/dev/null | tail -n 1 || echo "nvcc not installed"
 
 section "Python packages"
-python3 - <<'EOF'
+# Plain CUDA images, like the harness test pod's, have no Python.
+if command -v python3 >/dev/null; then
+    python3 - <<'EOF'
 from importlib.metadata import version, PackageNotFoundError
 for pkg in ("vllm", "torch", "flashinfer-python", "sglang", "triton", "transformers"):
     try:
@@ -23,6 +25,9 @@ for pkg in ("vllm", "torch", "flashinfer-python", "sglang", "triton", "transform
     except PackageNotFoundError:
         print(f"{pkg}: not installed")
 EOF
+else
+    echo "python3 not installed"
+fi
 
 section "Host"
 uname -r

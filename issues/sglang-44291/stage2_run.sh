@@ -115,10 +115,10 @@ pkg_root=$(python3 -c 'import importlib.util, os; print(os.path.dirname(importli
 # run starts from the untouched tree instead.
 rsync -a --delete "$pristine/" "$pkg_root/"
 for p in "${patches[@]}"; do
-    bash "$repo_root/scripts/patch_pkg.sh" apply "$here/patches/$p.diff" sglang 2 >/dev/null
+    bash "$repo_root/harness/pod/patch_pkg.sh" apply "$here/patches/$p.diff" sglang 2 >/dev/null
 done
 
-bash "$repo_root/scripts/wait_gpu_idle.sh" 300
+bash "$repo_root/harness/pod/wait_gpu_idle.sh" 300
 echo ">>> $label patches=[${patches[*]}]: ${cmd[*]}"
 # 9 is not a captured graph size, so decode batches pad up to the next one, where padding-row bugs live.
 # FAIL_PATTERN stops the wait at the first fatal line instead of waiting on a surviving rank. A server wedged in a
@@ -126,7 +126,7 @@ echo ">>> $label patches=[${patches[*]}]: ${cmd[*]}"
 fail_pattern='illegal memory access|cudaErrorIllegalAddress|CUDA error: |Received sigquit|SIGQUIT received|Scheduler hit an exception'
 verdict=$(POST_SMOKE=$post FAIL_PATTERN=$fail_pattern CONCURRENCY=9 BOOT_TIMEOUT=${BOOT_TIMEOUT:-1800} \
     timeout -k 30 "${RUN_TIMEOUT:-5400}" \
-    bash "$repo_root/scripts/serve_and_smoke.sh" "$run_dir/server.log" "$port" "$model" -- "${cmd[@]}" || true)
+    bash "$repo_root/harness/pod/serve_and_smoke.sh" "$run_dir/server.log" "$port" "$model" -- "${cmd[@]}" || true)
 verdict=${verdict:-RESULT=TIMEOUT outer=${RUN_TIMEOUT:-5400}s}
 echo "$verdict"
 # Scheduler and detokenizer children can outlive the launcher after a fault and hold GPU memory, which would

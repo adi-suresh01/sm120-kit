@@ -1,0 +1,2 @@
+Score: 0.970
+Speculative accept length (per-request, from meta_info): n=200 mean=2.9374 min=2.4189 max=3.3659

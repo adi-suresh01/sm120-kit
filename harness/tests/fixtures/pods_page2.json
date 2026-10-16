@@ -1,0 +1,3 @@
+{"pods": [
+{"id": "x7m2comfyui001", "name": "comfyui", "image": "runpod/comfyui:latest", "args": "", "disk": 20, "ports": ["22/tcp"], "env": {}, "registry": null, "status": "EXITED", "actions": ["start", "terminate"], "mounts": {"persistent": {"size": 20, "path": "/workspace"}}, "gpu": {"id": "NVIDIA GeForce RTX 4090", "count": 1, "vcpuCount": 8, "memory": 62}, "cloud": "COMMUNITY", "dataCenterId": null, "cudaVersion": "12.8", "ssh": {"proxy": null, "direct": null}, "template": null, "cost": 0.0, "locked": false, "globalNetworking": {"enabled": false}, "runtime": null, "createdAt": "2026-10-10T09:00:00Z", "startedAt": null}
+], "pagination": {"hasNextPage": false, "nextCursor": null}}

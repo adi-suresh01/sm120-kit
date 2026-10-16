@@ -1,0 +1,5 @@
+--- a/sglang/core.py
++++ b/sglang/core.py
+@@ -1 +1 @@
+-BEHAVIOR = "upstream"
++BEHAVIOR = "patched"

@@ -1,0 +1,2 @@
+  File "/sgl-workspace/sglang/python/sglang/srt/layers/quantization/fp8.py", line 1479, in create_fp8_moe_weight_
+ValueError: The output_size of gate's and up's weight = 320 is not divisible by weight quantization block_n = 128.
