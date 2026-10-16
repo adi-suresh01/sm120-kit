@@ -351,6 +351,15 @@ pub fn job_dir(issue: &str) -> String {
     format!("results/{issue}/jobs")
 }
 
+/// `alive <pid file>`: the pid is a live process whose command line names that file. A container restart starts
+/// the pid namespace over, so a stale pid can belong to sshd or the watchdog, and a zombie still answers kill -0.
+/// grep reads all of ps's output, so pipefail never sees ps die of SIGPIPE.
+const ALIVE: &str = "alive() {\n\
+    \x20 local pid\n\
+    \x20 pid=$(cat \"$1\" 2>/dev/null) || return 1\n\
+    \x20 kill -0 \"$pid\" 2>/dev/null && ps -o args= -p \"$pid\" 2>/dev/null | grep -F \"$1\" > /dev/null\n\
+    }";
+
 /// Starts `command` detached from the SSH session, so a dropped connection never kills a run. The job records its
 /// pid first and its exit code by rename last, so a poll never reads a half-written file and can tell a job that
 /// died from one that runs. One job per issue at a time: two servers on the same GPUs would spoil both results.
@@ -362,11 +371,12 @@ pub fn start_job(remote: &dyn Remote, target: &Target, issue: &str, job: &str, c
         "echo $$ > {pid}.tmp && mv {pid}.tmp {pid}\n(\n{command}\n)\necho $? > {exit}.tmp && mv {exit}.tmp {exit}"
     );
     let script = format!(
-        "mkdir -p {dir}\n\
+        "{ALIVE}\n\
+         mkdir -p {dir}\n\
          for other in {dir}/*.pid; do\n\
          \x20 [[ -e $other ]] || continue\n\
-         \x20 if [[ ! -f ${{other%.pid}}.exit ]] && kill -0 \"$(cat \"$other\")\" 2>/dev/null; then\n\
-         \x20   other=${{other##*/}}; echo \"BUSY ${{other%.pid}}\"; exit 0\n\
+         \x20 if [[ ! -f ${{other%.pid}}.exit ]] && alive \"$other\"; then\n\
+         \x20   name=${{other##*/}}; echo \"BUSY ${{name%.pid}} $(cat \"$other\")\"; exit 0\n\
          \x20 fi\n\
          done\n\
          rm -f {exit} {pid}\n\
@@ -379,9 +389,10 @@ pub fn start_job(remote: &dyn Remote, target: &Target, issue: &str, job: &str, c
     );
     let output = remote.run(target, &script)?;
     if let Some(busy) = output.lines().find_map(|line| line.strip_prefix("BUSY ")) {
+        let (other, pid) = busy.split_once(' ').unwrap_or((busy, "?"));
         bail!(
-            "job {busy} of issue {issue} still runs on the pod, so {job} did not start; wait for it, or stop it with \
-             `harness ssh {issue} -- 'kill $(cat {dir}/{busy}.pid)'`"
+            "job {other} (pid {pid}) of issue {issue} still runs on the pod, so {job} did not start; wait for it, or \
+             end it with `harness ssh {issue} -- kill {pid}`"
         );
     }
     ensure!(
@@ -405,9 +416,10 @@ pub fn poll_job(
     let dir = job_dir(issue);
     let (pid, exit) = (format!("{dir}/{job}.pid"), format!("{dir}/{job}.exit"));
     let script = format!(
-        "echo {POLL_SENTINEL}\n\
+        "{ALIVE}\n\
+         echo {POLL_SENTINEL}\n\
          if [[ -f {exit} ]]; then echo \"EXIT $(cat {exit})\"\n\
-         elif kill -0 \"$(cat {pid} 2>/dev/null)\" 2>/dev/null; then echo RUNNING\n\
+         elif alive {pid}; then echo RUNNING\n\
          elif [[ -f {exit} ]]; then echo \"EXIT $(cat {exit})\"\n\
          else echo DEAD; fi\n\
          tail -c +{} {tail_path} 2>/dev/null || true",
@@ -881,11 +893,30 @@ mod tests {
     }
 
     #[test]
+    fn a_stale_pid_that_now_names_another_process_reads_as_dead() {
+        let bash = LocalBash::new("reused");
+        let jobs = bash.dir.join("results/x-1/jobs");
+        fs::create_dir_all(&jobs).unwrap();
+        // As after a container restart: the old pid now belongs to a live process that is not the job.
+        fs::write(jobs.join("old.pid"), format!("{}\n", std::process::id())).unwrap();
+        let status = poll_job(&bash, &local_target(), "x-1", "old", "/dev/null", 0).unwrap();
+        assert_eq!(status.state, JobState::Dead);
+        start_job(&bash, &local_target(), "x-1", "next", "true").unwrap();
+        let (state, _, _) = bash.poll_until_done("next", "/dev/null");
+        assert_eq!(state, JobState::Exited(0));
+    }
+
+    #[test]
     fn a_real_job_refuses_to_start_beside_a_running_one() {
         let bash = LocalBash::new("busy");
         start_job(&bash, &local_target(), "x-1", "first", "sleep 30").unwrap();
         let err = start_job(&bash, &local_target(), "x-1", "second", "true").unwrap_err();
-        assert!(err.to_string().contains("job first of issue x-1 still runs"), "{err}");
+        let pid = bash.pid("first");
+        assert!(
+            err.to_string()
+                .contains(&format!("job first (pid {pid}) of issue x-1 still runs")),
+            "{err}"
+        );
         Command::new("kill").arg(bash.pid("first")).status().unwrap();
         bash.poll_until_done("first", "/dev/null");
         start_job(&bash, &local_target(), "x-1", "second", "true").unwrap();
