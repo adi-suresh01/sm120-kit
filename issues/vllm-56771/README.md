@@ -168,7 +168,9 @@ Pod sm120-vllm-56771-cbff77 (l1hiiy61vbv4ki), 4x RTX PRO 6000 Blackwell Server E
 | a5-dspark-adaptive (`enable_adaptive_verification`) | 1204 s | none | BOOT_FAIL by design: `ValueError: Adaptive verification trims verification requests on device, which the DeepseekV41IndexerBackend attention backend does not support` |
 
 The prompt builder's labels overcount: "12k", "35k", "120k" are 10740, 30989, 106187 tokens in the server's count, so
-the #58910 case ran at 31K (and 106K), not 35K. Each length ran once, at concurrency 1.
+the #58910 case ran at 31K (and 106K), not 35K. The cause is the corpus's CRLF line endings: `build_prompts.py` counted
+them and the client's `read_text()` sent LF (LF counts plus 30 chat-template tokens match the server exactly; found
+while building sglang-33422's builder, which normalizes to LF). Each length ran once, at concurrency 1.
 
 Verdict: H1 holds on this stack. With FlashInfer 0.7.2 and #60762's 64-token blocks (`--block-size 64
 --kv-cache-dtype fp8 --attention-config '{"indexer_kv_dtype":"fp8"}'`), the reporter's DSpark + CUDA graphs config
