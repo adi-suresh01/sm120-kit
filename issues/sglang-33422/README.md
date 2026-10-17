@@ -90,11 +90,12 @@ comparable: one request vs 9 concurrent, and 238K vs 90K tokens each. Full detai
 | # | Hypothesis | Confirmed by | Killed by |
 |---|---|---|---|
 | H1 | v0.5.22 (with #29927) closes most of the gap on the reporter's own config | s1 and s0 W1 within 20% of vLLM v0 W1 | s1 W1 under 0.67x v0 W1 |
-| H2 | The gap is the MoE GEMM (FlashInfer CUTLASS MXFP4 vs Marlin) | s2 beats s1 by more than 15% on W1 and W2 | s2 within 10% of s1 |
+| H2 | The gap is the MoE GEMM (FlashInfer CUTLASS MXFP4 vs Marlin) | s2 beats both s1 and s1a by more than 15% on W1 and W2 | s2 within 10% of s1a |
 | H3 | EP4 speeds MoE prefill on PCIe (question 2) | s3 beats s1 by more than 10% | s3 at or below s1 |
 | H4 | DSpark does not change prefill throughput | s0 within 5% of s1 on W1 | s0 more than 10% slower |
 | H5 | hermia's 12.5K is specific to one long request | v0 W2 near 12.5K and v0 W1 well below it | v0 W1 at or above v0 W2 |
 | H6 | DP attention + EP4 (his production layout) prefills slower than plain TP | s4 below s1 on W1 | s4 at or above s1 |
+| H7 | His `--disable-flashinfer-autotune` costs prefill: the MXFP4 MoE runs untuned tactics | s1a beats s1 by more than 10% | s1a within 5% of s1, or s1a fails to boot (the instability he cites) |
 
 The rented cards are Server Edition (600 W), his are Max-Q (300 W), and prefill is compute-bound, so our sglang
 number above 5,540 would not show a software gain by itself. The comparison that counts is sglang vs vLLM on the
@@ -103,22 +104,30 @@ same pod type.
 ## Matrix
 
 Image `lmsysorg/sglang:v0.5.22-cu130` by digest. Every variant: `base_flags` (his config minus the MoE backend,
-chunk size, and DSpark, which vary), `--revision 7872f01b`.
+chunk size, autotune flag, and DSpark, which vary), `--revision 7872f01b`. Listed in run order, by value, so the
+deadline cuts from the bottom. "no-autotune" is his `--disable-flashinfer-autotune`.
 
-| Variant | Flags beyond `base_flags` | Question | Run when |
-|---|---|---|---|
-| s1-base | `--moe-runner-backend flashinfer_mxfp4 --chunked-prefill-size 4096`; GSM8K 50 | His config without DSpark: the baseline | always, first |
-| s0-dspark | s1 + `--speculative-algorithm DSPARK --speculative-attention-mode decode`; GSM8K 50 | His config as posted; does DSpark cost prefill (H4); is depth 5 clean | always |
-| s2-marlin | `--moe-runner-backend marlin --chunked-prefill-size 8192 --max-prefill-tokens 16384` | vLLM's MoE kernel family on sglang (H2) | always |
-| s3-ep4 | s1 + `--ep-size 4` | His question 2 (H3) | always |
-| s4-dp-attn | `--chunked-prefill-size 16384 --enable-dp-attention --dp-size 4 --enable-dp-lm-head --ep-size 4` | His production layout (H6); 4096 per DP rank | only if time is left |
+| Variant | Flags beyond `base_flags` | GSM8K | Reps | Question |
+|---|---|---|---|---|
+| s1-base | `--moe-runner-backend flashinfer_mxfp4 --chunked-prefill-size 4096`, no-autotune | 50 | 2 | His config without DSpark: the baseline |
+| s3-ep4 | s1 + `--ep-size 4` | 20 | 2 | His question 2 (H3) |
+| s2-marlin | `--moe-runner-backend marlin --chunked-prefill-size 8192 --max-prefill-tokens 16384` | 20 | 2 | vLLM's MoE kernel family on sglang (H2); autotune never runs for Marlin here (`flashinfer_autotune.py:129`) |
+| s1a-autotune | s1 without no-autotune, `SGLANG_FLASHINFER_AUTOTUNE_EXTEND=1` | 20 | 2 | Tuned MXFP4, the fair baseline for s2 (H7) |
+| s0-dspark | s1 + `--speculative-algorithm DSPARK --speculative-attention-mode decode` | 50 | 1 | His config as posted; does DSpark cost prefill (H4); is depth 5 clean |
+| s4-dp-attn | `--chunked-prefill-size 16384 --enable-dp-attention --dp-size 4 --enable-dp-lm-head --ep-size 4`, no-autotune | 20 | 1 | His production layout (H6); 4096 per DP rank |
+
+s1a's autotune runs at boot, before graph capture (`base_runner.py:268-274`), so it never lands in a measured rep.
+By default it tunes only decode-sized buckets, and DSV4 declines the model's own prefill tuning
+(`flashinfer_autotune.py:405`), so the env var adds the pass at the prefill token ceiling (`:415`). GSM8K (50 on
+the reporter's two configs, 20 on the rest) keeps a broken MoE or EP path from posting a fast, meaningless number.
 
 ## Workloads (`build_prompts.py`, `prefill_bench.py`)
 
 - Prompts: War and Peace (Project Gutenberg 2600, sha256 pinned, so both pods send the same text), instruction
   first, sized by the fully templated count: the checkpoint's `encoding/encoding_dsv4.py` (chat mode, one user
-  message) through the `PreTrainedTokenizerFast` both servers load, with a nonce in front. Built locally: 8,000 /
-  90,000 / 238,000 tokens, and 20 fresh nonces each moved the count by -3 to +5 tokens.
+  message) through the `PreTrainedTokenizerFast` both servers load, with one fixed nonce in front, so the files
+  are byte-identical on both pods. Built locally: 8,000 / 90,000 / 238,000 tokens, and 20 random nonces of the
+  client's shape moved the count by -3 to +5 tokens.
 - Why vllm-56771's "12k" prompt was 10,740 tokens: the book has CRLF line ends, its builder counted them, and the
   client's `read_text()` turned them into LF before sending. Checked locally: the LF counts plus 30 template tokens
   are exactly the server's 10,740 / 30,989 / 106,187. The builder now normalizes to LF. tok/s still comes only from
@@ -127,26 +136,54 @@ chunk size, and DSpark, which vary), `--revision 7872f01b`.
   prefix cache from the first block (sglang's radix cache in 256-token pages here, vLLM by chained block hashes), so
   the nonce leaves nothing to reuse. sglang's `Prefill batch` lines, kept in `prefill_log.txt`, show
   `#cached-token` per chunk.
-- Order per variant: a 17 x 23 probe (`correct` in its row), one 8K warmup, W1 twice, W2 twice.
+- Order per variant: a 17 x 23 probe (`correct` in its row), one 8K warmup (it also absorbs any kernel compiled
+  lazily on first use), then the workloads in `BENCH_WORKLOADS` order (default `w1,w2`), `BENCH_REPS` times each
+  (default 2).
   - W1: 9 concurrent streamed requests of ~90,000 tokens, `max_tokens` 61 (the reporter's workload).
   - W2: one ~238,000-token request, `max_tokens` 40 (hermia's).
 - One JSONL row per workload rep in `<variant>/prefill_bench.jsonl`: engine, variant, workload, rep, prompt_tokens
-  (server), completion_tokens, built_tokens, wall_s (first request sent to last response received), prefill_tok_s,
-  ttft_max_s, ok, error, sample (first 200 chars of the first reply), and per-request TTFT. The first failed request
-  ends the run as POST_FAIL.
-- `BENCH_REPS` and `BENCH_WORKLOADS` in a variant's env trim the run if time is short.
+  (server), completion_tokens, built_tokens, wall_s (first request sent to last response received), prefill_tok_s
+  (prompt_tokens / wall_s, the reporter's and hermia's method), ttft_wall_s (first request sent to last first token),
+  ttft_tok_s (prompt_tokens / ttft_wall_s, without the decode tail), ttft_max_s, ok, error, sample (first 200
+  chars of the first reply), and per-request TTFT. The first failed request, a dropped connection included, writes
+  its row and ends the run as POST_FAIL.
+- Quoting: the best rep's prefill_tok_s, with every rep and its ttft_tok_s listed beside it.
 - Timeouts: 1800 s per read; the last W1 request waits behind eight 90K prefills, about 400 s at 2K tok/s.
 - Dry run against a fake streaming server (local, 10-16): each rep's 9 requests arrived within 20 ms and were all in
-  flight at once, 21 of 21 nonces unique, tok/s recomputed from the fake's usage (not the builder's count), a 500 ends the run
-  with exit 1.
+  flight at once, 21 of 21 nonces unique, tok/s recomputed from the fake's usage (not the builder's count), a 500
+  and a connection dropped mid-stream each end the run with exit 1 and an error row.
+
+## Before quoting an sglang vs vLLM gap
+
+The two pods are rented separately and may land on different hosts. Compare their `results/<issue>/env.txt`
+(`nvidia-smi topo -m`, which must show no NV# links, and the current PCIe gen and width) and the setup log's
+maximum link gen, width, and power limit; a gap between hosts that differ there is not an engine gap. The recipes
+also differ in one host-facing setting by design: hermia's vLLM env sets `NCCL_P2P_DISABLE=1` (all-reduce through
+host memory), and the reporter's sglang flags only disable the custom all-reduce, so NCCL may still use P2P. State
+that next to any gap quoted.
 
 ## Hardware, hours, cost
 
-4x RTX PRO 6000 Server Edition, SECURE, $9.96/hr. `harness quote` (10-17 01:15Z): stock in EU-CZ-1, EUR-IS-1,
-US-NC-2; `planned_hours = 1.5` caps it at $16.43 worst case. Expected: setup about 10 min (image, 167 GB of weights
-at the 0.8-1.6 GB/s seen on 10-16), then s1 about 20 min, s0 about 22, s2 and s3 about 15 each: about 85 min, $14.
-s4 runs only inside the deadline. The vLLM side (`issues/sglang-33422-vllm/`) is 1.0 h, $10.96 worst case, about
-$7.50 expected. Both: $27.39 worst case, about $21 expected.
+4x RTX PRO 6000 Server Edition, SECURE, $9.96/hr. `harness quote` (10-17 01:40Z): stock in EU-CZ-1, EUR-IS-1,
+US-NC-2; `planned_hours = 1.75` caps it at $19.17 worst case.
+
+The first boot compiles DeepGEMM kernels for every batch size (`deep_gemm_wrapper/compile_utils.py:168-176`, which
+warns "typically 10-20 mins"); later boots on the same pod reuse the cache. Estimates, minutes:
+
+| Step | Boot | GSM8K | Workloads | Total | Running total |
+|---|---|---|---|---|---|
+| setup (image, 167 GB at the 0.8-1.6 GB/s seen on 10-16, prompts) | - | - | - | 10 | 10 |
+| s1-base | 25 (DeepGEMM precompile) | 3 | 8 (2 reps) | 36 | 46 |
+| s3-ep4 | 8 | 1.5 | 8 | 18 | 64 |
+| s2-marlin | 8 | 1.5 | 8 | 18 | 82 |
+| s1a-autotune | 12 (autotune) | 1.5 | 8 | 22 | 104 |
+| s0-dspark | 10 (draft graphs) | 3 | 4 (1 rep) | 17 | 121 |
+| s4-dp-attn | 8 | 1.5 | 4 (1 rep) | 14 | 135 |
+
+The deadline is at 105 min, so on these estimates s1, s3, s2, and s1a fit and s0 and s4 run only if the boots come
+in faster (W1 is about 2.5 min per rep at the reporter's 5.5K tok/s, W2 about 1 min). Expected cost is the whole
+1.75 h, $17.43. The vLLM side (`issues/sglang-33422-vllm/`) is 1.0 h, $10.96 worst case, about $7.50 expected.
+Both: $30.13 worst case, about $25 expected.
 
 ## Stop rules
 
@@ -155,10 +192,17 @@ $7.50 expected. Both: $27.39 worst case, about $21 expected.
   v0.5.21 also has `--cuda-graph-max-bs-decode` and `--enable-dp-attention`.
 - `setup.sh` stops under 400 MB/s of download after 3 min or a 500 MB/s cold read -> `harness down`.
 - s0 BOOT_FAIL is a result, not a reason to patch: #33407 does not fit FlashInfer 0.7.1 (above).
-- The deadline ends the pod at 1.5 h whatever is left; s4 is first to go.
+- The deadline ends the pod at 1.75 h whatever is left; the order above means s4 goes first, then s0. `exec` pulls
+  each variant as it finishes, so a cut loses only the variant in flight.
 
-Sequence: approval, `harness budget set`, `harness run sglang-33422 s1-base s0-dspark s2-marlin s3-ep4`, then
-`harness exec sglang-33422 s4-dp-attn` only if the pod has 20 minutes left.
+Sequence (`harness run` ends with `down`, so the matrix goes through `exec` on a pod kept up):
+
+```
+harness budget set sglang-33422 <usd> --note <approval>
+harness up sglang-33422
+harness exec sglang-33422 s1-base s3-ep4 s2-marlin s1a-autotune s0-dspark s4-dp-attn
+harness down sglang-33422
+```
 
 ## Files
 

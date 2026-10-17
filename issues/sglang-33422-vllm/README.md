@@ -58,20 +58,27 @@ checks vLLM 0.25.1, torch 2.11.0 (the FlashInfer install must not move it), Flas
 
 | Variant | Flags | Env | Quality |
 |---|---|---|---|
-| v0-hermia | hermia's `serve.sh` as above | `NCCL_P2P_DISABLE=1 FLASHINFER_DISABLE_VERSION_CHECK=1 CUDA_HOME=/usr/local/cuda` | GSM8K 50 (`gsm8k_chat.py`) |
+| v0-hermia | hermia's `serve.sh` as above | `NCCL_P2P_DISABLE=1 FLASHINFER_DISABLE_VERSION_CHECK=1 CUDA_HOME=/usr/local/cuda`, plus `BENCH_WORKLOADS=w2,w1` | GSM8K 50 (`gsm8k_chat.py`) |
 
-Then `prefill_bench.py` (post_smoke): probe, 8K warmup, W1 (9 x ~90K concurrent, 61 out) twice, W2 (one ~238K, 40
-out) twice, as on the sglang pod. W2 plus its 40 output tokens stays under `--max-model-len 262144`. vLLM's own
-`Avg prompt throughput` and `Prefix cache hit rate` lines go to `prefill_log.txt`.
+Then `prefill_bench.py` (post_smoke): probe, 8K warmup, then W2 (one ~238K, 40 out) twice before W1 (9 x ~90K
+concurrent, 61 out) twice, so hermia's own anchor is measured before the concurrency nobody has run on this recipe
+(the client takes the order from `BENCH_WORKLOADS`; dry-run checked). W2 plus its 40 output tokens stays under
+`--max-model-len 262144`. vLLM's own `Avg prompt throughput` and `Prefix cache hit rate` lines go to
+`prefill_log.txt`. Quoting follows the sglang README: the best rep's `prefill_tok_s`, every rep and its
+`ttft_tok_s` beside it.
 
-Note the asymmetry the comparison inherits: hermia disables NCCL P2P (all-reduce through host memory), the reporter's
-sglang config only disables the custom all-reduce (NCCL may still use P2P). Both are the published recipes, run as
-published.
+## Before quoting an sglang vs vLLM gap
+
+This pod and the sglang pod are rented separately and may land on different hosts. Compare the two
+`results/<issue>/env.txt` files (`nvidia-smi topo -m`, no NV# links, and the current PCIe gen and width) and the
+setup logs' maximum link gen, width, and power limit before calling any difference an engine difference. The recipes
+also differ by design: hermia disables NCCL P2P (all-reduce through host memory), the reporter's sglang config only
+disables the custom all-reduce (NCCL may still use P2P). Both run as published; say so next to any gap quoted.
 
 ## Hardware, hours, cost
 
 4x RTX PRO 6000 Server Edition, SECURE, $9.96/hr, the same GPU type as the sglang pod. `harness quote` (10-17
-01:15Z): stock in EU-CZ-1, EUR-IS-1, US-NC-2; `planned_hours = 1.0` caps it at $10.96 worst case. Expected: setup
+01:40Z): stock in EU-CZ-1, EUR-IS-1, US-NC-2; `planned_hours = 1.0` caps it at $10.96 worst case. Expected: setup
 about 10 min, boot about 10-15 min (load, DeepGEMM and TileLang JIT, graph capture), GSM8K 2 min, workloads about
 8 min: about 45 min, $7.50. The plan's 0.75 h left no room for a slow first JIT.
 
@@ -82,7 +89,14 @@ about 10 min, boot about 10-15 min (load, DeepGEMM and TileLang JIT, graph captu
 - v0 BOOT_FAIL -> record the fault, stop; the recipe is published as working on stock 0.25.1, so a failure here is a
   finding about the recipe or the pod, not something to tune around on paid time.
 
-Sequence: approval, `harness budget set sglang-33422-vllm`, `harness run sglang-33422-vllm v0-hermia`.
+Sequence, the same shape as the sglang pod's:
+
+```
+harness budget set sglang-33422-vllm <usd> --note <approval>
+harness up sglang-33422-vllm
+harness exec sglang-33422-vllm v0-hermia
+harness down sglang-33422-vllm
+```
 
 ## Files
 
