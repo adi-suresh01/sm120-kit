@@ -176,3 +176,15 @@ serves the >= 4K prompts that crashed 100% on flashinfer 0.6.18.post1, and DSpar
 spec (101.5 vs 68.9 tok/s). The reporter's private SM120 patch set was not used. a2-a4 were not needed; the
 adaptive-verification path is refused at startup for DSV4.1, so #60945's fix cannot be reached on this model.
 Total for this issue: $43.89 of $52 by the ledger.
+
+### Upstream (2026-10-16)
+
+- Posted the no-repro with these numbers on #56771 (issuecomment-6227106955).
+- The streaming half of `dsv41-stream-load` already exists upstream as #58857 (gitbisector, open since 09-26,
+  unreviewed, merge conflict only in a buildkite yaml). Posted our before/after on it (issuecomment-6227186731) and
+  the host-memory breakdown on #57469 (issuecomment-6227187028).
+- The eviction half is new upstream (#59527 tried an unconditional release and was closed: page cache helps
+  reloads, so this keeps the 90% RAM gate). Prepared as `upstream/evict-loaded-shards.patch` (vLLM main `523d74e2`,
+  signed off) with `upstream/PR_BODY.md`; not opened. vLLM's contributing guide requires AI-assisted PRs to say so in
+  the description and carry a `Co-authored-by:` trailer, and the submitter must review every changed line, so it
+  waits on Aditya's review.
