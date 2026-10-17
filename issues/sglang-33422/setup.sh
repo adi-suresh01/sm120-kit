@@ -45,9 +45,9 @@ before=$(du -sb "$hub" | cut -f1)
 start=$(date +%s)
 HF_XET_HIGH_PERFORMANCE=1 python3 -c "from huggingface_hub import snapshot_download; print(snapshot_download('$model', revision='$revision', max_workers=16))" &
 dl=$!
-# Some hosts reach HF at 15 MB/s (EUR-IS-2 on 10-16); under min_mb_s the download cannot finish inside the budget,
-# so stop at 3 min.
-min_mb_s=400
+# Some hosts reach HF at 15 MB/s (EUR-IS-2 on 10-16). 166.9 GB at 140 MB/s takes 20 min, the most setup can spend
+# inside planned_hours; US-NE-1 averaged 162 MB/s on 10-17 and was worth keeping, so stop at 3 min only below that.
+min_mb_s=140
 for _ in $(seq 36); do
     kill -0 "$dl" 2>/dev/null || break
     sleep 5
