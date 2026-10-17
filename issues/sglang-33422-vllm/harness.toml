@@ -43,8 +43,9 @@ fail_pattern = "illegal memory access|cudaErrorIllegalAddress|CUDA error: |CUDA_
 boot_timeout_s = 2400
 
 # hermia's env: P2P all-reduce deadlocks on these PCIe boards, FlashInfer 0.6.14 would refuse cubin 0.6.13, and
-# nvcc must be found for the MHC-prenorm TileLang kernel.
+# nvcc must be found for the MHC-prenorm TileLang kernel. W2 first: hermia's own 238K anchor lands before the 9x90K
+# concurrency nobody has run on this recipe.
 [variants.v0-hermia]
-env = { NCCL_P2P_DISABLE = "1", FLASHINFER_DISABLE_VERSION_CHECK = "1", CUDA_HOME = "/usr/local/cuda" }
+env = { NCCL_P2P_DISABLE = "1", FLASHINFER_DISABLE_VERSION_CHECK = "1", CUDA_HOME = "/usr/local/cuda", BENCH_WORKLOADS = "w2,w1" }
 [variants.v0-hermia.quality]
 gsm8k = 50
