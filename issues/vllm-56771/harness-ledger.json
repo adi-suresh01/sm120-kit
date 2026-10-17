@@ -1,9 +1,9 @@
 {
   "issue": "vllm-56771",
   "budget": {
-    "usd": 40.0,
-    "approved_at": "2026-10-16T12:40:25Z",
-    "note": "Aditya approved 2026-10-16: 4x RTX PRO 6000 Server Edition SECURE, 9.96/hr, planned 3.5h, quote 38.35 worst case, expected 20-26"
+    "usd": 52.0,
+    "approved_at": "2026-10-16T23:02:15Z",
+    "note": "Aditya approved 2026-10-16 after topping up: raise to 52 for attempt 7 (4x PRO 6000 SE SECURE, 9.96/hr, planned 1.75h, worst 17.43): stream-load patch, pinned rounding fix, weights on container disk, memory guard"
   },
   "pods": [
     {
@@ -94,6 +94,21 @@
       "deadline": "2026-10-16T18:44:56Z",
       "terminated_at": "2026-10-16T18:10:11Z",
       "cost_usd": 7.699633333333335,
+      "cost_source": "estimate"
+    },
+    {
+      "name": "sm120-vllm-56771-cbff77",
+      "id": "l1hiiy61vbv4ki",
+      "state": "terminated",
+      "gpu": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+      "count": 4,
+      "cloud": "SECURE",
+      "rate_usd_hr": 9.96,
+      "reserved_usd": 18.87171,
+      "reserved_at": "2026-10-16T23:02:29Z",
+      "deadline": "2026-10-17T00:45:50Z",
+      "terminated_at": "2026-10-17T00:07:18Z",
+      "cost_usd": 10.759566666666668,
       "cost_source": "estimate"
     }
   ]
