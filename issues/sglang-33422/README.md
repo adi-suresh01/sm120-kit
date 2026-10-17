@@ -265,4 +265,4 @@ probe correct on every variant, `#cached-token` 0 on every W1/W2 chunk.
 - Host memory peak (s1): 178.3 GiB of 754 GB.
 
 Cost: $16.87 of the $20 budget ($1.49 + $0.13 + $15.25, ledger estimates); with the vLLM side, $21.39 for the
-issue. Posted on sglang#33422.
+issue. Posted on sglang#33422 (issuecomment-6231294981).
