@@ -4,14 +4,17 @@ Order: an arithmetic probe (is the output sane at all), one 8K warmup, then BENC
 workload in BENCH_WORKLOADS (default w1,w2):
   w1  the reporter's: 9 concurrent ~90K-token prompts, 61 output tokens each
   w2  hermia's: one ~238K-token prompt, 40 output tokens
-A row's prefill_tok_s is the server's usage.prompt_tokens summed over the requests, divided by the seconds from the
-first request sent to the last response received. Requests stream, so each one's time to first token comes along.
+A row's prefill_tok_s is the server's usage.prompt_tokens summed over the requests, divided by wall_s, the seconds
+from the first request sent to the last response received (the reporter's and hermia's method). ttft_tok_s divides
+the same tokens by ttft_wall_s, first request sent to the last first token, which leaves out the short decode tail.
 Every prompt starts with a fresh nonce: W1's prompts share one text, and a prefix cache would otherwise serve
 eight of them from the first.
 Writes <out_dir>/prefill_bench.jsonl and exits 1 when any request fails, so the harness reports POST_FAIL.
 Usage: prefill_bench.py <port> <model> <engine> <variant> <out_dir> <prompt_dir>
 """
 
+import contextlib
+import http.client
 import json
 import os
 import sys
@@ -62,8 +65,12 @@ def chat(port: int, model: str, content: str, max_tokens: int) -> dict:
                         pieces.append(piece)
                     finish = choice.get("finish_reason") or finish
     except urllib.error.HTTPError as e:
-        error = f"HTTP {e.code}: {e.read()[:500].decode(errors='replace')}"
-    except (urllib.error.URLError, TimeoutError, ConnectionError, json.JSONDecodeError) as e:
+        error = f"HTTP {e.code}"
+        with contextlib.suppress(http.client.HTTPException, OSError):
+            error += ": " + e.read()[:500].decode(errors="replace")
+    # A server that drops the connection mid-stream raises IncompleteRead (an HTTPException); refused connections,
+    # resets, and timeouts are OSErrors. Either way the row records it and the run stops cleanly.
+    except (http.client.HTTPException, OSError, json.JSONDecodeError) as e:
         error = repr(e)
     done = time.monotonic()
     usage = usage or {}
@@ -73,6 +80,7 @@ def chat(port: int, model: str, content: str, max_tokens: int) -> dict:
         "ok": error is None,
         "error": error,
         "sent": sent,
+        "first": first,
         "done": done,
         "ttft_s": round(first - sent, 2) if first else None,
         "e2e_s": round(done - sent, 2),
@@ -114,7 +122,10 @@ def main() -> None:
             contents = [manifest["nonce_template"].format(uuid.uuid4().hex) + texts[name] for _ in range(n)]
             results = run(port, model, contents, max_tokens)
             ok = all(r["ok"] for r in results)
-            wall = max(r["done"] for r in results) - min(r["sent"] for r in results)
+            start = min(r["sent"] for r in results)
+            wall = max(r["done"] for r in results) - start
+            # A request that streamed no text has no first token, so the row has no TTFT-based rate.
+            ttft_wall = max(r["first"] for r in results) - start if all(r["first"] for r in results) else None
             prompt_tokens = sum(r["prompt_tokens"] for r in results) if ok else None
             row = {
                 "engine": engine,
@@ -127,6 +138,8 @@ def main() -> None:
                 "built_tokens": manifest["templated_tokens"][name] * n,
                 "wall_s": round(wall, 2),
                 "prefill_tok_s": round(prompt_tokens / wall, 1) if ok else None,
+                "ttft_wall_s": round(ttft_wall, 2) if ttft_wall else None,
+                "ttft_tok_s": round(prompt_tokens / ttft_wall, 1) if ok and ttft_wall else None,
                 "ttft_max_s": max((r["ttft_s"] for r in results if r["ttft_s"] is not None), default=None),
                 "ok": ok,
                 "error": next((r["error"] for r in results if r["error"]), None),
@@ -137,7 +150,7 @@ def main() -> None:
             f.write(json.dumps(row) + "\n")
             f.flush()
             print(name, rep, "ok" if ok else "FAILED", row["prompt_tokens"], row["wall_s"], row["prefill_tok_s"],
-                  flush=True)
+                  row["ttft_tok_s"], flush=True)
             if not ok:
                 # A crashed engine fails every later request too; one failure is the answer.
                 sys.exit(1)

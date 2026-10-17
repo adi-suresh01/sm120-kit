@@ -11,7 +11,6 @@ import importlib.util
 import json
 import sys
 import urllib.request
-import uuid
 from pathlib import Path
 
 from huggingface_hub import snapshot_download
@@ -23,6 +22,9 @@ SOURCE = "https://www.gutenberg.org/cache/epub/2600/pg2600.txt"
 SOURCE_SHA256 = "2d5bb2ad5f422765e714617e21fa31bbaf8958aa79682c86fca6660fcc5d1b2b"
 # Every W1 prompt shares one text, so only the nonce keeps the prefix caches from serving one request from another.
 NONCE_TEMPLATE = "Request {}.\n\n"
+# Sizing uses one fixed nonce of the client's shape, so the prompt files are byte-identical on every pod; the client
+# sends a random one.
+SIZING_NONCE = NONCE_TEMPLATE.format("8d6e3a0f5b2c4e719a0d3f6b2e8c1a57")
 INSTRUCTION = "Below is a long excerpt from a novel. Summarize what happens in it in three sentences.\n\n"
 # W2 at 238K is the prompt behind hermia's ~12.5K tok/s, and stays under vLLM's --max-model-len 262144 with its
 # 40 output tokens.
@@ -57,7 +59,6 @@ def main() -> None:
         return len(tok.encode(prompt, add_special_tokens=False))
 
     ids = tok.encode(body, add_special_tokens=False)
-    nonce = NONCE_TEMPLATE.format(uuid.uuid4().hex)
     manifest = {
         "source": SOURCE,
         "source_sha256": SOURCE_SHA256,
@@ -68,13 +69,13 @@ def main() -> None:
         "templated_tokens": {},
     }
     for name, target in TARGETS.items():
-        n = target - templated(nonce + INSTRUCTION)
+        n = target - templated(SIZING_NONCE + INSTRUCTION)
         # Tokens can merge across the cut, so the count is corrected until it lands on the target.
         for _ in range(5):
             if n > len(ids):
                 sys.exit(f"source has {len(ids)} tokens, fewer than {n}")
             content = INSTRUCTION + tok.decode(ids[:n])
-            got = templated(nonce + content)
+            got = templated(SIZING_NONCE + content)
             if got == target:
                 break
             n += target - got
