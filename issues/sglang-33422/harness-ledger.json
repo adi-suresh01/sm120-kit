@@ -1,0 +1,9 @@
+{
+  "issue": "sglang-33422",
+  "budget": {
+    "usd": 20.0,
+    "approved_at": "2026-10-17T02:54:39Z",
+    "note": "Aditya approved 2026-10-16: 4x PRO 6000 SE SECURE, 9.96/hr, planned 1.75h, worst 19.17; sglang v0.5.22 DSV4-Flash-0731 prefill variants s1 s3 s2 s1a s0 s4"
+  },
+  "pods": []
+}
