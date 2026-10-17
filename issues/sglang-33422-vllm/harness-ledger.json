@@ -1,0 +1,40 @@
+{
+  "issue": "sglang-33422-vllm",
+  "budget": {
+    "usd": 11.0,
+    "approved_at": "2026-10-17T02:54:40Z",
+    "note": "Aditya approved 2026-10-16: 4x PRO 6000 SE SECURE, 9.96/hr, planned 1.0h, worst 10.96; vLLM 0.25.1 hermia config v0"
+  },
+  "pods": [
+    {
+      "name": "sm120-sglang-33422-vllm-15bd7d",
+      "id": "yc0iqe0sndslbg",
+      "state": "terminated",
+      "gpu": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+      "count": 4,
+      "cloud": "SECURE",
+      "rate_usd_hr": 9.96,
+      "reserved_usd": 10.956,
+      "reserved_at": "2026-10-17T02:54:46Z",
+      "deadline": "2026-10-17T03:54:46Z",
+      "terminated_at": "2026-10-17T03:00:38Z",
+      "cost_usd": 0.9738666666666668,
+      "cost_source": "estimate"
+    },
+    {
+      "name": "sm120-sglang-33422-vllm-a0a58d",
+      "id": "04poq8d9hsj1b1",
+      "state": "terminated",
+      "gpu": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+      "count": 4,
+      "cloud": "SECURE",
+      "rate_usd_hr": 9.96,
+      "reserved_usd": 10.02474,
+      "reserved_at": "2026-10-17T03:01:09Z",
+      "deadline": "2026-10-17T03:56:03Z",
+      "terminated_at": "2026-10-17T03:22:33Z",
+      "cost_usd": 3.5524000000000004,
+      "cost_source": "estimate"
+    }
+  ]
+}

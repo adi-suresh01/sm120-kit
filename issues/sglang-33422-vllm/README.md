@@ -110,3 +110,27 @@ harness down sglang-33422-vllm
 ## Results
 
 None yet.
+
+## Results (2026-10-17, v0-hermia)
+
+Pod sm120-sglang-33422-vllm-a0a58d (04poq8d9hsj1b1), US-NE-1, 4x RTX PRO 6000 Blackwell Server Edition, driver
+595.91.07, PCIe Gen5 x16 max, 600 W limit, container memory limit 1006 GB. Topology: GPU0 on NUMA 0, GPUs 1-3 on
+NUMA 1 (GPU0 to the others SYS, GPU2-GPU3 PIX, GPU1 to GPU2/3 NODE). The first pod (yc0iqe0sndslbg, same host) was
+ended by the download gate at 162 MB/s under the old 400 MB/s floor ($0.97); the gate is now 140 MB/s (fc54f28).
+
+Setup 11 min (166 GB at about 167 MB/s, cold read 6932 MB/s). Weights loaded in 25.8 s, boot 261 s, chunked prefill
+with max_num_batched_tokens=8192, GSM8K-50 50/50, 17x23 probe correct, host memory peak 177.7 GiB.
+
+| Workload | Rep | Prompt tokens | Wall s | Prefill tok/s (wall) | tok/s (TTFT) |
+|---|---|---|---|---|---|
+| warmup, 1 x 8K | 1 | 7,987 | 1.10 | 7,262 | 8,476 |
+| W2, 1 x 238K (hermia's shape) | 1 | 237,989 | 33.38 | 7,129 | 7,204 |
+| W2 | 2 | 237,993 | 33.28 | 7,150 | 7,227 |
+| W1, 9 x 90K concurrent (reporter's shape) | 1 | 809,902 | 99.13 | 8,170 | 8,234 |
+| W1 | 2 | 809,897 | 99.12 | 8,171 | 8,235 |
+
+hermia's ~12.5K tok/s for a single ~256K prompt did not reproduce with hermia's flags, vLLM 0.25.1 and FlashInfer
+0.6.14 on this host: 7.1-7.2K, reps within 0.3%. Differences left: the 0731 weights instead of -DSpark (same
+architecture), this host's split-NUMA topology, and whatever hermia's card and host were. The reporter's sglang v0.5.16
+number on the same 9 x 90K shape was 5,540 tok/s on 300 W Max-Q cards, so it is not comparable to this until the
+sglang pod runs on Server Edition. Cost: $4.52 ($0.97 + $3.55, ledger estimates).
