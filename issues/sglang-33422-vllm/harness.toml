@@ -1,0 +1,51 @@
+issue = "sglang-33422-vllm"
+# Setup about 10 min (image, FlashInfer 0.6.14, 167 GB of weights to container disk, prompts), v0 about 25-35 min
+# (boot with TileLang and DeepGEMM JIT, GSM8K, a warmup, two reps each of W1 and W2).
+planned_hours = 1.0
+
+[pod]
+# hermia's stack (vLLM 0.25.1); setup.sh raises FlashInfer to 0.6.14 the way hermia's setup-venv.sh does.
+image = "vllm/vllm-openai:v0.25.1@sha256:e4f88a835143cd22aee2397a26ec6bb80b3a4a6fe0c882bcbc63822904766089"
+count = 4
+min_cuda = "13.0"
+# The image plus 167 GB of weights, which setup.sh keeps on container disk (README.md).
+container_disk_gb = 240
+volume_gb = 20
+needs_hf_token = false
+avoid_data_centers = ["EUR-IS-2"]
+# The same GPU type as the sglang pod, so the two engines differ only in the software.
+gpus = [
+  { id = "NVIDIA RTX PRO 6000 Blackwell Server Edition", cloud = "SECURE" },
+]
+
+[server]
+package = "vllm"
+model = "deepseek-ai/DeepSeek-V4-Flash-0731"
+launch = ["vllm", "serve", "deepseek-ai/DeepSeek-V4-Flash-0731"]
+# hermia's scripts/serve.sh, minus the local path, the served name, and the host and port the harness sets. The
+# checkpoint is 0731, the one the sglang pod serves, not hermia's DeepSeek-V4-Flash-DSpark (README.md).
+base_flags = [
+  "--revision", "7872f01b1d1fe23eabc4c98b48bffcef5a386062",
+  "--tensor-parallel-size", "4",
+  "--enable-expert-parallel",
+  "--kv-cache-dtype", "fp8",
+  "--max-model-len", "262144",
+  "--gpu-memory-utilization", "0.90",
+  "--kernel-config", '{"moe_backend":"marlin"}',
+  "--enable-auto-tool-choice",
+  "--tool-call-parser", "deepseek_v4",
+  "--reasoning-parser", "deepseek_v4",
+  "--trust-remote-code",
+]
+port = 8000
+# The 719 launch failure is how hermia's stock path dies on a prefill past ~256K (docs/BUGS.md there).
+fail_pattern = "illegal memory access|cudaErrorIllegalAddress|CUDA error: |CUDA_ERROR_LAUNCH_FAILED"
+boot_timeout_s = 2400
+
+# hermia's env: P2P all-reduce deadlocks on these PCIe boards, FlashInfer 0.6.14 would refuse cubin 0.6.13, and
+# nvcc must be found for the MHC-prenorm TileLang kernel. W2 first: hermia's own 238K anchor lands before the 9x90K
+# concurrency nobody has run on this recipe.
+[variants.v0-hermia]
+env = { NCCL_P2P_DISABLE = "1", FLASHINFER_DISABLE_VERSION_CHECK = "1", CUDA_HOME = "/usr/local/cuda", BENCH_WORKLOADS = "w2,w1" }
+[variants.v0-hermia.quality]
+gsm8k = 50
