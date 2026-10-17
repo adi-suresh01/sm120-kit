@@ -1,0 +1,79 @@
+issue = "sglang-33422"
+# Setup about 10 min (image, 167 GB of weights to container disk, prompts), then about 15-20 min per variant (boot,
+# GSM8K on s1 and s0, a warmup, two reps each of W1 and W2). s1, s0, s2, s3 fit; s4 runs only if time is left.
+planned_hours = 1.5
+
+[pod]
+# The newest release; FlashInfer 0.7.1 serves the DSpark draft's topk=192 without PR #33407 (README.md).
+image = "lmsysorg/sglang:v0.5.22-cu130@sha256:e3a4f06001a29542fc4a8638536d9ffc5eb9c9942b08603c09b19a56eae4a1ae"
+count = 4
+min_cuda = "13.0"
+# The image plus 167 GB of weights, which setup.sh keeps on container disk: /workspace is a FUSE mount on secure
+# pods and read the vllm-56771 checkpoint too slowly to boot.
+container_disk_gb = 260
+# HF_HOME's small files, the prompts, and logs.
+volume_gb = 20
+needs_hf_token = false
+# Its one 4x host reached HF at 15 MB/s on 10-16 (issues/vllm-56771/README.md).
+avoid_data_centers = ["EUR-IS-2"]
+# The reporter's box is 4x Max-Q Workstation Edition, PCIe only; the Workstation Edition had no 4x stock on 10-16.
+gpus = [
+  { id = "NVIDIA RTX PRO 6000 Blackwell Server Edition", cloud = "SECURE" },
+]
+
+[server]
+package = "sglang"
+model = "deepseek-ai/DeepSeek-V4-Flash-0731"
+launch = ["python3", "-m", "sglang.launch_server", "--model-path", "deepseek-ai/DeepSeek-V4-Flash-0731"]
+# The reporter's flags common to every variant. v0.5.22 split --cuda-graph-max-bs into per-phase flags, and argparse
+# rejects the old spelling as an ambiguous prefix, so the decode one carries his 64.
+base_flags = [
+  "--revision", "7872f01b1d1fe23eabc4c98b48bffcef5a386062",
+  "--tp-size", "4",
+  "--trust-remote-code",
+  "--mem-fraction-static", "0.90",
+  "--context-length", "1048576",
+  "--swa-full-tokens-ratio", "0.1",
+  "--max-running-requests", "64",
+  "--cuda-graph-max-bs-decode", "64",
+  "--kv-cache-dtype", "fp8_e4m3",
+  "--disable-custom-all-reduce",
+  "--disable-flashinfer-autotune",
+]
+port = 30000
+# The last pattern is FlashInfer 0.7.1's own dispatch error, the form #33407's boot crash would take on this stack.
+fail_pattern = "illegal memory access|cudaErrorIllegalAddress|CUDA error: |SM120 sparse-MLA has no decode kernel"
+# Reading 167 GB, DeepGEMM precompile, and graph capture, with DSpark's draft graphs on s0.
+boot_timeout_s = 2400
+
+# The baseline: the reporter's config without DSpark, first so one number lands even if a later variant fails.
+[variants.s1-base]
+flags = ["--moe-runner-backend", "flashinfer_mxfp4", "--chunked-prefill-size", "4096"]
+[variants.s1-base.quality]
+gsm8k = 50
+
+# The reporter's config as posted, DSpark included.
+[variants.s0-dspark]
+flags = [
+  "--moe-runner-backend", "flashinfer_mxfp4", "--chunked-prefill-size", "4096",
+  "--speculative-algorithm", "DSPARK", "--speculative-attention-mode", "decode",
+]
+[variants.s0-dspark.quality]
+gsm8k = 50
+
+# vLLM's MoE kernel family on sglang, with larger prefill chunks.
+[variants.s2-marlin]
+flags = ["--moe-runner-backend", "marlin", "--chunked-prefill-size", "8192", "--max-prefill-tokens", "16384"]
+
+# Expert parallelism, the other half of the vLLM recipe (the reporter's question 2).
+[variants.s3-ep4]
+flags = ["--moe-runner-backend", "flashinfer_mxfp4", "--chunked-prefill-size", "4096", "--ep-size", "4"]
+
+# Only if time is left: the reporter's production layout (DP attention, DP LM head, EP4, from his published
+# compose file) without DSpark. 16384 is 4096 per DP rank, s1's chunk. v0.5.22 reads this spelling as
+# --attn-dp-size 4, and v0.5.21 (the fallback image) has no --attn-dp-size.
+[variants.s4-dp-attn]
+flags = [
+  "--moe-runner-backend", "flashinfer_mxfp4", "--chunked-prefill-size", "16384",
+  "--enable-dp-attention", "--dp-size", "4", "--enable-dp-lm-head", "--ep-size", "4",
+]
