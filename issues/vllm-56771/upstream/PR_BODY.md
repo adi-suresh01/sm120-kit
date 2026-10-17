@@ -51,6 +51,8 @@ The after run is not an isolated test of this PR, since it also changed the wrap
 - `_drop_page_cache` returns early off Linux, which also clears the two macOS mypy errors in `drop_checkpoint_cache` that #61836 fixes.
 - Not a fix for #57469: that report's remaining failure is pinned host memory (shmem-rss), which is #59849's area.
 
+**AI assistance.** The code, test and this description were drafted with Claude (the commit carries `Assisted-by: Claude`). I reviewed the full diff, and the GPU runs above are mine.
+
 ---
 
 <details>

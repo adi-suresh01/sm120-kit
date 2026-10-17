@@ -1,4 +1,4 @@
-From 97424a370da7ae8c8f603267b0d1391cd71e90a9 Mon Sep 17 00:00:00 2001
+From e85f5541fa24dc5c42e4e8c6da83199a90023a59 Mon Sep 17 00:00:00 2001
 From: Aditya Suresh <adityasuresh22@gmail.com>
 Date: Fri, 16 Oct 2026 17:08:54 -0700
 Subject: [PATCH] [Bugfix][Model Loader] Evict loaded shards when checkpoint
@@ -15,6 +15,7 @@ fit are untouched, and so are eager, torchao and prefetch loads. The last
 shard is still referenced when the iterator ends, so it is left to the
 kernel.
 
+Assisted-by: Claude
 Signed-off-by: Aditya Suresh <adityasuresh22@gmail.com>
 ---
  tests/model_executor/test_weight_utils.py     | 46 ++++++++++++++++++

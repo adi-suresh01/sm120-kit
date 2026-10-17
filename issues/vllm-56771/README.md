@@ -185,6 +185,7 @@ Total for this issue: $43.89 of $52 by the ledger.
   the host-memory breakdown on #57469 (issuecomment-6227187028).
 - The eviction half is new upstream (#59527 tried an unconditional release and was closed: page cache helps
   reloads, so this keeps the 90% RAM gate). Prepared as `upstream/evict-loaded-shards.patch` (vLLM main `523d74e2`,
-  signed off) with `upstream/PR_BODY.md`; not opened. vLLM's contributing guide requires AI-assisted PRs to say so in
-  the description and carry a `Co-authored-by:` trailer, and the submitter must review every changed line, so it
-  waits on Aditya's review.
+  signed off) with `upstream/PR_BODY.md`. vLLM's contributing guide requires AI-assisted PRs to say so in the
+  description and carry an attribution trailer, and the submitter must review every changed line. Aditya reviewed
+  it; rebased onto main `be25977`, commit `e85f554` with `Assisted-by: Claude`, opened as vllm#62110 from
+  adi-suresh01/vllm (fork created 10-16).
