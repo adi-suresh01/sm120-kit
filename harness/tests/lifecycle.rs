@@ -618,6 +618,17 @@ fn nvlink_fails_the_topology_gate_and_terminates() {
 }
 
 #[test]
+fn a_gpu_held_from_outside_fails_the_gate_before_setup_and_terminates() {
+    let w = World::default();
+    *w.remote.gpu_memory.borrow_mut() = "0, 3\n1, 90892\n".into();
+    let err = err_text(w.up());
+    assert!(err.contains("GPU 1 has 90892 MiB in use"), "{err}");
+    assert!(w.remote.jobs.borrow().is_empty());
+    assert_eq!(w.states(), [PodState::Terminated]);
+    assert!(w.cloud.billing_pods().is_empty());
+}
+
+#[test]
 fn an_empty_topology_reply_fails_the_gate_and_terminates() {
     let w = World::default();
     w.remote.topo.borrow_mut().clear();

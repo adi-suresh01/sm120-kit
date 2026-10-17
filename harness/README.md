@@ -141,7 +141,7 @@ one variant into the next.
 | `harness budget set <issue> <usd> --note <text>` | Records Aditya's approval. Nothing rents without it |
 | `harness budget show <issue>` | Spent, reserved, remaining; upgrades estimates to RunPod billing records |
 | `harness quote <issue>` | First in-stock choice, $/hr, the deadline `up` would set, worst-case cost; works before `budget set` |
-| `harness up <issue> [--no-setup]` | Reserve, create, wait for SSH, topology gate, copy the kit, `env_report.sh`, `setup.sh` |
+| `harness up <issue> [--no-setup]` | Reserve, create, wait for SSH, topology gate, idle-GPU gate (every GPU under 2 GiB used), copy the kit, `env_report.sh`, `setup.sh` |
 | `harness exec <issue> <variant>...` | Copies the issue folder again, runs variants on the live pod, pulls each one's results |
 | `harness pull <issue>` | Pulls `results/<issue>/` from the pod |
 | `harness down <issue>` | Pulls (at most 5 min), terminates, books the cost |

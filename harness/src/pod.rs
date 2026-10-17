@@ -382,6 +382,33 @@ pub fn check_pcie_topology(topo: &str, count: u32) -> Result<()> {
     Ok(())
 }
 
+/// Fails closed like the topology gate: a reply with no readable GPU line refuses the box.
+pub fn check_gpus_idle(reply: &str) -> Result<()> {
+    let mut seen = 0;
+    for line in reply.lines().filter(|line| !line.trim().is_empty()) {
+        let reading = line
+            .split_once(',')
+            .and_then(|(index, used)| Some((index.trim(), used.trim().parse::<u64>().ok()?)));
+        let Some((index, used)) = reading else {
+            bail!("{GPU_MEMORY} printed {line:?}, not a GPU index and a MiB count:\n{reply}");
+        };
+        ensure!(
+            used < IDLE_MIB,
+            "GPU {index} has {used} MiB in use before anything of ours ran, so a process outside this container \
+             still holds it:\n{reply}"
+        );
+        seen += 1;
+    }
+    ensure!(seen > 0, "{GPU_MEMORY} printed no GPUs:\n{reply}");
+    Ok(())
+}
+
+/// A GPU that a process outside the container still holds passes the topology gate, then fails the first variant's
+/// idle wait minutes later, after setup has paid for the weights. nvidia-smi lists no process for it, since the
+/// holder lives in another PID namespace.
+pub const GPU_MEMORY: &str = "timeout 60 nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits";
+/// wait_gpu_idle.sh's bar: a fresh container reads far below it, and a leftover model far above.
+const IDLE_MIB: u64 = 2048;
 /// The coreutils `timeout` ends nvidia-smi on a wedged GPU well inside the ssh command limit, so the gate fails
 /// with a message instead of a killed ssh.
 pub const TOPOLOGY: &str = "timeout 60 nvidia-smi topo -m";
@@ -743,6 +770,7 @@ fn gate_and_copy(ctx: &Ctx, spec: &IssueSpec, entry: &PodEntry, target: &Target)
     if spec.pod.require_pcie() {
         check_pcie_topology(&ctx.remote.run(target, TOPOLOGY)?, spec.pod.count)?;
     }
+    check_gpus_idle(&ctx.remote.run(target, GPU_MEMORY)?)?;
     let issue_dir = format!("issues/{}", spec.issue);
     ctx.remote.upload(target, ctx.repo, &["harness/pod", &issue_dir])
 }
@@ -1008,6 +1036,30 @@ mod tests {
         }
         assert!(topology_error(PCIE, 1).contains("exactly the 1 GPUs"));
         assert!(topology_error(PCIE, 4).contains("exactly the 4 GPUs"));
+    }
+
+    #[test]
+    fn idle_gpus_pass_the_memory_gate() {
+        check_gpus_idle("0, 0\n1, 2047\n").unwrap();
+    }
+
+    #[test]
+    fn a_gpu_held_from_outside_fails_the_memory_gate() {
+        let err = format!("{:#}", check_gpus_idle("0, 3\n1, 90892\n2, 3\n").unwrap_err());
+        assert!(err.contains("GPU 1 has 90892 MiB in use"), "{err}");
+    }
+
+    #[test]
+    fn output_that_proves_nothing_fails_the_memory_gate() {
+        for garbled in [
+            "",
+            "\n",
+            "NVIDIA-SMI has failed because it couldn't communicate with the NVIDIA driver.\n",
+            "0, [N/A]\n",
+            "0, 0\n1\n",
+        ] {
+            assert!(check_gpus_idle(garbled).is_err(), "{garbled:?} passed");
+        }
     }
 
     #[test]

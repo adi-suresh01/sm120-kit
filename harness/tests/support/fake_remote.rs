@@ -15,6 +15,7 @@ pub struct FakeRemote {
     pub preflight_ok: Cell<bool>,
     pub reachable: Cell<bool>,
     pub topo: RefCell<String>,
+    pub gpu_memory: RefCell<String>,
     /// Every script `run` was given, in order.
     pub scripts: RefCell<Vec<String>>,
     pub jobs: RefCell<Vec<String>>,
@@ -55,6 +56,7 @@ impl Default for FakeRemote {
             preflight_ok: Cell::new(true),
             reachable: Cell::new(true),
             topo: RefCell::new(include_str!("../fixtures/topo_pcie.txt").to_string()),
+            gpu_memory: RefCell::new("0, 0\n1, 0\n".into()),
             scripts: RefCell::new(Vec::new()),
             jobs: RefCell::new(Vec::new()),
             exits: RefCell::new(VecDeque::new()),
@@ -156,6 +158,9 @@ impl Remote for FakeRemote {
         }
         if script.contains("nvidia-smi topo -m") {
             return Ok(self.topo.borrow().clone());
+        }
+        if script.contains("--query-gpu=index,memory.used") {
+            return Ok(self.gpu_memory.borrow().clone());
         }
         if script.contains("setsid nohup") {
             self.jobs.borrow_mut().push(script.to_string());
