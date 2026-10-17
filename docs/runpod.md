@@ -59,6 +59,13 @@ container is gone. The harness's memory guard (`harness/README.md`, Memory guard
 variant runs, trims page cache at 80% of the limit, and kills the server at 93%, so the run ends with its logs and a
 report of what filled the memory still on the pod; `exec` also pulls a running variant every 5 minutes.
 
+What counts against that limit, measured on a US-NC-2 4x pod (10-16): page cache does (a 510 GB download left 160
+GiB charged, and posix_fadvise DONTNEED took it to 0.1 GiB), and so does pinned host memory from CUDA (shown as
+shmem in memory.stat). `memory.reclaim` is writable inside the container, `memory.high` is read-only, and py-spy
+cannot attach (no CAP_SYS_PTRACE). /workspace on secure pods is a MooseFS FUSE mount; the container disk is local
+(a cold 100 GB read at 9.6 GB/s), so large weights go on container disk (`container_disk_gb`) and the volume stays
+small.
+
 ## Rules
 
 - Each issue's GPU budget needs Aditya's explicit approval (GPU, count, $/hr, hours, total), recorded with

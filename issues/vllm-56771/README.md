@@ -144,3 +144,35 @@ Engram shard). Every patched variant now carries both; memory.jsonl will show wh
 
 Total for this issue: $33.13 of $40 by the ledger ($32.61 billed), not enough for another 4x boot. Attempt 7 quote:
 4x Server Edition SECURE, $9.96/hr, planned 1.75 h (setup, a1, a0), worst case $17.43.
+
+### Attempt 7 (2026-10-16, US-NC-2, a1 and a0 serve, $10.76 estimated)
+
+Pod sm120-vllm-56771-cbff77 (l1hiiy61vbv4ki), 4x RTX PRO 6000 Blackwell Server Edition, driver 595.91.07, PCIe only
+(PIX/NODE). Image nightly `49cb2bbf` (vllm 0.32.0rc1.dev281+g49cb2bbf7, flashinfer-python 0.7.2, torch
+2.14.0+cu130), patches `pr60762-dsv41-block64` and `dsv41-stream-load`, `PYTORCH_ALLOC_CONF=pinned_max_round_threshold_mb:64`.
+
+- Setup: container up in 2 min; the cgroup limit read 702 GiB from `/sys/fs/cgroup/memory.max`; 510 GB of weights
+  to container disk in 110 s; drop-cache took memory.current from 160.1 GiB to 0.1 GiB; cold read of shard 48
+  from container disk 9647 MB/s (/workspace here is MooseFS too). py-spy installs but cannot read stacks (no
+  CAP_SYS_PTRACE). On this host `memory.reclaim` is writable and `memory.high` read-only.
+- Memory: peak 290.6 GiB (a1), 286.5 (a0), 281.3 (a5) of 702.2 GiB, always at the end of the main load (Engram
+  shards 47-48). Of that, 189.2 GiB is shmem: the pinned Engram slices at exact size, so torch's pinned memory is
+  charged to the cgroup. No trim ever ran. Attempt 6 crossed 688 GiB without the stream-load patch.
+- Load: main pass 815-829 s (about 19.6 s per shard, the same with and without speculation), DSpark drafter pass
+  302-308 s (it walks all 48 shards for mtp.* only). vLLM logged `Available RAM: 499.62 GiB` at the eviction gate.
+
+| Variant | Boot | Prompts (prompt tokens, decode tok/s) | Result |
+|---|---|---|---|
+| a1-dspark-graphs (the reporter's DSpark k=5, FULL_AND_PIECEWISE) | 1339 s | 10740: 80.6; 106187: 24.7; 512-token decode: 101.5 | OK, no illegal memory access, coherent output; mean acceptance length 2.38-2.64 |
+| a0-nospec-graphs | 886 s | 10740: 53.6; 30989: 47.1; 106187: 25.8; 512-token decode: 68.9 | OK, no fault |
+| a5-dspark-adaptive (`enable_adaptive_verification`) | 1204 s | none | BOOT_FAIL by design: `ValueError: Adaptive verification trims verification requests on device, which the DeepseekV41IndexerBackend attention backend does not support` |
+
+The prompt builder's labels overcount: "12k", "35k", "120k" are 10740, 30989, 106187 tokens in the server's count, so
+the #58910 case ran at 31K (and 106K), not 35K. Each length ran once, at concurrency 1.
+
+Verdict: H1 holds on this stack. With FlashInfer 0.7.2 and #60762's 64-token blocks (`--block-size 64
+--kv-cache-dtype fp8 --attention-config '{"indexer_kv_dtype":"fp8"}'`), the reporter's DSpark + CUDA graphs config
+serves the >= 4K prompts that crashed 100% on flashinfer 0.6.18.post1, and DSpark decodes 1.47x faster than no
+spec (101.5 vs 68.9 tok/s). The reporter's private SM120 patch set was not used. a2-a4 were not needed; the
+adaptive-verification path is refused at startup for DSV4.1, so #60945's fix cannot be reached on this model.
+Total for this issue: $43.89 of $52 by the ledger.
