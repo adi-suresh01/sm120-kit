@@ -15,8 +15,9 @@ container_disk_gb = 260
 # HF_HOME's small files, the prompts, and logs.
 volume_gb = 20
 needs_hf_token = false
-# Its one 4x host reached HF at 15 MB/s on 10-16 (issues/vllm-56771/README.md).
-avoid_data_centers = ["EUR-IS-2"]
+# EUR-IS-2's one 4x host reached HF at 15 MB/s on 10-16 (issues/vllm-56771/README.md). US-NC-1 handed out GPUs
+# that a process outside the container already held (70-90 GB used) on two pods in a row on 10-17.
+avoid_data_centers = ["EUR-IS-2", "US-NC-1"]
 # The reporter's box is 4x Max-Q Workstation Edition, PCIe only; the Workstation Edition had no 4x stock on 10-16.
 gpus = [
   { id = "NVIDIA RTX PRO 6000 Blackwell Server Edition", cloud = "SECURE" },

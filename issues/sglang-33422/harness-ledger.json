@@ -5,5 +5,36 @@
     "approved_at": "2026-10-17T02:54:39Z",
     "note": "Aditya approved 2026-10-16: 4x PRO 6000 SE SECURE, 9.96/hr, planned 1.75h, worst 19.17; sglang v0.5.22 DSV4-Flash-0731 prefill variants s1 s3 s2 s1a s0 s4"
   },
-  "pods": []
+  "pods": [
+    {
+      "name": "sm120-sglang-33422-59d958",
+      "id": "ezpsbqqlivnajk",
+      "state": "terminated",
+      "gpu": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+      "count": 4,
+      "cloud": "SECURE",
+      "rate_usd_hr": 9.96,
+      "reserved_usd": 19.173,
+      "reserved_at": "2026-10-17T05:49:52Z",
+      "deadline": "2026-10-17T07:34:52Z",
+      "terminated_at": "2026-10-17T05:58:50Z",
+      "cost_usd": 1.4884666666666668,
+      "cost_source": "estimate"
+    },
+    {
+      "name": "sm120-sglang-33422-89ff9c",
+      "id": "z4c5536vfxm5bf",
+      "state": "terminated",
+      "gpu": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+      "count": 4,
+      "cloud": "SECURE",
+      "rate_usd_hr": 9.96,
+      "reserved_usd": 18.509553333333336,
+      "reserved_at": "2026-10-17T06:01:27Z",
+      "deadline": "2026-10-17T07:42:49Z",
+      "terminated_at": "2026-10-17T06:02:15Z",
+      "cost_usd": 0.1328,
+      "cost_source": "estimate"
+    }
+  ]
 }
