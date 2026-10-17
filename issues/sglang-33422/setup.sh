@@ -23,6 +23,9 @@ print("sglang", version("sglang"), "flashinfer", version("flashinfer-python"), "
       "cuda", torch.version.cuda, "gpus", torch.cuda.device_count(), torch.cuda.get_device_name(0))
 assert version("flashinfer-python") == sys.argv[1], f"want FlashInfer {sys.argv[1]}"
 EOF
+# env.txt has the current PCIe link, which reads low at idle; the sglang and vLLM pods are compared on the maximum
+# link and the power limit (README.md).
+timeout 60 nvidia-smi --query-gpu=index,pcie.link.gen.max,pcie.link.width.max,power.limit --format=csv
 echo "container memory limit: $(python3 -I "$guard" --limit)"
 df -h /workspace /root
 

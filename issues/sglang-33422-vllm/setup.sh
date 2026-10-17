@@ -41,6 +41,9 @@ if ! command -v nvcc >/dev/null; then
     exit 1
 fi
 nvcc --version | tail -n 1
+# env.txt has the current PCIe link, which reads low at idle; the sglang and vLLM pods are compared on the maximum
+# link and the power limit (README.md).
+timeout 60 nvidia-smi --query-gpu=index,pcie.link.gen.max,pcie.link.width.max,power.limit --format=csv
 echo "container memory limit: $(python3 -I "$guard" --limit)"
 df -h /workspace /root
 
