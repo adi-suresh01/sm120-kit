@@ -66,6 +66,13 @@ cannot attach (no CAP_SYS_PTRACE). /workspace on secure pods is a MooseFS FUSE m
 (a cold 100 GB read at 9.6 GB/s), so large weights go on container disk (`container_disk_gb`) and the volume stays
 small.
 
+Two host faults seen on secure 4x PRO 6000 pods (10-17). A US-NC-1 host handed out GPUs that a process outside the
+container already held (90,892 and 70,462 MiB used, nothing in `nvidia-smi --query-compute-apps`), twice in a row;
+`harness up` now refuses any GPU at 2 GiB or more before setup. A US-PA-1 host with GPU0 on NUMA 0 and GPUs 1-3 on
+NUMA 3 hung sglang's NCCL init with P2P on (GPUs at 100%, about 1 GB used, no log line for 15 min); with
+`NCCL_P2P_DISABLE=1` the same server got past init in 30 s. The 10-15 custom all-reduce hang was the same data
+center and layout, so on a split-NUMA 4x host set `NCCL_P2P_DISABLE=1` unless the repro is about P2P.
+
 ## Rules
 
 - Each issue's GPU budget needs Aditya's explicit approval (GPU, count, $/hr, hours, total), recorded with

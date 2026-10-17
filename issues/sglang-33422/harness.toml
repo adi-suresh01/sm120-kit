@@ -48,9 +48,12 @@ fail_pattern = "illegal memory access|cudaErrorIllegalAddress|CUDA error: |SM120
 # Reading 167 GB, the DeepGEMM precompile on the first boot, autotune on s1a, and graph capture.
 boot_timeout_s = 2400
 
+# Every variant sets NCCL_P2P_DISABLE=1, as the vLLM baseline did: on 10-17 a secure 4x host with its GPUs on NUMA
+# nodes 0 and 3 hung s1 right after NCCL init for 15 min (GPUs at 100% with 1 GB used), the split-NUMA P2P hang.
 # The baseline: the reporter's config without DSpark, first so one number lands even if a later variant fails.
 [variants.s1-base]
 flags = ["--moe-runner-backend", "flashinfer_mxfp4", "--chunked-prefill-size", "4096", "--disable-flashinfer-autotune"]
+env = { NCCL_P2P_DISABLE = "1" }
 [variants.s1-base.quality]
 gsm8k = 50
 
@@ -60,6 +63,7 @@ flags = [
   "--moe-runner-backend", "flashinfer_mxfp4", "--chunked-prefill-size", "4096", "--disable-flashinfer-autotune",
   "--ep-size", "4",
 ]
+env = { NCCL_P2P_DISABLE = "1" }
 [variants.s3-ep4.quality]
 gsm8k = 20
 
@@ -67,6 +71,7 @@ gsm8k = 20
 # checkpoint (flashinfer_autotune.py:129), so the reporter's flag would change nothing here.
 [variants.s2-marlin]
 flags = ["--moe-runner-backend", "marlin", "--chunked-prefill-size", "8192", "--max-prefill-tokens", "16384"]
+env = { NCCL_P2P_DISABLE = "1" }
 [variants.s2-marlin.quality]
 gsm8k = 20
 
@@ -76,7 +81,7 @@ gsm8k = 20
 # (flashinfer_autotune.py:405,415).
 [variants.s1a-autotune]
 flags = ["--moe-runner-backend", "flashinfer_mxfp4", "--chunked-prefill-size", "4096"]
-env = { SGLANG_FLASHINFER_AUTOTUNE_EXTEND = "1" }
+env = { NCCL_P2P_DISABLE = "1", SGLANG_FLASHINFER_AUTOTUNE_EXTEND = "1" }
 [variants.s1a-autotune.quality]
 gsm8k = 20
 
@@ -86,7 +91,7 @@ flags = [
   "--moe-runner-backend", "flashinfer_mxfp4", "--chunked-prefill-size", "4096", "--disable-flashinfer-autotune",
   "--speculative-algorithm", "DSPARK", "--speculative-attention-mode", "decode",
 ]
-env = { BENCH_REPS = "1" }
+env = { BENCH_REPS = "1", NCCL_P2P_DISABLE = "1" }
 [variants.s0-dspark.quality]
 gsm8k = 50
 
@@ -98,6 +103,6 @@ flags = [
   "--moe-runner-backend", "flashinfer_mxfp4", "--chunked-prefill-size", "16384", "--disable-flashinfer-autotune",
   "--enable-dp-attention", "--dp-size", "4", "--enable-dp-lm-head", "--ep-size", "4",
 ]
-env = { BENCH_REPS = "1" }
+env = { BENCH_REPS = "1", NCCL_P2P_DISABLE = "1" }
 [variants.s4-dp-attn.quality]
 gsm8k = 20

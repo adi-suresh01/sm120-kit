@@ -157,10 +157,9 @@ the reporter's two configs, 20 on the rest) keeps a broken MoE or EP path from p
 
 The two pods are rented separately and may land on different hosts. Compare their `results/<issue>/env.txt`
 (`nvidia-smi topo -m`, which must show no NV# links, and the current PCIe gen and width) and the setup log's
-maximum link gen, width, and power limit; a gap between hosts that differ there is not an engine gap. The recipes
-also differ in one host-facing setting by design: hermia's vLLM env sets `NCCL_P2P_DISABLE=1` (all-reduce through
-host memory), and the reporter's sglang flags only disable the custom all-reduce, so NCCL may still use P2P. State
-that next to any gap quoted.
+maximum link gen, width, and power limit; a gap between hosts that differ there is not an engine gap. hermia's vLLM env sets `NCCL_P2P_DISABLE=1` (all-reduce through
+host memory); the reporter's sglang flags only disable the custom all-reduce, but the US-PA-1 host hung NCCL init
+with P2P on, so every sglang variant sets it too and the two recipes match there.
 
 ## Hardware, hours, cost
 
@@ -217,6 +216,53 @@ harness down sglang-33422
 `build_prompts.py` and `prefill_bench.py` are copied byte for byte into `issues/sglang-33422-vllm/`, since the
 harness ships only the issue folder to the pod; change both copies together.
 
-## Results
+## Results (2026-10-17)
 
-None yet.
+Three pods. The first (ezpsbqqlivnajk, US-NC-1) came up with a GPU at 90,892 MiB used by a process outside the
+container: setup downloaded the weights, then s1's idle wait failed after 300 s ($1.49). `harness up` now refuses
+any GPU at 2 GiB or more before setup (e649887), and it refused the second pod (z4c5536vfxm5bf, likely the same
+host: GPU 0 at 90,892 MiB, GPU 2 at 70,462) in 47 s ($0.13); US-NC-1 is in `avoid_data_centers` since.
+
+The third pod (3l8n2nz2zfqecf, sm120-sglang-33422-7115da) ran the matrix: US-PA-1, 4x RTX PRO 6000 Blackwell Server
+Edition, driver 595.91.07, PCIe Gen5 x16 max, 600 W, container memory limit 754 GB. Topology: GPU0 on NUMA 0, GPUs
+1-3 on NUMA 3 (GPU0 to the others SYS, GPU1-GPU2 PIX, the rest NODE). Setup 4.5 min (weights in 229 s, cold read
+2978 MB/s). s1's first boot hung right after `sglang is using nccl==2.30.7` for 15 min, all four GPUs at 100% with
+about 1 GB used: the split-NUMA NCCL P2P hang. Stopped by hand with the pod kept, every variant now sets
+`NCCL_P2P_DISABLE=1` (as the vLLM recipe does), and the rerun got past NCCL init in 30 s.
+
+tok/s is server `usage.prompt_tokens` / wall s; TTFT tok/s in brackets. Every rep, every workload `ok`, the 17 x 23
+probe correct on every variant, `#cached-token` 0 on every W1/W2 chunk.
+
+| Variant | Boot s | GSM8K | W1 9 x 90K rep 1 / 2 | W2 1 x 238K rep 1 / 2 |
+|---|---|---|---|---|
+| s1-base | 474 (DeepGEMM precompile) | 0.98 (50) | 8,979 / 8,983 (9,091) | 7,697 / 7,728 (7,836) |
+| s3-ep4 | 101 | 0.95 (20) | 9,264 / 9,272 (9,386) | 7,889 / 7,937 (8,051) |
+| s2-marlin | 277 | 1.00 (20) | 8,543 / 8,541 (8,630) | 7,374 / 7,397 (7,483) |
+| s1a-autotune | BOOT_FAIL after 1,327 | - | - | - |
+| s0-dspark | 167 | 0.98 (50), accept 4.30 | 8,897 (9,014) | 7,680 (7,748) |
+| s4-dp-attn | 91 | 0.95 (20) | 11,756 (11,998) | 6,188 (6,291) |
+| vLLM v0-hermia (US-NE-1, `issues/sglang-33422-vllm/`) | 261 | 1.00 (50) | 8,170 / 8,171 (8,235) | 7,129 / 7,150 (7,227) |
+
+- H1 confirmed: s1 W1 is 1.10x vLLM v0 W1 (W2 1.08x). Same pod type, different hosts; both split NUMA, both
+  `NCCL_P2P_DISABLE=1`.
+- H2 killed: s2 (Marlin, 8192 chunks) is 4.9% below s1 on W1 and 4.3% on W2. s1a, its planned fair baseline, did not
+  boot, so the comparison is against untuned MXFP4, which still wins.
+- H3 killed: EP4 is +3.2% (W1) and +2.7% (W2), under the 10% bar. It works with `flashinfer_mxfp4`.
+- H4 confirmed: s0 is within 1% of s1 on both shapes (one rep). Depth-5 DSpark is clean on stock v0.5.22, no #33407:
+  GSM8K 0.98, accept length 4.30.
+- H5 killed: v0 W2 is 7.1K, not 12.5K, and v0 W1 (8.2K) is above v0 W2.
+- H6 killed on W1, holds on W2: s4 is +30.9% on W1 (11,756) and -19.9% on W2. W1's nine requests spread over four
+  attention DP ranks; W2's one request runs its attention on one rank.
+- H7 inconclusive. The default autotune (decode buckets) finished in 11 s. The `SGLANG_FLASHINFER_AUTOTUNE_EXTEND=1`
+  pass ("extra EXTEND pass at 4096 tokens (4096 seqs x 1 tokens)") ran from 07:04:53 to 07:25:10, then
+  `RuntimeError: Triton Error [CUDA]: out of memory` in `expand_prefill_causally_triton`
+  (`deepseek_v4_backend.py:4110`) from `maybe_flashinfer_autotune_extend` (`flashinfer_autotune.py:467`), with
+  8.96 GB free after the KV pool and `--max-running-requests 64`. Only TP0 logged "per-rank caches disagree,
+  discarding them and tuning from scratch". Not chased: the env var is ours, not the reporter's.
+- Position cost (s1, W2): sglang's per-chunk input throughput went from about 9.8K tok/s at the start of the 238K
+  prompt to 7.9K at the middle and 6.7K at the end, on every variant within a few percent. The reporter's ~2K past
+  several hundred K (v0.5.16, Max-Q) is beyond what W2 reaches.
+- Host memory peak (s1): 178.3 GiB of 754 GB.
+
+Cost: $16.87 of the $20 budget ($1.49 + $0.13 + $15.25, ledger estimates); with the vLLM side, $21.39 for the
+issue. Posted on sglang#33422.
