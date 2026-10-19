@@ -93,8 +93,8 @@
       "reserved_at": "2026-10-16T17:23:48Z",
       "deadline": "2026-10-16T18:44:56Z",
       "terminated_at": "2026-10-16T18:10:11Z",
-      "cost_usd": 7.699633333333335,
-      "cost_source": "estimate"
+      "cost_usd": 7.183684265706688,
+      "cost_source": "billing"
     },
     {
       "name": "sm120-vllm-56771-cbff77",
@@ -108,8 +108,8 @@
       "reserved_at": "2026-10-16T23:02:29Z",
       "deadline": "2026-10-17T00:45:50Z",
       "terminated_at": "2026-10-17T00:07:18Z",
-      "cost_usd": 10.759566666666668,
-      "cost_source": "estimate"
+      "cost_usd": 10.851575009175576,
+      "cost_source": "billing"
     }
   ]
 }

@@ -18,8 +18,8 @@
       "reserved_at": "2026-10-16T01:52:19Z",
       "deadline": "2026-10-16T02:07:19Z",
       "terminated_at": "2026-10-16T01:55:28Z",
-      "cost_usd": 0.006825,
-      "cost_source": "estimate"
+      "cost_usd": 0.00700726208742708,
+      "cost_source": "billing"
     },
     {
       "name": "sm120-harness-test-72cc49",
@@ -33,8 +33,8 @@
       "reserved_at": "2026-10-16T01:56:12Z",
       "deadline": "2026-10-16T02:11:12Z",
       "terminated_at": "2026-10-16T01:57:00Z",
-      "cost_usd": 0.006666666666666667,
-      "cost_source": "estimate"
+      "cost_usd": 0.007011064910329878,
+      "cost_source": "billing"
     },
     {
       "name": "sm120-harness-test-5de913",
@@ -48,8 +48,8 @@
       "reserved_at": "2026-10-16T01:58:22Z",
       "deadline": "2026-10-16T02:13:22Z",
       "terminated_at": "2026-10-16T01:58:49Z",
-      "cost_usd": 0.00375,
-      "cost_source": "estimate"
+      "cost_usd": 0.0037535649025812745,
+      "cost_source": "billing"
     },
     {
       "name": "sm120-harness-test-abd941",
@@ -63,8 +63,8 @@
       "reserved_at": "2026-10-16T02:01:48Z",
       "deadline": "2026-10-16T02:16:48Z",
       "terminated_at": "2026-10-16T02:16:48Z",
-      "cost_usd": 0.125,
-      "cost_source": "estimate"
+      "cost_usd": 0.1264241224853322,
+      "cost_source": "billing"
     },
     {
       "name": "sm120-harness-test-702cbe",
@@ -78,8 +78,8 @@
       "reserved_at": "2026-10-16T02:17:28Z",
       "deadline": "2026-10-16T02:32:28Z",
       "terminated_at": "2026-10-16T02:18:20Z",
-      "cost_usd": 0.007222222222222222,
-      "cost_source": "estimate"
+      "cost_usd": 0.007087592384777963,
+      "cost_source": "billing"
     }
   ]
 }

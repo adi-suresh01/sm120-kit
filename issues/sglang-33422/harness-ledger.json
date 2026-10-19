@@ -48,8 +48,8 @@
       "reserved_at": "2026-10-17T06:02:52Z",
       "deadline": "2026-10-17T07:43:31Z",
       "terminated_at": "2026-10-17T07:34:44Z",
-      "cost_usd": 15.249866666666668,
-      "cost_source": "estimate"
+      "cost_usd": 15.304064817959445,
+      "cost_source": "billing"
     }
   ]
 }
