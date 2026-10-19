@@ -33,3 +33,17 @@ with `--ignore-eos`, concurrency 70, rounds of 600 prompts for 25 minutes.
 
 `harness quote` on 2026-10-19: 1x RTX PRO 6000 Server Edition (Workstation out of stock), secure, $2.49/hr, 1.25 h
 planned, $3.42 worst case.
+
+## Results (2026-10-19)
+
+Pod gizonyehl8edm8: 1x RTX PRO 6000 Blackwell Server Edition (Workstation Edition out of stock), secure, $2.49/hr.
+Image `nightly-e68efc68`: vLLM 0.32.1rc1.dev36. Cost $1.53 (estimate) of $3.42.
+
+soak-graphs: **survived 25 minutes**, 7 rounds x 592 requests = 4,144 requests at concurrency 70, 0 failed, output
+throughput 2,863-2,908 tok/s every round, mean TPOT 22.6-22.9 ms, no drift. The only error in server.log is the
+`EngineDeadError` the API server logs when the harness stops it at 09:27:52, after round 7 finished at 09:27:45.
+soak-eager was not needed and was stopped before it booted.
+
+Not a fix claim yet: H2 needs the same soak to kill `vllm/vllm-openai:v0.28.0` (issues/vllm-54331-v028). Differences
+from the report that could also explain a survival: text prompts over 16 shared 4096-token prefixes, not multi-turn
+video; Server Edition, not Workstation; the pod's driver, not 610.43.02.
