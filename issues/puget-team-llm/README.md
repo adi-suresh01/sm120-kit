@@ -39,3 +39,28 @@ caching's gain needs repeated prompts, which the random benchmark does not have,
 ## Cost
 
 `harness quote` on 2026-10-19: 2x Workstation Edition, secure, $5.18/hr, 1.5 h planned, $8.55 worst case.
+
+## Results (2026-10-19)
+
+Pod 9f0esq6n050mgo: 2x RTX PRO 6000 Blackwell Workstation Edition, secure, $5.18/hr, CUDA peer access 0<->1 true.
+Image `nightly-e68efc68`: vLLM 0.32.1rc1.dev36+ge68efc685, FlashInfer 0.7.2, torch 2.14.0+cu130. Cost $3.18 (estimate)
+of $8.55.
+
+Output tok/s from `vllm bench serve` (random 1024 in / 512 out), mean TTFT / TPOT in ms:
+
+| Variant | Boot | c=1 | c=16 | c=64 | TPOT c=1 / 16 / 64 | GSM8K, answered replies correct |
+|---|---|---|---|---|---|---|
+| shipped | 95 s | 29.2 | 385.2 | 1,428.2 | 34.2 / 40.1 / 41.5 | 56 / 56 |
+| graphs | 106 s | 122.8 (4.2x) | 870.1 (2.3x) | 1,716.1 (1.2x) | 8.0 / 17.1 / 34.6 | 58 / 59 |
+| graphs-p2p | 80 s | 139.1 (4.8x) | 944.2 (2.5x) | 1,778.4 (1.25x) | 7.0 / 15.7 / 33.3 | 47 / 47 |
+
+- Every variant served; no fault in any log.
+- graphs-p2p ran with `disable_custom_all_reduce=False` and vLLM logged no custom all-reduce fallback. vLLM guards
+  this itself: it turns custom all-reduce off on more than two PCIe-only GPUs and when the P2P check fails
+  (`custom_all_reduce.py` on main, lines 270 and 284), so dropping the flag is safe on 4-GPU boxes too.
+- GSM8K scores (0.56 / 0.58 / 0.47) are not model quality. The harness stops generation on `Question:`, and this
+  thinking model writes it inside its reasoning, so 33 / 30 / 42 replies ended mid-thought with no answer; 11 per
+  variant hit the 4096-token cap. Every reply that reached an answer was correct in all three variants. The harness
+  needs reasoning-aware stops before GSM8K means anything on thinking models.
+- Not covered: the other menu entries, 4-GPU and Max-Q boxes, the `latest` (v0.32.0) tag, and prefix caching's gain
+  on repeated prompts.
