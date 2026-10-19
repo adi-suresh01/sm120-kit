@@ -1,0 +1,49 @@
+issue = "vllm-54331-ornith"
+# Follow-up to issues/vllm-54331, where 25-minute saturation soaks of nvidia/Qwen3.6-35B-A3B-NVFP4 survived on 0.28.0
+# and the nightly. Those runs had a bf16 KV cache and no vision encoder. This kit runs the reporter's own 0.28.0
+# setup: the checkpoint every 0.28.0 crash in the report used, fp8 KV, and video. Setup about 8 min (23.5 GB of
+# weights plus the clips); each variant boots in about 3 min and soaks 25 min, and the last text round overruns.
+planned_hours = 1.5
+
+[pod]
+image = "vllm/vllm-openai:v0.28.0@sha256:61fc8a896b0a4fbbbdc063bc4b0dbc25ce98e02b5050c24aeb7830ac02039b14"
+count = 1
+min_cuda = "13.0"
+container_disk_gb = 80
+volume_gb = 20
+needs_hf_token = false
+avoid_data_centers = ["EUR-IS-2", "US-NC-1"]
+# The reporter's card.
+gpus = [
+  { id = "NVIDIA RTX PRO 6000 Blackwell Workstation Edition", cloud = "SECURE" },
+  { id = "NVIDIA RTX PRO 6000 Blackwell Server Edition", cloud = "SECURE" },
+]
+
+[server]
+package = "vllm"
+# Qwen3.5-MoE architecture with the vision tower, 30 of 40 layers GDN linear attention, modelopt mixed precision. Its
+# quantization_config carries an fp8 kv_cache_scheme, which --kv-cache-dtype auto turns into float8_e4m3fn on 0.28.0,
+# as the report's log shows; Qwen3.6's declares FP8 only in hf_quant_config.json, which auto ignores.
+model = "ornith-ai/Ornith-1.5-35B-A3B-NVFP4"
+launch = ["vllm", "serve", "ornith-ai/Ornith-1.5-35B-A3B-NVFP4"]
+base_flags = [
+  "--revision", "94e431d9cc47fa1986a7a1a4e9a80f7f118b03aa",
+  "--max-model-len", "32768",
+  "--gpu-memory-utilization", "0.90",
+]
+port = 8000
+# The three surfaces the reporter saw, plus the engine dying under them.
+fail_pattern = "Segfault encountered|illegal instruction|illegal memory access|unspecified launch failure|EngineDeadError|EngineCore encountered a fatal error"
+boot_timeout_s = 900
+
+# First, since it is the main hypothesis: the vision encoder on, multi-turn windows over shared system + video
+# prefixes, as in the report's workload. --enable-prompt-tokens-details lets the client log the prefix-cache share.
+[variants.video]
+flags = ["--allowed-local-media-path", "/root/videos", "--enable-prompt-tokens-details"]
+env = { SOAK_MINUTES = "25", SOAK_WORKLOAD = "video" }
+
+# issues/vllm-54331's text workload on this checkpoint: alive here and dead under video puts the trigger in the
+# multimodal path.
+[variants.text]
+flags = ["--language-model-only"]
+env = { SOAK_MINUTES = "25", SOAK_WORKLOAD = "text" }

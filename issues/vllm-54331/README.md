@@ -52,11 +52,42 @@ Pod 4lkd6rwrx2rnu0, same card and driver, `vllm/vllm-openai:v0.28.0`, same model
 `EngineDeadError` is the harness stopping the server at 10:05:55, after round 7 ended at 10:05:49.
 
 Verdict: **does not reproduce** with this workload on either version, so the nightly's survival says nothing about a
-fix. The likely difference is the vision path: the report is offline batch *video* inference, and both runs here pass
-`--language-model-only`, so the vision encoder never runs (the report's 0.25 runs also hit a separate ViT illegal
-memory access). Other differences: offline `LLM` engine vs the OpenAI server, driver 610.57.04 vs 610.43.02, and
-`ornith-ai/Ornith-1.5` for most of the report's arms.
+fix. Two differences from the report are large enough to matter:
 
-What it does show: text-only serving of this model, saturated at concurrency 70 over shared prefixes with CUDA graphs
-on, ran 25 minutes clean on 0.28.0 and on the 10-19 nightly (2.9K output tok/s on the nightly, 3% above 0.28.0).
-Next for the issue itself: the same soak with the vision encoder on and video inputs.
+- **KV cache dtype.** Both runs here stored KV in **bf16**: the server logs show `kv_cache_dtype=auto` and an
+  attention block of 1056 tokens (0.28.0) / 1088 (nightly). The checkpoint's `hf_quant_config.json` declares
+  `kv_cache_quant_algo: FP8`, but `auto` does not turn that on. The report ran `float8_e4m3fn` with a 2096-token
+  block and FlashInfer `xqa` decode. (An earlier version of this README and of harness.toml said FP8 KV; that was
+  wrong.)
+- **Vision path.** The report is offline batch *video* inference, and both runs here pass `--language-model-only`,
+  so the vision encoder never runs (the report's 0.25 runs also hit a separate ViT illegal memory access).
+
+Smaller ones: offline `LLM` engine vs the OpenAI server, driver 610.57.04 vs 610.43.02, and `ornith-ai/Ornith-1.5`
+for most of the report's arms.
+
+What it does show: text-only serving of this model with a bf16 KV cache, saturated at concurrency 70 over shared
+prefixes with CUDA graphs on, ran 25 minutes clean on 0.28.0 and on the 10-19 nightly (2.9K output tok/s on the
+nightly, 3% above 0.28.0).
+
+## Follow-up: the reporter's 0.28.0 setup (issues/vllm-54331-ornith)
+
+Every 0.27.1 and 0.28.0 crash in the report was on `ornith-ai/Ornith-1.5-35B-A3B-NVFP4`, whose `quantization_config`
+carries an fp8 `kv_cache_scheme`. On 0.28.0, `--kv-cache-dtype auto` reads only that field, so Ornith gets fp8 KV by
+default and Qwen3.6 (FP8 declared only in `hf_quant_config.json`) gets bf16, which is likely what happened in the
+report's Qwen3.6 runs too. On sm_120, fp8 KV also moves attention from FLASH_ATTN to FlashInfer with xqa decode.
+The kit runs Ornith-1.5 @ 94e431d on `vllm/vllm-openai:v0.28.0` with default flags, and the hook stops before the soak
+unless the server log shows `decode_backend=xqa` with `float8_e4m3fn`, as the report's does.
+
+| Variant | Workload | If it dies |
+|---|---|---|
+| video (runs first) | vision encoder on; `soak_video.py` | the report reproduces on its own setup |
+| text | issues/vllm-54331's text soak, `--language-model-only` | the trigger does not need the multimodal path |
+
+Video workload (`soak_video.py`): 200 synthetic 96-frame 640x480 clips, of which vLLM's loader samples 32 (a clip of
+exactly 32 frames would be resampled to 8 by the Qwen3-VL processor). Request n is window n % 8 of clip
+(n // 8) % 200, each window one more turn over the same system prompt and clip, 512 output tokens with `ignore_eos`,
+concurrency 70 for 25 minutes. A new clip starts every few seconds, so the encoder runs for the whole soak while
+later windows reuse cached blocks. A probe first checks that the clip adds prompt tokens.
+
+If either variant dies, the next run is the same variant on the nightly (it has #50729, the mamba state-copy race fix
+that 0.28.0 lacks), to tell the reporter whether upgrading is enough.

@@ -23,7 +23,7 @@ gpus = [
 [server]
 package = "vllm"
 # The reporter's second checkpoint: Qwen3.5-MoE family, 30 of 40 layers GDN linear attention, modelopt mixed
-# precision (FP8 attention, NVFP4 experts), FP8 KV cache from the checkpoint.
+# precision (FP8 attention, NVFP4 experts). The checkpoint declares FP8 KV, but --kv-cache-dtype auto stored bf16.
 model = "nvidia/Qwen3.6-35B-A3B-NVFP4"
 launch = ["vllm", "serve", "nvidia/Qwen3.6-35B-A3B-NVFP4"]
 base_flags = [
