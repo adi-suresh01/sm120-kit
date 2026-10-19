@@ -1,0 +1,69 @@
+issue = "puget-team-llm"
+# Puget Systems' Team LLM pack (github.com/Puget-Systems/puget-docker-app-pack, branch
+# fix/installer-docker-restart-intel-check @ ef329d2) on 2x PCIe RTX PRO 6000, menu entry 4, its recommended model for
+# 80 GB+ of VRAM. Setup about 12 min (image, 80 GB of weights to container disk); each variant boots (load, compile,
+# graph capture), runs GSM8K 100 and three benchmark points, about 20 min in eager mode.
+planned_hours = 1.5
+
+[pod]
+# The tag the pack's NVIDIA menu writes for this entry is the floating `nightly`; this is what it pointed at on 10-19.
+image = "vllm/vllm-openai:nightly-e68efc685ab1e6f1eda004ced7157e3ca411da2f@sha256:1ff6716fe240a922d0d518b8884261e25b0c02eda8e2ce90888e364978249cad"
+count = 2
+min_cuda = "13.0"
+# The image plus 80 GB of weights, which setup.sh keeps on container disk: /workspace is a FUSE mount on secure pods.
+container_disk_gb = 150
+volume_gb = 20
+needs_hf_token = false
+# EUR-IS-2 reached HF at 15 MB/s on 10-16; US-NC-1 handed out GPUs another process held on 10-17.
+avoid_data_centers = ["EUR-IS-2", "US-NC-1"]
+# Puget ships the Workstation Edition; the Server Edition runs the same sm_120 silicon at a lower clock and power cap.
+gpus = [
+  { id = "NVIDIA RTX PRO 6000 Blackwell Workstation Edition", cloud = "SECURE" },
+  { id = "NVIDIA RTX PRO 6000 Blackwell Server Edition", cloud = "SECURE" },
+]
+
+[server]
+package = "vllm"
+model = "cyankiwi/Qwen3.5-122B-A10B-AWQ-4bit"
+# The pack's own entrypoint and flags (packs/team_llm/docker-compose.yml, scripts/lib/vllm_menu_nvidia.sh entry 4,
+# install.sh's .env for a 2-GPU box). --revision is ours, so every variant loads the same weights.
+launch = ["python3", "-m", "vllm.entrypoints.openai.api_server", "--model=cyankiwi/Qwen3.5-122B-A10B-AWQ-4bit"]
+base_flags = [
+  "--revision", "be51bea8252b091475d3c525fc00461f5c29132e",
+  "--tensor-parallel-size=2",
+  "--max-model-len=131072",
+  "--gpu-memory-utilization=0.90",
+  "--max-num-seqs=256",
+  "--dtype=float16",
+  "--trust-remote-code",
+  "--reasoning-parser", "qwen3",
+  "--enable-auto-tool-choice", "--tool-call-parser", "qwen3_coder",
+  "--language-model-only",
+]
+port = 8000
+fail_pattern = "illegal memory access|cudaErrorIllegalAddress|CUDA error: |EngineCore failed|Engine core initialization failed"
+boot_timeout_s = 1500
+
+# As shipped: eager mode, no prefix caching, custom all-reduce off, NCCL peer-to-peer off.
+[variants.shipped]
+flags = ["--disable-custom-all-reduce", "--enforce-eager", "--no-enable-prefix-caching"]
+env = { NCCL_P2P_DISABLE = "1" }
+[variants.shipped.quality]
+gsm8k = 100
+bench = [[1, 8], [16, 64], [64, 256]]
+
+# CUDA graphs and prefix caching back on; all-reduce settings as shipped. Isolates the eager-mode cost.
+[variants.graphs]
+flags = ["--disable-custom-all-reduce"]
+env = { NCCL_P2P_DISABLE = "1" }
+[variants.graphs.quality]
+gsm8k = 100
+bench = [[1, 8], [16, 64], [64, 256]]
+
+# graphs plus vLLM's custom all-reduce and NCCL peer-to-peer, which vLLM allows on 2 PCIe GPUs when P2P works. vLLM
+# falls back to NCCL on its own if the host's P2P check fails; server.log records which path it took.
+[variants.graphs-p2p]
+env = { NCCL_P2P_DISABLE = "0" }
+[variants.graphs-p2p.quality]
+gsm8k = 100
+bench = [[1, 8], [16, 64], [64, 256]]
