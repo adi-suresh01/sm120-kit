@@ -18,6 +18,7 @@ the folder's README with the cost of every pod.
 | [sglang-44291](issues/sglang-44291) | Crashes serving Qwen3.8-Flash-Next NVFP4 on 2x PCIe PRO 6000 | Three bugs. Custom all-reduce with expandable segments: sglang#44448. EP2 + NEXTN expert ids: sglang#44480. TP2 block alignment: sglang#42566 validated | $16.5 |
 | [sglang-33422](issues/sglang-33422) | DeepSeek-V4-Flash prefill 2-7K tok/s vs vLLM ~12.5K on 4x PRO 6000 | No gap on v0.5.22: 8,983 tok/s with the reporter's flags vs 8,171 for the vLLM recipe on 9 x 90K prompts; DP attention + EP4 reaches 11,756 | $21.47 |
 | [puget-team-llm](issues/puget-team-llm) | Puget Systems Team LLM pack flags on 2x PRO 6000 Workstation | `--enforce-eager` with prefix caching off costs 4.2x output tok/s at 1 user and 2.3x at 16; custom all-reduce with P2P adds 13% and 9%. Same answers | $3.18 |
+| [vllm-54331](issues/vllm-54331) | Hybrid-GDN NVFP4 dies under saturation with CUDA graphs on (0.26-0.28) | Not reproduced. 25-min soaks at concurrency 70 on 0.28.0 and the nightly (text, bf16 KV), then on the report's own checkpoint with fp8 KV and xqa decode: 25 min of video and 15 of text, 0 failed requests | $6.72 |
 | [sglang-44291-stack](issues/sglang-44291-stack) | The #44291 repro on the stack built over sglang#44480 | Kit ready, not run | - |
 
 ## Upstream PRs

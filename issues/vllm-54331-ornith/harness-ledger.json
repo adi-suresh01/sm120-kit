@@ -1,0 +1,40 @@
+{
+  "issue": "vllm-54331-ornith",
+  "budget": {
+    "usd": 5.36,
+    "approved_at": "2026-10-19T22:11:46Z",
+    "note": "Raised 2026-10-19 by $1.25 (approved): first pod c8q968e99wzny0 spent ~30 min pulling the image in US-NE-1; keep both variants"
+  },
+  "pods": [
+    {
+      "name": "sm120-vllm-54331-ornith-e20862",
+      "id": "c8q968e99wzny0",
+      "state": "terminated",
+      "gpu": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+      "count": 1,
+      "cloud": "SECURE",
+      "rate_usd_hr": 2.49,
+      "reserved_usd": 4.1085,
+      "reserved_at": "2026-10-19T21:45:28Z",
+      "deadline": "2026-10-19T23:15:28Z",
+      "terminated_at": "2026-10-19T22:15:32Z",
+      "cost_usd": 1.2477666666666667,
+      "cost_source": "estimate"
+    },
+    {
+      "name": "sm120-vllm-54331-ornith-a4151c",
+      "id": "m9jmgtbnf21xgu",
+      "state": "terminated",
+      "gpu": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+      "count": 1,
+      "cloud": "SECURE",
+      "rate_usd_hr": 2.49,
+      "reserved_usd": 4.1085,
+      "reserved_at": "2026-10-19T22:20:02Z",
+      "deadline": "2026-10-19T23:50:02Z",
+      "terminated_at": "2026-10-19T23:18:59Z",
+      "cost_usd": 2.446425,
+      "cost_source": "estimate"
+    }
+  ]
+}

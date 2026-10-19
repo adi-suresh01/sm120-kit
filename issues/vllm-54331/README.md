@@ -91,3 +91,35 @@ later windows reuse cached blocks. A probe first checks that the clip adds promp
 
 If either variant dies, the next run is the same variant on the nightly (it has #50729, the mamba state-copy race fix
 that 0.28.0 lacks), to tell the reporter whether upgrading is enough.
+
+### Results (2026-10-19)
+
+`harness quote`: 1x RTX PRO 6000 Server Edition, secure, $2.49/hr, 1.5 h, $4.11; budget raised to $5.36 after the
+first pod. Spent $3.69.
+
+- Pod c8q968e99wzny0 (US-NE-1) was still pulling the image 30 min after create; the harness terminated it ($1.25).
+  US-NE-1 is now in `avoid_data_centers`.
+- Pod m9jmgtbnf21xgu (EUR-IS-1), driver 595.91.07, vLLM 0.28.0, FlashInfer 0.6.16.post3, torch 2.13.0+cu130, no
+  `flashinfer-cubin` (the report had to uninstall it too). Weights in 60 s. $2.45.
+
+Both variants logged the report's attention setup: `Setting attention block size to 2096 tokens`, `decode_backend=xqa,
+kv_cache_dtype=torch.float8_e4m3fn, arch=sm120`. KV pool 59.19 GiB (4,408,785 tokens), `max_num_batched_tokens=8192`,
+`max_cudagraph_capture_size` 512, prefix caching on.
+
+| Variant | Ran | Requests | Failed | Output tok/s | Notes |
+|---|---|---|---|---|---|
+| video | 25.1 min | 8,401 | 0 | 2,856 (2,950-2,990 per minute at steady state) | one clip adds 1,234 prompt tokens; mean prompt 2,818; 63% of prompt tokens from the prefix cache |
+| text | 15.4 min | 3 rounds x 592, then 350 of round 4 | 0 | 2,542-2,554 per round | stopped by the container, see below |
+
+video: verdict OK. The only `ERROR` lines are the harness stopping the server at 22:52:30, after the last `200 OK`.
+
+text: every log ends at 23:11:52, in the same second: `server.log` (70 requests running, 3,233 generation tok/s, every
+response 200), round 4's progress, and `memory.jsonl` (36 of 188 GB), which a separate process writes. No crash
+signature, no `EngineDeadError`. The harness then found no SSH endpoint ("job variant-text died without an exit code
+(killed, or the container restarted)") and terminated the pod. The container went away from outside the processes we
+ran; the cause is not visible from inside. So text counts as 15.4 clean minutes, not 25.
+
+Verdict: **does not reproduce** on the report's checkpoint, version, KV dtype, attention backend and a video workload,
+for 25 minutes of video and 15 of text. The report died at 2.5-7.75 min. Remaining differences: offline `LLM` vs the
+OpenAI server, real video vs synthetic clips (frames per window and resolution unknown), driver 610.43.02 vs
+595.91.07, Workstation vs Server Edition.
