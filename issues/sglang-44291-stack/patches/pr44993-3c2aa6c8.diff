@@ -1,0 +1,1962 @@
+diff --git a/python/sglang/multimodal_gen/runtime/models/dits/hunyuan_image3.py b/python/sglang/multimodal_gen/runtime/models/dits/hunyuan_image3.py
+index 11e792e3..1b402fe7 100644
+--- a/python/sglang/multimodal_gen/runtime/models/dits/hunyuan_image3.py
++++ b/python/sglang/multimodal_gen/runtime/models/dits/hunyuan_image3.py
+@@ -513,6 +513,7 @@ class HunYuanSparseMoeBlock(nn.Module):
+             layer_id=layer_id,
+             prefix=f"{prefix}.experts",
+         )
++        self.topk.bind_runner_backend(self.experts.runner_backend)
+ 
+     def forward(self, hidden_states):
+         orig_shape = hidden_states.shape
+diff --git a/python/sglang/srt/arg_groups/field_order.py b/python/sglang/srt/arg_groups/field_order.py
+index 43d21dd4..d99ef524 100644
+--- a/python/sglang/srt/arg_groups/field_order.py
++++ b/python/sglang/srt/arg_groups/field_order.py
+@@ -100,7 +100,6 @@ POSITIONAL_FIELD_ORDER = (
+     "shared_experts_tp_size",
+     "enable_dense_mlp_attn_tp",
+     "enable_layernorm_sp",
+-    "enable_megamoe_for_layernorm_sp",
+     "disable_attn_tp_gather",
+     "enable_p2p_check",
+     "device",
+@@ -521,5 +520,26 @@ POSITIONAL_FIELD_ORDER = (
+     "enable_decoder_swa_bounded_replay",
+     "enable_response_store",
+     "disaggregation_decode_host_receive_threshold",
++    "qsa_indexer_dtype",
++    "disaggregation_decode_allocation_policy",
++    "speculative_boundary_reduction",
++    "speculative_use_block_verification",
++    "speculative_draft_sink_size",
++    "disable_aiter_allreduce_fusion_in_prefill",
++    "disable_aiter_allreduce_fusion_in_decode",
++    "monokernel_backend",
++    "dsa_triton_union",
++    "enable_dsa_fused_indexer",
++    "enable_cp_tp_group_sharing",
++    "enable_watermark",
++    "watermark_config",
++    "watermark_key",
++    "watermark_key_b",
++    "watermark_context_window",
++    "watermark_mixing_probability",
++    "watermark_max_probability",
++    "watermark_default_enabled",
++    "watermark_enforce_all",
++    "grpc_response_timeout_secs",
+ )
+ # fmt: on
+diff --git a/python/sglang/srt/batch_overlap/two_batch_overlap.py b/python/sglang/srt/batch_overlap/two_batch_overlap.py
+index 457bc237..770236df 100644
+--- a/python/sglang/srt/batch_overlap/two_batch_overlap.py
++++ b/python/sglang/srt/batch_overlap/two_batch_overlap.py
+@@ -1151,12 +1151,13 @@ def _model_forward_tbo_merge_key(output_a, output_b, name, original_len):
+ 
+ 
+ class MaybeTboDeepEPDispatcher(BaseDispatcher):
+-    def __init__(self, **kwargs):
++    def __init__(self, runner_backend=None, **kwargs):
+         super().__init__()
+         num_inner_dispatchers = 2 if is_tbo_enabled() else 1
+         if get_moe_a2a_backend().is_deepep():
+             self._inners = [
+-                DeepEPDispatcher(**kwargs) for _ in range(num_inner_dispatchers)
++                DeepEPDispatcher(runner_backend=runner_backend, **kwargs)
++                for _ in range(num_inner_dispatchers)
+             ]
+         elif get_moe_a2a_backend().is_mooncake():
+             self._inners = [
+@@ -1173,7 +1174,8 @@ class MaybeTboDeepEPDispatcher(BaseDispatcher):
+             ]
+         elif get_moe_a2a_backend().is_pplx():
+             self._inners = [
+-                PplxDispatcher(**kwargs) for _ in range(num_inner_dispatchers)
++                PplxDispatcher(runner_backend=runner_backend, **kwargs)
++                for _ in range(num_inner_dispatchers)
+             ]
+ 
+     @property
+diff --git a/python/sglang/srt/layers/moe/ep_moe/layer.py b/python/sglang/srt/layers/moe/ep_moe/layer.py
+index cd5164c3..948ffcdb 100644
+--- a/python/sglang/srt/layers/moe/ep_moe/layer.py
++++ b/python/sglang/srt/layers/moe/ep_moe/layer.py
+@@ -15,7 +15,6 @@ from sglang.srt.layers.dp_attention import (
+ from sglang.srt.layers.moe import (
+     get_deepep_mode,
+     get_moe_a2a_backend,
+-    get_moe_runner_backend,
+ )
+ from sglang.srt.layers.moe.fused_moe_triton.layer import (
+     FusedMoE,
+@@ -97,12 +96,8 @@ class DeepEPMoE(FusedMoE):
+             routed_scaling_factor=routed_scaling_factor,
+             **kwargs,
+         )
+-        is_humming = (
+-            get_moe_runner_backend().is_humming()
+-            or get_moe_runner_backend().is_auto()
+-            and quant_config is not None
+-            and quant_config.get_name() == "humming"
+-        )
++        backend = self.runner_backend
++        is_humming = backend is not None and backend.is_humming()
+         if get_moe_a2a_backend().is_deepep_v2():
+             self.deprecate_flag = True
+         elif is_humming:
+@@ -121,14 +116,16 @@ class DeepEPMoE(FusedMoE):
+         ):
+             self.deprecate_flag = True
+         elif (
+-            get_moe_runner_backend().is_flashinfer_cutedsl()
++            backend is not None
++            and backend.is_flashinfer_cutedsl()
+             and quant_config is not None
+             and quant_config.get_name() in ("modelopt_fp4", "modelopt_mixed")
+         ):
+             self.deprecate_flag = True
+         elif (
+             deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM
+-            and get_moe_runner_backend().is_deep_gemm()
++            and backend is not None
++            and backend.is_deep_gemm()
+             and quant_config is not None
+             and quant_config.get_name() == "mxfp4"
+         ):
+@@ -138,7 +135,8 @@ class DeepEPMoE(FusedMoE):
+         elif (
+             quant_config is None
+             and self.w13_weight.dtype == torch.bfloat16
+-            and get_moe_runner_backend().is_deep_gemm()
++            and backend is not None
++            and backend.is_deep_gemm()
+             and (get_moe_a2a_backend().is_deepep() or get_moe_a2a_backend().is_pplx())
+             and not _is_npu
+             and not _is_hip
+diff --git a/python/sglang/srt/layers/moe/fused_moe_triton/layer.py b/python/sglang/srt/layers/moe/fused_moe_triton/layer.py
+index a2d9fb12..15967c71 100644
+--- a/python/sglang/srt/layers/moe/fused_moe_triton/layer.py
++++ b/python/sglang/srt/layers/moe/fused_moe_triton/layer.py
+@@ -101,26 +101,25 @@ _use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
+ _deferred_finalize_info_logged = False
+ 
+ 
+-def _fuses_routed_scaling_factor_in_topk(quant_method) -> bool:
++def _fuses_routed_scaling_factor_in_topk(quant_method, runner_backend) -> bool:
+     return (
+         getattr(quant_method, "fuse_routed_scaling_factor_in_topk", False)
+         or (
+             isinstance(quant_method, ModelOptNvFp4FusedMoEMethod)
+-            and not getattr(
+-                quant_method, "_moe_runner_backend", get_moe_runner_backend()
+-            ).is_marlin()
++            and (runner_backend is None or not runner_backend.is_marlin())
+         )
+         or (
+-            isinstance(quant_method, Fp8MoEMethod)
++            runner_backend is not None
+             and (
+-                get_moe_runner_backend().is_cutlass()
+-                or get_moe_runner_backend().is_flashinfer_trtllm_routed()
++                isinstance(quant_method, Fp8MoEMethod)
++                and (
++                    runner_backend.is_cutlass()
++                    or runner_backend.is_flashinfer_trtllm_routed()
++                )
++                or isinstance(quant_method, UnquantizedFusedMoEMethod)
++                and runner_backend.is_flashinfer_trtllm_routed()
+             )
+         )
+-        or (
+-            isinstance(quant_method, UnquantizedFusedMoEMethod)
+-            and get_moe_runner_backend().is_flashinfer_trtllm_routed()
+-        )
+     )
+ 
+ 
+@@ -186,6 +185,7 @@ def create_moe_dispatcher(
+         or a2a_backend.is_pplx()
+     ):
+         return MaybeTboDeepEPDispatcher(
++            runner_backend=moe_runner_config.runner_backend,
+             group=_get_deepep_comm_group(a2a_backend),
+             router_topk=moe_runner_config.top_k,
+             permute_fusion=True,
+@@ -514,19 +514,7 @@ class FusedMoE(torch.nn.Module):
+             and num_experts == 512
+             and top_k == 10
+         )
+-        self.supports_deferred_finalize = (
+-            get_moe_runner_backend().is_flashinfer_trtllm()
+-            and (nvfp4_deferred or qwen35_fp8_deferred or qwen4_bf16_deferred)
+-        )
+-        global _deferred_finalize_info_logged
+-        if not _deferred_finalize_info_logged:
+-            _deferred_finalize_info_logged = True
+-            logging.getLogger(__name__).debug(
+-                "FlashInfer TRTLLM MoE deferred finalize is "
+-                f"{'enabled' if self.supports_deferred_finalize else 'disabled'} "
+-                f"(moe_runner_backend={get_exec().moe.moe_runner_backend}, "
+-                f"quant_method={type(self.quant_method).__name__})."
+-            )
++        self.supports_deferred_finalize = False
+ 
+         self.quant_method.create_weights(
+             layer=self,
+@@ -544,6 +532,24 @@ class FusedMoE(torch.nn.Module):
+         )
+ 
+         self.quant_method.create_moe_runner(self, self.moe_runner_config)
++        self.runner_backend = self.quant_method.get_moe_runner_backend(self)
++        self.moe_runner_config.runner_backend = self.runner_backend
++        self._set_runner_flags()
++        self.supports_deferred_finalize = (
++            self.runner_backend is not None
++            and self.runner_backend.is_flashinfer_trtllm()
++            and (nvfp4_deferred or qwen35_fp8_deferred or qwen4_bf16_deferred)
++        )
++        global _deferred_finalize_info_logged
++        if not _deferred_finalize_info_logged:
++            _deferred_finalize_info_logged = True
++            logging.getLogger(__name__).debug(
++                "FlashInfer TRTLLM MoE deferred finalize is "
++                f"{'enabled' if self.supports_deferred_finalize else 'disabled'} "
++                f"(moe_runner_backend={self.runner_backend}, "
++                f"quant_method={type(self.quant_method).__name__})."
++            )
++
+         self.dispatcher = create_moe_dispatcher(
+             self.moe_runner_config, quant_method=self.quant_method
+         )
+@@ -561,14 +567,11 @@ class FusedMoE(torch.nn.Module):
+         self.swiglu_alpha = gemm1_alpha
+         self.swiglu_clamp_limit = gemm1_clamp_limit
+ 
+-        if (
+-            get_moe_runner_backend().is_flashinfer_trtllm_routed()
+-            or get_moe_runner_backend().is_flashinfer_trtllm()
+-        ):
++        if self.use_flashinfer_trtllm_moe:
+             self.moe_runner_config.inplace = False
+ 
+         self.should_fuse_routed_scaling_factor_in_topk = (
+-            _fuses_routed_scaling_factor_in_topk(self.quant_method)
++            _fuses_routed_scaling_factor_in_topk(self.quant_method, self.runner_backend)
+         )
+ 
+         self.routing_method_type = routing_method_type
+@@ -581,6 +584,20 @@ class FusedMoE(torch.nn.Module):
+ 
+         self.runner = self.quant_method.runner
+ 
++    def _set_runner_flags(self) -> None:
++        backend = self.runner_backend
++        self.enable_flashinfer_cutlass_moe = (
++            backend is not None and backend.is_flashinfer_cutlass()
++        )
++        self.use_flashinfer_mxfp4_moe = (
++            backend is not None and backend.is_flashinfer_mxfp4()
++        )
++        self.use_triton_kernels = backend is not None and backend.is_triton_kernels()
++        self.use_deep_gemm = backend is not None and backend.is_deep_gemm()
++        self.use_flashinfer_trtllm_moe = backend is not None and (
++            backend.is_flashinfer_trtllm() or backend.is_flashinfer_trtllm_routed()
++        )
++
+     @property
+     def num_global_routed_experts(self) -> int:
+         return self._num_global_routed
+@@ -1192,10 +1209,7 @@ class FusedMoE(torch.nn.Module):
+                 param=param,
+                 weight_name=weight_name,
+             )
+-        elif isinstance(method, Fp8MoEMethod) and (
+-            get_moe_runner_backend().is_flashinfer_trtllm_routed()
+-            or get_moe_runner_backend().is_flashinfer_trtllm()
+-        ):
++        elif isinstance(method, Fp8MoEMethod) and (self.use_flashinfer_trtllm_moe):
+             # Drop the GPU mxfp8 shuffle-index cache on every reload for mxfp8 trtllm, trtllm_routed
+             from sglang.srt.layers.moe.moe_runner.flashinfer_trtllm import (
+                 clear_mxfp8_shuffle_index_cache,
+@@ -1444,10 +1458,7 @@ class FusedMoE(torch.nn.Module):
+         method = self.quant_method
+         if self.scheme is not None:
+             method = self.scheme
+-        if isinstance(method, Fp8MoEMethod) and (
+-            get_moe_runner_backend().is_flashinfer_trtllm_routed()
+-            or get_moe_runner_backend().is_flashinfer_trtllm()
+-        ):
++        if isinstance(method, Fp8MoEMethod) and (self.use_flashinfer_trtllm_moe):
+             # Drop the GPU mxfp8 shuffle-index cache on every reload for mxfp8 trtllm, trtllm_routed
+             from sglang.srt.layers.moe.moe_runner.flashinfer_trtllm import (
+                 clear_mxfp8_shuffle_index_cache,
+diff --git a/python/sglang/srt/layers/moe/kt_ep_wrapper.py b/python/sglang/srt/layers/moe/kt_ep_wrapper.py
+index 36c15cf1..1849fb0f 100644
+--- a/python/sglang/srt/layers/moe/kt_ep_wrapper.py
++++ b/python/sglang/srt/layers/moe/kt_ep_wrapper.py
+@@ -272,6 +272,9 @@ class KTEPWrapperMethod(FusedMoEMethodBase):
+         # Delegate to GPU method to create its runner
+         self.gpu_method.create_moe_runner(layer, moe_runner_config)
+ 
++    def get_moe_runner_backend(self, layer):
++        return self.gpu_method.get_moe_runner_backend(layer)
++
+     def submit(
+         self,
+         layer: torch.nn.Module,
+diff --git a/python/sglang/srt/layers/moe/moe_runner/base.py b/python/sglang/srt/layers/moe/moe_runner/base.py
+index 77adb353..a056228f 100644
+--- a/python/sglang/srt/layers/moe/moe_runner/base.py
++++ b/python/sglang/srt/layers/moe/moe_runner/base.py
+@@ -47,6 +47,9 @@ class MoeRunnerConfig:
+     params_dtype: Optional[torch.dtype] = None
+     routing_method_type: Optional[RoutingMethodType] = None
+ 
++    # None denotes a direct kernel with standard TopK and local expert IDs.
++    runner_backend: Optional[MoeRunnerBackendLike] = None
++
+     # Runner configuration
+     activation: str = "silu"
+     is_gated: bool = True
+diff --git a/python/sglang/srt/layers/moe/token_dispatcher/base.py b/python/sglang/srt/layers/moe/token_dispatcher/base.py
+index 94a7bd06..0eae148d 100644
+--- a/python/sglang/srt/layers/moe/token_dispatcher/base.py
++++ b/python/sglang/srt/layers/moe/token_dispatcher/base.py
+@@ -329,6 +329,7 @@ class BaseDispatcher(ABC):
+ 
+     def __init__(self):
+         self.quant_config: dict = {}
++        self.runner_backend = None
+ 
+         # Overlap args
+         self.overlap_args: Optional[CombineOverlapArgs] = None
+diff --git a/python/sglang/srt/layers/moe/token_dispatcher/deepep.py b/python/sglang/srt/layers/moe/token_dispatcher/deepep.py
+index 2c3670a8..d7ef1b82 100644
+--- a/python/sglang/srt/layers/moe/token_dispatcher/deepep.py
++++ b/python/sglang/srt/layers/moe/token_dispatcher/deepep.py
+@@ -376,6 +376,7 @@ class _DeepEPDispatcherImplBase:
+         hidden_size: int,
+         params_dtype: torch.dtype,
+         deepep_mode: DeepEPMode,
++        runner_backend=None,
+     ):
+         if not use_deepep:
+             raise ImportError(
+@@ -388,6 +389,7 @@ class _DeepEPDispatcherImplBase:
+                 )
+             ) from _deepep_import_error
+ 
++        self.runner_backend = runner_backend
+         self.group = group
+         self.router_topk = router_topk
+         self.permute_fusion = permute_fusion
+@@ -991,12 +993,14 @@ class DeepEPDispatcher(BaseDispatcher):
+         deepep_mode: DeepEPMode = DeepEPMode.AUTO,
+         async_finish: bool = False,
+         return_recv_hook: bool = False,
++        runner_backend=None,
+     ):
+         super().__init__()
+ 
+         self.deepep_mode = deepep_mode
+ 
+         common_kwargs = dict(
++            runner_backend=runner_backend,
+             group=group,
+             router_topk=router_topk,
+             permute_fusion=permute_fusion,
+diff --git a/python/sglang/srt/layers/moe/token_dispatcher/flashinfer.py b/python/sglang/srt/layers/moe/token_dispatcher/flashinfer.py
+index ad685fe5..261e9fc2 100644
+--- a/python/sglang/srt/layers/moe/token_dispatcher/flashinfer.py
++++ b/python/sglang/srt/layers/moe/token_dispatcher/flashinfer.py
+@@ -36,7 +36,6 @@ from sglang.srt.layers.moe.topk import (
+ from sglang.srt.layers.moe.utils import (
+     FlashinferA2ADispatchType,
+     get_flashinfer_a2a_dispatch_type,
+-    get_moe_runner_backend,
+ )
+ from sglang.srt.runtime_context import (
+     get_flags,
+@@ -162,24 +161,33 @@ class FlashinferDispatcher(BaseDispatcher):
+                 "Please install the appropriate version of Flashinfer."
+             )
+ 
++        self.runner_backend = (
++            moe_runner_config.runner_backend if moe_runner_config is not None else None
++        )
+         self.ep_size = group.size()
+         self.ep_rank = group.rank()
+         self.router_topk = router_topk
+         self.hidden_size = hidden_size
+         self.num_experts = num_experts
+         self.num_local_experts = num_local_experts
+-        runner_backend = get_moe_runner_backend()
++        runner_backend = self.runner_backend
+         self.invalid_token_expert_id = (
+             -1
+             if (
+-                runner_backend.is_deep_gemm()
+-                or runner_backend.is_flashinfer_trtllm()
+-                or runner_backend.is_flashinfer_trtllm_routed()
++                runner_backend is not None
++                and (
++                    runner_backend.is_deep_gemm()
++                    or runner_backend.is_flashinfer_trtllm()
++                    or runner_backend.is_flashinfer_trtllm_routed()
++                )
+             )
+             else self.num_experts
+         )
+         # TODO: Can other moe runners use payload_in_workspace too?
+-        self.payload_in_workspace = get_moe_runner_backend().is_flashinfer_cutlass()
++        self.payload_in_workspace = (
++            self.runner_backend is not None
++            and self.runner_backend.is_flashinfer_cutlass()
++        )
+         self.dispatch_type = get_flashinfer_a2a_dispatch_type()
+         if moe_runner_config is None:
+             from sglang.srt.layers.moe.moe_runner.base import MoeRunnerConfig
+@@ -389,15 +397,18 @@ class FlashinferDispatcher(BaseDispatcher):
+             )
+         # Block-wise FP8 runners quantize before GEMM, so keep dispatch/combine BF16;
+         # FP4 retains its packed wire path keyed by input_global_scale.
+-        runner_backend = get_moe_runner_backend()
++        runner_backend = self.runner_backend
+         weight_dtype = self.quant_config.get("weight_dtype")
+         uses_bf16_fp8_payload = weight_dtype in (
+             torch.float8_e4m3fn,
+             torch.float8_e5m2,
+         ) and (
+-            runner_backend.is_deep_gemm()
+-            or runner_backend.is_flashinfer_trtllm()
+-            or runner_backend.is_flashinfer_trtllm_routed()
++            runner_backend is not None
++            and (
++                runner_backend.is_deep_gemm()
++                or runner_backend.is_flashinfer_trtllm()
++                or runner_backend.is_flashinfer_trtllm_routed()
++            )
+         )
+         if uses_bf16_fp8_payload and hidden_states.dtype != torch.bfloat16:
+             raise TypeError(
+@@ -537,9 +548,9 @@ class FlashinferDispatcher(BaseDispatcher):
+                 x_recv, x_sf_recv, topk_ids_recv, topk_weights_recv = recv_tensors
+                 x_sf = x_sf_recv.view(-1, x_sf_recv.shape[-1])
+                 # TODO: fuse interleave into cutlass moe
+-                if (
+-                    dispatch_type == FlashinferA2ADispatchType.NVFP4
+-                    and get_moe_runner_backend().is_flashinfer_cutlass()
++                if dispatch_type == FlashinferA2ADispatchType.NVFP4 and (
++                    self.runner_backend is not None
++                    and self.runner_backend.is_flashinfer_cutlass()
+                 ):
+                     x_sf = nvfp4_block_scale_interleave(x_sf)
+             else:
+@@ -593,13 +604,16 @@ class FlashinferDispatcher(BaseDispatcher):
+             )
+ 
+         weight_dtype = self.quant_config.get("weight_dtype")
+-        runner_backend = get_moe_runner_backend()
++        runner_backend = self.runner_backend
+         if (
+             weight_dtype in (torch.float8_e4m3fn, torch.float8_e5m2)
+             and (
+-                runner_backend.is_deep_gemm()
+-                or runner_backend.is_flashinfer_trtllm()
+-                or runner_backend.is_flashinfer_trtllm_routed()
++                runner_backend is not None
++                and (
++                    runner_backend.is_deep_gemm()
++                    or runner_backend.is_flashinfer_trtllm()
++                    or runner_backend.is_flashinfer_trtllm_routed()
++                )
+             )
+             and hidden_states.dtype != torch.bfloat16
+         ):
+diff --git a/python/sglang/srt/layers/moe/token_dispatcher/pplx.py b/python/sglang/srt/layers/moe/token_dispatcher/pplx.py
+index 6337bb94..ecd423c5 100644
+--- a/python/sglang/srt/layers/moe/token_dispatcher/pplx.py
++++ b/python/sglang/srt/layers/moe/token_dispatcher/pplx.py
+@@ -198,6 +198,7 @@ class _PplxDispatcherImpl:
+         hidden_size: int,
+         params_dtype: torch.dtype,
+         deepep_mode: DeepEPMode,
++        runner_backend=None,
+     ):
+         if not use_pplx:
+             raise ImportError(
+@@ -208,6 +209,7 @@ class _PplxDispatcherImpl:
+                 "backend."
+             )
+ 
++        self.runner_backend = runner_backend
+         self.group = group
+         self.router_topk = router_topk
+         self.permute_fusion = permute_fusion
+@@ -431,6 +433,7 @@ class PplxDispatcher(BaseDispatcher):
+         deepep_mode: DeepEPMode = DeepEPMode.AUTO,
+         async_finish: bool = False,
+         return_recv_hook: bool = False,
++        runner_backend=None,
+     ):
+         super().__init__()
+ 
+@@ -442,6 +445,7 @@ class PplxDispatcher(BaseDispatcher):
+             )
+ 
+         self._low_latency_dispatcher = _PplxDispatcherImpl(
++            runner_backend=runner_backend,
+             group=group,
+             router_topk=router_topk,
+             permute_fusion=permute_fusion,
+diff --git a/python/sglang/srt/layers/moe/token_dispatcher/standard.py b/python/sglang/srt/layers/moe/token_dispatcher/standard.py
+index 0bb57e62..c67f62ff 100644
+--- a/python/sglang/srt/layers/moe/token_dispatcher/standard.py
++++ b/python/sglang/srt/layers/moe/token_dispatcher/standard.py
+@@ -24,11 +24,10 @@ from sglang.srt.layers.moe.token_dispatcher.base import (
+ )
+ from sglang.srt.layers.moe.topk import StandardTopKOutput, TopKOutput, TopKOutputChecker
+ from sglang.srt.layers.moe.utils import (
+-    get_moe_a2a_backend,
+     get_moe_runner_backend,
+     should_use_flashinfer_cutlass_moe_fp4_allgather,
+ )
+-from sglang.srt.runtime_context import get_parallel
++from sglang.srt.runtime_context import get_lora, get_parallel
+ from sglang.srt.utils.common import (
+     get_bool_env_var,
+     get_device,
+@@ -102,34 +101,47 @@ def _map_topk_ids_to_local_experts(
+     )
+ 
+ 
++def _keeps_global_expert_ids(backend) -> bool:
++    return backend is not None and (
++        backend.is_flashinfer_cutlass()
++        or backend.is_flashinfer_cutedsl()
++        or backend.is_flashinfer_trtllm()
++        or backend.is_flashinfer_trtllm_routed()
++        or backend.is_hpc_ops()
++        or backend.is_flashinfer_megamoe()
++        or backend.is_flashinfer_mxfp4()
++    )
++
++
+ class StandardDispatcher(BaseDispatcher):
+     def __init__(self, moe_runner_config: MoeRunnerConfig):
+         super().__init__()
+         self.moe_ep_size = get_parallel().moe_ep_size
+-        backend = get_moe_runner_backend()
+-        self.enable_flashinfer_cutlass_moe = backend.is_flashinfer_cutlass()
+-        self.enable_flashinfer_mxfp4_moe = backend.is_flashinfer_mxfp4()
+-        self.enable_flashinfer_trtllm_routed_moe = backend.is_flashinfer_trtllm_routed()
+-        # AITER fast paths can be on while the MoE runner stays Triton; only the
+-        # AITER runner keeps global expert IDs, so Triton must remap to local range.
+-        self.use_aiter_moe_runner = backend.is_aiter() or (
+-            backend.is_auto() and _use_aiter and get_moe_a2a_backend().supports_aiter()
++        backend = moe_runner_config.runner_backend
++        self.runner_backend = backend
++        self.enable_flashinfer_cutlass_moe = (
++            backend is not None and backend.is_flashinfer_cutlass()
++        )
++        self.enable_flashinfer_mxfp4_moe = (
++            backend is not None and backend.is_flashinfer_mxfp4()
+         )
+-        # Skip local expert mapping when the backend handles EP with global expert IDs:
+-        # - cutlass / cutedsl / trtllm_routed handle EP internally
+-        # - mxfp4 dispatcher mapping is already global
+-        # - hpc_ops consumes global ids together with rank_ep / num_expert_total
+-        # - flashinfer_megamoe routes by global expert ID inside the mega kernel
+-        self.skip_local_expert_mapping = (
+-            backend.is_flashinfer_cutlass()
+-            or backend.is_flashinfer_cutedsl()
+-            or backend.is_flashinfer_trtllm()
+-            or backend.is_experimental_sgl_trtllm()
+-            or backend.is_flashinfer_trtllm_routed()
+-            or backend.is_hpc_ops()
+-            or backend.is_flashinfer_megamoe()
+-            or self.enable_flashinfer_mxfp4_moe
++        self.enable_flashinfer_trtllm_routed_moe = (
++            backend is not None and backend.is_flashinfer_trtllm_routed()
+         )
++        self.use_aiter_moe_runner = backend is not None and backend.is_aiter()
++        self.skip_local_expert_mapping = _keeps_global_expert_ids(backend)
++        if (
++            self.moe_ep_size > 1
++            and (
++                _keeps_global_expert_ids(get_moe_runner_backend())
++                != self.skip_local_expert_mapping
++            )
++            and get_lora().enable_lora
++        ):
++            raise ValueError(
++                "LoRA with expert parallelism requires the layer's MoE runner "
++                "to use the requested runner's expert-ID convention."
++            )
+         self.num_experts = moe_runner_config.num_experts
+         self.num_local_experts = moe_runner_config.num_local_experts
+         self.num_local_shared_experts = moe_runner_config.num_fused_shared_experts
+@@ -144,7 +156,24 @@ class StandardDispatcher(BaseDispatcher):
+         self, hidden_states: torch.Tensor, topk_output: TopKOutput
+     ) -> StandardDispatchOutput:
+ 
+-        if should_use_flashinfer_cutlass_moe_fp4_allgather():
++        needs_dp_allgather = should_use_flashinfer_cutlass_moe_fp4_allgather()
++        use_fp4_payload = (
++            needs_dp_allgather
++            and self.enable_flashinfer_cutlass_moe
++            and self.quant_config.get("input_global_scale") is not None
++        )
++        if needs_dp_allgather and not use_fp4_payload:
++            if TopKOutputChecker.format_is_bypassed(topk_output):
++                topk_output = topk_output.to_standard()
++            topk_weights, topk_ids, hidden_states = get_parallel().tp_group.all_gatherv(
++                [topk_output.topk_weights, topk_output.topk_ids, hidden_states],
++                sizes=get_dp_global_num_tokens(),
++            )
++            topk_output = StandardTopKOutput(
++                topk_weights, topk_ids, topk_output.router_logits
++            )
++            hidden_states_scale = None
++        elif needs_dp_allgather:
+             # all-gather fp4 hidden states
+             if (
+                 fp4_quantize_flashinfer is None
+diff --git a/python/sglang/srt/layers/moe/topk.py b/python/sglang/srt/layers/moe/topk.py
+index 8d90c269..338165a0 100644
+--- a/python/sglang/srt/layers/moe/topk.py
++++ b/python/sglang/srt/layers/moe/topk.py
+@@ -101,10 +101,12 @@ from sglang.srt.eplb.expert_location_dispatch import (
+ from sglang.srt.layers.dp_attention import is_allocation_symmetric
+ from sglang.srt.layers.moe import (
+     get_moe_a2a_backend,
+-    get_moe_runner_backend,
+     is_moe_input_scattered_across_dp_ranks,
+ )
+-from sglang.srt.layers.moe.utils import has_per_rank_fused_shared_slots
++from sglang.srt.layers.moe.utils import (
++    MoeRunnerBackendLike,
++    has_per_rank_fused_shared_slots,
++)
+ from sglang.srt.state_capturer.routed_experts import get_global_experts_capturer
+ from sglang.srt.utils import (
+     cpu_has_amx_support,
+@@ -262,6 +264,7 @@ class TopKConfig:
+     apply_routed_scaling_factor_on_output: bool = False
+     fused_shared_experts_scaling_factor: Optional[float] = None
+     output_format: Optional[TopKOutputFormat] = None
++    runner_backend: Optional[MoeRunnerBackendLike] = None
+     scoring_func: str = "softmax"
+     # sqrtsoftplus through log1p with NaNs ranked first (DeepSeek-V4.1 routing).
+     sqrtsoftplus_log1p: bool = False
+@@ -621,6 +624,7 @@ class TopK(BaseFusedOp):
+             assert num_expert_group is not None and topk_group is not None
+ 
+         self.layer_id = layer_id
++        self._runner_backend_bound = False
+ 
+         self.enable_waterfill = (
+             num_fused_shared_experts > 0 and get_exec().moe.enable_waterfill
+@@ -655,6 +659,38 @@ class TopK(BaseFusedOp):
+             allow_routed_experts_capture=allow_routed_experts_capture,
+         )
+ 
++    def bind_runner_backend(
++        self, runner_backend: Optional[MoeRunnerBackendLike]
++    ) -> None:
++        """Associate the owning experts once; repeating the same association is safe."""
++        if self._runner_backend_bound:
++            if runner_backend != self.topk_config.runner_backend:
++                raise RuntimeError("TopK cannot bind a different MoE runner backend.")
++            return
++        self._runner_backend_bound = True
++        self.topk_config.runner_backend = runner_backend
++        self.topk_config.fused_gate_packed_ids &= (
++            runner_backend is not None and runner_backend.is_flashinfer_mxfp4()
++        )
++        if self.topk_config.output_format is not None:
++            return
++        if runner_backend is not None and runner_backend.is_triton_kernels():
++            output_format = TopKOutputFormat.TRITON_KERNEL
++        elif runner_backend is not None and (
++            runner_backend.is_flashinfer_trtllm()
++            or runner_backend.is_flashinfer_mxfp4()
++            and not self.is_fp4_experts
++        ):
++            output_format = (
++                TopKOutputFormat.STANDARD
++                if runner_backend.is_experimental_sgl_trtllm()
++                and get_lora().enable_lora
++                else TopKOutputFormat.BYPASSED
++            )
++        else:
++            output_format = TopKOutputFormat.STANDARD
++        self.topk_config.output_format = output_format
++
+     def _apply_waterfill(self, topk_output: TopKOutput, num_tokens: int) -> TopKOutput:
+         if self.enable_waterfill and self.waterfill_balancer is None:
+             raise RuntimeError(
+@@ -718,26 +754,10 @@ class TopK(BaseFusedOp):
+             output_format = TopKOutputFormat.STANDARD
+         elif self.topk_config.output_format is not None:
+             output_format = self.topk_config.output_format
+-        elif get_moe_runner_backend().is_triton_kernels():
+-            output_format = TopKOutputFormat.TRITON_KERNEL
+-        # ===== TO BE REFACTORED ====
+-        elif get_moe_runner_backend().is_experimental_sgl_trtllm():
+-            try:
+-                use_standard_for_lora = bool(get_lora().enable_lora)
+-            except ValueError:
+-                use_standard_for_lora = False
+-            output_format = (
+-                TopKOutputFormat.STANDARD
+-                if use_standard_for_lora
+-                else TopKOutputFormat.BYPASSED
+-            )
+-        # ===== END TO BE REFACTORED ====
+-        elif get_moe_runner_backend().is_flashinfer_trtllm() or (
+-            get_moe_runner_backend().is_flashinfer_mxfp4() and not self.is_fp4_experts
+-        ):
+-            output_format = TopKOutputFormat.BYPASSED
+         else:
+-            output_format = TopKOutputFormat.STANDARD
++            raise RuntimeError(
++                "TopK requires the owning experts' runner backend or an explicit output format."
++            )
+ 
+         if (
+             router_logits_partials is not None
+@@ -1726,7 +1746,6 @@ def _fused_gate_emits_packed_ids(
+     return (
+         enabled
+         and _fused_gate_masks_padded_rows(scoring_func)
+-        and get_moe_runner_backend().is_flashinfer_mxfp4()
+         and expert_location_dispatch_info is None
+         and num_fused_shared_experts == 0
+         and not routing_overridden
+@@ -2753,7 +2772,8 @@ def select_experts(
+             )
+             padded_rows_masked = _fused_gate_masks_padded_rows(scoring_func)
+         elif (
+-            get_moe_runner_backend().is_flashinfer_trtllm_routed()
++            topk_config.runner_backend is not None
++            and topk_config.runner_backend.is_flashinfer_trtllm_routed()
+             and scoring_func == "softmax"
+             and correction_bias is None
+         ):
+diff --git a/python/sglang/srt/layers/moe/utils.py b/python/sglang/srt/layers/moe/utils.py
+index cd46f236..2b4cdb3f 100644
+--- a/python/sglang/srt/layers/moe/utils.py
++++ b/python/sglang/srt/layers/moe/utils.py
+@@ -378,11 +378,9 @@ def get_deepep_output_dtype(self) -> DispatcherOutputDtype:
+         if dispatcher_output_dtype is not None:
+             return DispatcherOutputDtype(dispatcher_output_dtype)
+ 
+-    # 5. flashinfer_cutedsl / cutlass / humming expects BF16 dispatch
+-    if (
+-        get_moe_runner_backend().is_flashinfer_cutedsl()
+-        or get_moe_runner_backend().is_cutlass()
+-        or get_moe_runner_backend().is_humming()
++    backend = self.runner_backend
++    if backend is not None and (
++        backend.is_flashinfer_cutedsl() or backend.is_cutlass() or backend.is_humming()
+     ):
+         return DispatcherOutputDtype.BF16
+ 
+diff --git a/python/sglang/srt/layers/muse_spark/muse_spark_bf16_moe.py b/python/sglang/srt/layers/muse_spark/muse_spark_bf16_moe.py
+index b8bca060..f43a6bd2 100644
+--- a/python/sglang/srt/layers/muse_spark/muse_spark_bf16_moe.py
++++ b/python/sglang/srt/layers/muse_spark/muse_spark_bf16_moe.py
+@@ -22,6 +22,7 @@ from sglang.kernels.ops.muse_spark.fused_post_expert_norm_weighted_sum_triton im
+ from sglang.kernels.ops.muse_spark.fused_post_expert_norm_weighted_sum_trtllm import (
+     FusedPostExpertNormWeightedSumTRTLLM,
+ )
++from sglang.srt.layers.moe import MoeRunnerBackend
+ from sglang.srt.layers.moe.moe_runner.base import MoeRunnerConfig
+ from sglang.srt.layers.muse_spark.muse_spark_fp4_moe import (
+     finalize_with_post_expert_norm,
+@@ -110,6 +111,7 @@ class MuseSpark1xBf16Experts(nn.Module):
+         self.moe_runner_config = MoeRunnerConfig(
+             num_experts=num_experts,
+             num_local_experts=num_local_experts,
++            runner_backend=MoeRunnerBackend.FLASHINFER_TRTLLM,
+             hidden_size=expert_hidden_size,
+             intermediate_size_per_partition=intermediate_size,
+             top_k=top_k,
+diff --git a/python/sglang/srt/layers/muse_spark/muse_spark_fp4_moe.py b/python/sglang/srt/layers/muse_spark/muse_spark_fp4_moe.py
+index ae6705d8..659827fe 100644
+--- a/python/sglang/srt/layers/muse_spark/muse_spark_fp4_moe.py
++++ b/python/sglang/srt/layers/muse_spark/muse_spark_fp4_moe.py
+@@ -106,11 +106,13 @@ class MuseSpark1xFp4Experts(nn.Module):
+         self.top_k = top_k
+         self.params_dtype = params_dtype or torch.get_default_dtype()
+         self.quant_config = quant_config
++        self.moe_runner_backend = _resolve_moe_runner_backend()
+         # SwiGLU, and no routed_scaling here -- Muse folds its route_scale into
+         # the topk weights before they reach us.
+         self.moe_runner_config = MoeRunnerConfig(
+             num_experts=num_experts,
+             num_local_experts=num_local_experts,
++            runner_backend=self.moe_runner_backend,
+             hidden_size=hidden_size,
+             intermediate_size_per_partition=intermediate_size,
+             top_k=top_k,
+@@ -125,7 +127,6 @@ class MuseSpark1xFp4Experts(nn.Module):
+         self.dispatcher = _DirectDispatcher()
+ 
+         capability = get_device_capability() if is_cuda() else None
+-        self.moe_runner_backend = _resolve_moe_runner_backend()
+         self.use_marlin = self.moe_runner_backend.is_marlin()
+         self._sm_major = capability[0] if capability is not None else 0
+         if not self.use_marlin and capability is not None and capability < (10, 0):
+diff --git a/python/sglang/srt/layers/quantization/awq/awq.py b/python/sglang/srt/layers/quantization/awq/awq.py
+index 6199ae8f..c5d48285 100644
+--- a/python/sglang/srt/layers/quantization/awq/awq.py
++++ b/python/sglang/srt/layers/quantization/awq/awq.py
+@@ -500,6 +500,9 @@ class AWQMoEMethod(FusedMoEMethodBase):
+     ):
+         layer.scheme.create_moe_runner(layer, moe_runner_config)
+ 
++    def get_moe_runner_backend(self, layer):
++        return layer.scheme.get_moe_runner_backend(layer)
++
+     def apply(
+         self,
+         layer: torch.nn.Module,
+diff --git a/python/sglang/srt/layers/quantization/awq/schemes/awq_cpu.py b/python/sglang/srt/layers/quantization/awq/schemes/awq_cpu.py
+index 0965a76b..e8b24f85 100644
+--- a/python/sglang/srt/layers/quantization/awq/schemes/awq_cpu.py
++++ b/python/sglang/srt/layers/quantization/awq/schemes/awq_cpu.py
+@@ -38,3 +38,6 @@ class AWQIntelAMXMoEScheme(AWQMoEScheme):
+     ):
+         self.moe_runner_config = moe_runner_config
+         self.kernel.create_moe_runner(layer, moe_runner_config)
++
++    def get_moe_runner_backend(self, layer):
++        return None
+diff --git a/python/sglang/srt/layers/quantization/awq/schemes/awq_moe.py b/python/sglang/srt/layers/quantization/awq/schemes/awq_moe.py
+index 92bb0cdf..5d523cd6 100644
+--- a/python/sglang/srt/layers/quantization/awq/schemes/awq_moe.py
++++ b/python/sglang/srt/layers/quantization/awq/schemes/awq_moe.py
+@@ -133,6 +133,9 @@ class AWQMoEScheme(AWQMoESchemeBase):
+         self.moe_runner_config = moe_runner_config
+         self.kernel.runner = MoeRunner(MoeRunnerBackend.MARLIN, moe_runner_config)
+ 
++    def get_moe_runner_backend(self, layer):
++        return self.kernel.runner.runner_backend
++
+     def apply_weights(
+         self,
+         layer: torch.nn.Module,
+@@ -168,6 +171,9 @@ class AWQAscendMoEScheme(AWQMoEScheme):
+             backend = MoeRunnerBackend.ASCEND
+         self.runner = MoeRunner(backend, moe_runner_config)
+ 
++    def get_moe_runner_backend(self, layer):
++        return self.runner.runner_backend
++
+     def apply_weights(
+         self,
+         layer: torch.nn.Module,
+diff --git a/python/sglang/srt/layers/quantization/base_config.py b/python/sglang/srt/layers/quantization/base_config.py
+index a080d0c1..b81b37ec 100644
+--- a/python/sglang/srt/layers/quantization/base_config.py
++++ b/python/sglang/srt/layers/quantization/base_config.py
+@@ -113,6 +113,16 @@ class FusedMoEMethodBase(QuantizeMethodBase):
+     ):
+         raise NotImplementedError
+ 
++    def get_moe_runner_backend(
++        self, layer: torch.nn.Module
++    ) -> MoeRunnerBackendLike | None:
++        """Return the execution contract after create_moe_runner.
++
++        None declares a direct kernel consuming standard TopK with local IDs.
++        Override when apply uses a different path from the owned runner.
++        """
++        return self.runner.runner_backend if self.runner is not None else None
++
+     @abstractmethod
+     def apply(
+         self,
+diff --git a/python/sglang/srt/layers/quantization/base_scheme.py b/python/sglang/srt/layers/quantization/base_scheme.py
+index 2e62d6c2..2847d09f 100644
+--- a/python/sglang/srt/layers/quantization/base_scheme.py
++++ b/python/sglang/srt/layers/quantization/base_scheme.py
+@@ -59,6 +59,12 @@ class BaseMoEScheme(ABC):
+     of different quantization schemes.
+     """
+ 
++    runner = None
++
++    def get_moe_runner_backend(self, layer):
++        """Return the runner contract, or None for a direct standard/local-ID kernel."""
++        return self.runner.runner_backend if self.runner is not None else None
++
+     @abstractmethod
+     def create_weights(self, *args, **kwargs):
+         """
+diff --git a/python/sglang/srt/layers/quantization/compressed_tensors/compressed_tensors.py b/python/sglang/srt/layers/quantization/compressed_tensors/compressed_tensors.py
+index fbb155ec..4aea9944 100644
+--- a/python/sglang/srt/layers/quantization/compressed_tensors/compressed_tensors.py
++++ b/python/sglang/srt/layers/quantization/compressed_tensors/compressed_tensors.py
+@@ -1378,6 +1378,9 @@ class CompressedTensorsFusedMoEMethod(FusedMoEMethodBase):
+     ):
+         return layer.scheme.create_moe_runner(layer, moe_runner_config)
+ 
++    def get_moe_runner_backend(self, layer):
++        return layer.scheme.get_moe_runner_backend(layer)
++
+     def get_triton_quant_info(self, layer: torch.nn.Module):
+         return layer.scheme.get_triton_quant_info(layer)
+ 
+diff --git a/python/sglang/srt/layers/quantization/compressed_tensors/schemes/compressed_tensors_w4a4_mxint4_moe.py b/python/sglang/srt/layers/quantization/compressed_tensors/schemes/compressed_tensors_w4a4_mxint4_moe.py
+index d24b3b22..219fe469 100644
+--- a/python/sglang/srt/layers/quantization/compressed_tensors/schemes/compressed_tensors_w4a4_mxint4_moe.py
++++ b/python/sglang/srt/layers/quantization/compressed_tensors/schemes/compressed_tensors_w4a4_mxint4_moe.py
+@@ -11,7 +11,11 @@ from sglang.srt.distributed.device_communicators.pynccl_allocator import (
+ )
+ from sglang.srt.layers.dp_attention import is_allocation_symmetric
+ from sglang.srt.layers.moe import MoeRunnerConfig
+-from sglang.srt.layers.moe.utils import RoutingMethodType, get_moe_runner_backend
++from sglang.srt.layers.moe.utils import (
++    MoeRunnerBackend,
++    RoutingMethodType,
++    get_moe_runner_backend,
++)
+ from sglang.srt.layers.quantization.compressed_tensors.schemes import (
+     CompressedTensorsMoEScheme,
+ )
+@@ -292,6 +296,9 @@ class CompressedTensorsMxInt4MoE(CompressedTensorsMoEScheme):
+     ):
+         self.moe_runner_config = moe_runner_config
+ 
++    def get_moe_runner_backend(self, layer):
++        return MoeRunnerBackend.FLASHINFER_TRTLLM
++
+     def apply_weights(
+         self,
+         layer: torch.nn.Module,
+diff --git a/python/sglang/srt/layers/quantization/fp8.py b/python/sglang/srt/layers/quantization/fp8.py
+index 9d0c3e01..5c69c656 100644
+--- a/python/sglang/srt/layers/quantization/fp8.py
++++ b/python/sglang/srt/layers/quantization/fp8.py
+@@ -1429,6 +1429,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
+         # The MxFP4 wrapper methods borrow this instance for weight loading;
+         # they never call create_moe_runner, so moe_runner_config is unset.
+         self._owns_moe_runner = False
++        self._moe_runner_backend = None
+         if get_moe_runner_backend().is_cutlass():
+             assert cutlass_fp8_supported(), (
+                 "cutlass_fp8 MoE requires CUDA 12.0+ with SM90 or CUDA 12.4+ with SM89"
+@@ -2056,6 +2057,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
+             )
+             return
+ 
++        runner_backend = self.get_moe_runner_backend(layer)
++        runner_is_aiter = runner_backend is not None and runner_backend.is_aiter()
++
+         # If ROCm, normalize the weights and scales to e4m3fnuz
+         if _is_fp8_fnuz:
+             # activation_scheme: dynamic
+@@ -2080,7 +2084,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
+                 w2_weight_scale, requires_grad=False
+             )
+             layer.w2_input_scale = None
+-            if _use_aiter:
++            if _use_aiter and runner_is_aiter:
+                 layer.w13_weight.data = shuffle_weight(
+                     layer.w13_weight.contiguous(), (16, 16)
+                 )
+@@ -2091,16 +2095,17 @@ class Fp8MoEMethod(FusedMoEMethodBase):
+                 layer.w2_weight.is_shuffled = True
+                 layer._aiter_gate_up_interleaved = False
+         elif _use_aiter:
+-            # Pre-shuffle weights
+-            t = shuffle_weight(layer.w13_weight, (16, 16))
+-            layer.w13_weight.copy_(t)
+-            del t
+-            t = shuffle_weight(layer.w2_weight, (16, 16))
+-            layer.w2_weight.copy_(t)
+-            del t
+-            layer.w13_weight.is_shuffled = True
+-            layer.w2_weight.is_shuffled = True
+-            layer._aiter_gate_up_interleaved = False
++            if runner_is_aiter:
++                # Pre-shuffle weights
++                t = shuffle_weight(layer.w13_weight, (16, 16))
++                layer.w13_weight.copy_(t)
++                del t
++                t = shuffle_weight(layer.w2_weight, (16, 16))
++                layer.w2_weight.copy_(t)
++                del t
++                layer.w13_weight.is_shuffled = True
++                layer.w2_weight.is_shuffled = True
++                layer._aiter_gate_up_interleaved = False
+         elif _is_cpu:
+             assert _is_cpu_amx_available, (
+                 "Fp8MoEMethod on CPU requires that CPU has AMX support"
+@@ -2905,8 +2910,13 @@ class Fp8MoEMethod(FusedMoEMethodBase):
+             self.runner = MoeRunner(moe_runner_backend, moe_runner_config)
+             self._owns_moe_runner = True
+         else:
+-            # TODO(cwan): refactor other backends
+-            pass
++            # Direct kernels still declare the layout they consume.
++            self._moe_runner_backend = moe_runner_backend
++
++    def get_moe_runner_backend(self, layer):
++        if self.runner is not None:
++            return self.runner.runner_backend
++        return self._moe_runner_backend
+ 
+     def get_triton_quant_info(self, layer: torch.nn.Module) -> TritonMoeQuantInfo:
+         use_rocm_mxfp8 = self.use_mxfp8 and _is_hip and _is_gfx95_supported
+diff --git a/python/sglang/srt/layers/quantization/gptq/gptq.py b/python/sglang/srt/layers/quantization/gptq/gptq.py
+index d53f6284..0797d872 100644
+--- a/python/sglang/srt/layers/quantization/gptq/gptq.py
++++ b/python/sglang/srt/layers/quantization/gptq/gptq.py
+@@ -559,6 +559,9 @@ class GPTQMoEMethod(FusedMoEMethodBase):
+     ):
+         layer.scheme.create_moe_runner(layer, moe_runner_config)
+ 
++    def get_moe_runner_backend(self, layer):
++        return layer.scheme.get_moe_runner_backend(layer)
++
+     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+         layer.scheme.process_weights_after_loading(layer)
+ 
+@@ -651,6 +654,9 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
+     ):
+         layer.scheme.create_moe_runner(layer, moe_runner_config)
+ 
++    def get_moe_runner_backend(self, layer):
++        return layer.scheme.get_moe_runner_backend(layer)
++
+     def apply(
+         self,
+         layer: torch.nn.Module,
+diff --git a/python/sglang/srt/layers/quantization/gptq/schemes/gptq_cpu.py b/python/sglang/srt/layers/quantization/gptq/schemes/gptq_cpu.py
+index f3ce5560..8423b54d 100644
+--- a/python/sglang/srt/layers/quantization/gptq/schemes/gptq_cpu.py
++++ b/python/sglang/srt/layers/quantization/gptq/schemes/gptq_cpu.py
+@@ -274,6 +274,9 @@ class GPTQIntelAMXMoEScheme(GPTQMoESchemeBase):
+     ):
+         self.kernel.create_moe_runner(layer, moe_runner_config)
+ 
++    def get_moe_runner_backend(self, layer):
++        return None
++
+     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+         self.kernel.process_weights_after_loading(layer)
+ 
+diff --git a/python/sglang/srt/layers/quantization/gptq/schemes/gptq_moe.py b/python/sglang/srt/layers/quantization/gptq/schemes/gptq_moe.py
+index d3481cb5..ba8b8267 100644
+--- a/python/sglang/srt/layers/quantization/gptq/schemes/gptq_moe.py
++++ b/python/sglang/srt/layers/quantization/gptq/schemes/gptq_moe.py
+@@ -325,6 +325,9 @@ class GPTQMarlinMoEScheme(GPTQMoESchemeBase):
+     ):
+         self.kernel.create_moe_runner(layer, moe_runner_config)
+ 
++    def get_moe_runner_backend(self, layer):
++        return self.kernel.runner.runner_backend
++
+     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+         self.kernel.process_weights_after_loading(layer)
+ 
+diff --git a/python/sglang/srt/layers/quantization/modelopt_quant.py b/python/sglang/srt/layers/quantization/modelopt_quant.py
+index 3a30f3be..cb0cdaee 100755
+--- a/python/sglang/srt/layers/quantization/modelopt_quant.py
++++ b/python/sglang/srt/layers/quantization/modelopt_quant.py
+@@ -1255,14 +1255,14 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
+             )
+ 
+         # Align FP8 weights to FlashInfer per-tensor kernel layout if enabled
+-        if get_moe_runner_backend().is_flashinfer_trtllm():
++        if self._moe_runner_backend.is_flashinfer_trtllm():
+             from sglang.srt.layers.moe.moe_runner.flashinfer_trtllm import (
+                 align_fp8_moe_weights_for_flashinfer_trtllm,
+             )
+ 
+             # ModelOpt FP8 stores weights in [Up, Gate] order, so we need to swap
+             align_fp8_moe_weights_for_flashinfer_trtllm(layer, swap_w13_halves=True)
+-        elif get_moe_runner_backend().is_flashinfer_cutlass():
++        elif self._moe_runner_backend.is_flashinfer_cutlass():
+             assert (
+                 hasattr(layer, "w13_input_scale") and layer.w13_input_scale is not None
+             )
+@@ -1352,6 +1352,14 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
+             )
+         else:
+             self.runner = MoeRunner(MoeRunnerBackend.TRITON, moe_runner_config)
++        self._moe_runner_backend = (
++            moe_runner_backend
++            if moe_runner_backend.is_flashinfer_trtllm()
++            else self.runner.runner_backend
++        )
++
++    def get_moe_runner_backend(self, layer):
++        return self._moe_runner_backend
+ 
+     def apply(
+         self,
+@@ -1365,7 +1373,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
+         # Fast path: TRT-LLM FP8 per-tensor MoE using BYPASSED TopK routing
+ 
+         if (
+-            get_moe_runner_backend().is_flashinfer_trtllm()
++            self._moe_runner_backend.is_flashinfer_trtllm()
+             and TopKOutputChecker.format_is_bypassed(topk_output)
+         ):
+             from sglang.srt.layers.moe.moe_runner.flashinfer_trtllm import (
+@@ -1409,7 +1417,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
+                 dispatch_output, quant_info, self.moe_runner_config
+             )
+ 
+-        if get_moe_runner_backend().is_flashinfer_cutlass():
++        if self._moe_runner_backend.is_flashinfer_cutlass():
+             activation_str = self.moe_runner_config.activation
+             assert activation_str in _SUPPORTED_ACT_STRS, (
+                 f"Activation {activation_str!r} is not supported for "
+@@ -3084,6 +3092,9 @@ class ModelOptNvFp4FusedMoEMethod(FusedMoEMethodBase):
+ 
+         self.runner = MoeRunner(moe_runner_backend, moe_runner_config)
+ 
++    def get_moe_runner_backend(self, layer):
++        return self._moe_runner_backend
++
+     def get_marlin_quant_info(self, layer: torch.nn.Module):
+         """Marlin payload for the fp4-marlin (W4A16) fallback; the weights were
+         repacked by prepare_moe_nvfp4_layer_for_marlin. Also consumed by
+diff --git a/python/sglang/srt/layers/quantization/mxfp4_flashinfer_cutlass_moe.py b/python/sglang/srt/layers/quantization/mxfp4_flashinfer_cutlass_moe.py
+index b8e6ff08..96300858 100644
+--- a/python/sglang/srt/layers/quantization/mxfp4_flashinfer_cutlass_moe.py
++++ b/python/sglang/srt/layers/quantization/mxfp4_flashinfer_cutlass_moe.py
+@@ -124,6 +124,9 @@ class Mxfp4FlashinferCutlassMoEMethod:
+ 
+         self.runner = MoeRunner(MoeRunnerBackend.FLASHINFER_MXFP4, moe_runner_config)
+ 
++    def get_moe_runner_backend(self, layer):
++        return self.runner.runner_backend
++
+     def process_weights_after_loading(self, layer: Module) -> None:
+         # Preserve the base FP4 post-load handling.
+         self._fp8.process_weights_after_loading(layer)
+diff --git a/python/sglang/srt/layers/quantization/mxfp4_flashinfer_trtllm_moe.py b/python/sglang/srt/layers/quantization/mxfp4_flashinfer_trtllm_moe.py
+index 491cd585..ba6a8ebd 100644
+--- a/python/sglang/srt/layers/quantization/mxfp4_flashinfer_trtllm_moe.py
++++ b/python/sglang/srt/layers/quantization/mxfp4_flashinfer_trtllm_moe.py
+@@ -11,7 +11,7 @@ from sglang.srt.distributed.device_communicators.pynccl_allocator import (
+     use_symmetric_memory,
+ )
+ from sglang.srt.layers.dp_attention import is_allocation_symmetric
+-from sglang.srt.layers.moe.utils import RoutingMethodType
++from sglang.srt.layers.moe.utils import MoeRunnerBackend, RoutingMethodType
+ from sglang.srt.runtime_context import (
+     get_exec,
+     get_parallel,
+@@ -164,6 +164,9 @@ class Mxfp4FlashinferTrtllmMoEMethod:
+             else None
+         )
+ 
++    def get_moe_runner_backend(self, layer):
++        return MoeRunnerBackend.FLASHINFER_MXFP4
++
+     def create_weights(
+         self,
+         layer,
+diff --git a/python/sglang/srt/layers/quantization/mxfp4_humming_moe.py b/python/sglang/srt/layers/quantization/mxfp4_humming_moe.py
+index 736d1109..e34a1acd 100644
+--- a/python/sglang/srt/layers/quantization/mxfp4_humming_moe.py
++++ b/python/sglang/srt/layers/quantization/mxfp4_humming_moe.py
+@@ -35,6 +35,9 @@ class Mxfp4HummingMoEMethod:
+ 
+         self.runner = MoeRunner(MoeRunnerBackend.HUMMING, moe_runner_config)
+ 
++    def get_moe_runner_backend(self, layer):
++        return self.runner.runner_backend
++
+     def create_weights(
+         self,
+         layer: Module,
+diff --git a/python/sglang/srt/layers/quantization/mxfp4_marlin_moe.py b/python/sglang/srt/layers/quantization/mxfp4_marlin_moe.py
+index b66a2f46..43450d96 100644
+--- a/python/sglang/srt/layers/quantization/mxfp4_marlin_moe.py
++++ b/python/sglang/srt/layers/quantization/mxfp4_marlin_moe.py
+@@ -56,6 +56,9 @@ class Mxfp4MarlinMoEMethod:
+ 
+         self.runner = MoeRunner(MoeRunnerBackend.MARLIN, moe_runner_config)
+ 
++    def get_moe_runner_backend(self, layer):
++        return self.runner.runner_backend
++
+     def create_weights(
+         self,
+         layer: Module,
+diff --git a/python/sglang/srt/layers/quantization/quark/quark.py b/python/sglang/srt/layers/quantization/quark/quark.py
+index 19effc3d..519781b8 100644
+--- a/python/sglang/srt/layers/quantization/quark/quark.py
++++ b/python/sglang/srt/layers/quantization/quark/quark.py
+@@ -1180,6 +1180,9 @@ class QuarkFusedMoEMethod(FusedMoEMethodBase):
+     ):
+         layer.scheme.create_moe_runner(layer, moe_runner_config)
+ 
++    def get_moe_runner_backend(self, layer):
++        return layer.scheme.get_moe_runner_backend(layer)
++
+     def apply(
+         self,
+         layer: torch.nn.Module,
+diff --git a/python/sglang/srt/layers/quantization/quark/schemes/quark_w4a8_mxfp4_moe.py b/python/sglang/srt/layers/quantization/quark/schemes/quark_w4a8_mxfp4_moe.py
+index 8cca335b..2d99cf32 100644
+--- a/python/sglang/srt/layers/quantization/quark/schemes/quark_w4a8_mxfp4_moe.py
++++ b/python/sglang/srt/layers/quantization/quark/schemes/quark_w4a8_mxfp4_moe.py
+@@ -405,6 +405,11 @@ class QuarkW4A8MXFp4MoE(QuarkMoEScheme):
+ 
+         self.moe_runner_config = moe_runner_config
+         if _use_gfx1250_w4a8:
++            if layer.moe_ep_size != 1:
++                raise ValueError(
++                    "gfx1250 W4A8 MXFP4 MoE does not support expert parallelism; "
++                    "its internal router requires the full expert weights."
++                )
+             # gfx1250 bypasses the MoeRunner and calls aiter's triton
+             # moe_gemm_a8w4 directly in ``apply_weights``.
+             return
+diff --git a/python/sglang/srt/layers/quantization/unquant.py b/python/sglang/srt/layers/quantization/unquant.py
+index 4222073c..cc35004b 100644
+--- a/python/sglang/srt/layers/quantization/unquant.py
++++ b/python/sglang/srt/layers/quantization/unquant.py
+@@ -749,6 +749,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, BaseFusedOp):
+         self.use_flashinfer_trtllm_moe = use_flashinfer_trtllm_moe
+         self.use_deep_gemm = use_deep_gemm
+         self._cache_permute_indices = dict({})
++        self.runner: Optional[MoeRunner] = None
++        self._aiter_runner: Optional[MoeRunner] = None
+         # Set by process_weights_after_loading when w13 rows are permuted to
+         # interleave gate/up for the fused swiglu up-GEMM epilogue.
+         self.w13_swiglu_interleaved = False
+@@ -982,10 +984,11 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, BaseFusedOp):
+             return
+ 
+         moe_runner_config = layer.moe_runner_config
++        runner_backend = self.get_moe_runner_backend(layer)
+         if not (
+             _is_cuda
+-            and self._aiter_runner is None
+-            and self.runner.runner_backend.is_triton()
++            and runner_backend is not None
++            and runner_backend.is_triton()
+             and get_moe_a2a_backend().is_none()
+             and not self.with_bias
+             and layer.w13_weight.dtype == torch.bfloat16
+@@ -1029,7 +1032,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, BaseFusedOp):
+         block layout. During weight update, checkpoint tensors are in
+         canonical layout and need a temporary shape restore for copy.
+         """
+-        if not get_moe_runner_backend().is_flashinfer_trtllm_routed():
++        runner_backend = self.get_moe_runner_backend(layer)
++        if runner_backend is None or not runner_backend.is_flashinfer_trtllm_routed():
+             return
+ 
+         expected_shape = None
+@@ -1139,6 +1143,10 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, BaseFusedOp):
+                     "using triton MoE runner."
+                 )
+ 
++    def get_moe_runner_backend(self, layer):
++        runner = self._aiter_runner if self._aiter_runner is not None else self.runner
++        return runner.runner_backend if runner is not None else None
++
+     @property
+     def load_up_proj_weight_first(self) -> bool:
+         # FlashInfer CUTLASS kernel assumes [Up, Gate] Proj as W13
+diff --git a/python/sglang/srt/models/afmoe.py b/python/sglang/srt/models/afmoe.py
+index 0efd7cd1..98ca356d 100644
+--- a/python/sglang/srt/models/afmoe.py
++++ b/python/sglang/srt/models/afmoe.py
+@@ -46,7 +46,7 @@ from sglang.srt.layers.linear import (
+ from sglang.srt.layers.logits_processor import LogitsProcessor
+ from sglang.srt.layers.moe.moe_runner import MoeRunnerConfig
+ from sglang.srt.layers.moe.moe_runner.triton_utils.fused_moe import fused_moe
+-from sglang.srt.layers.moe.topk import TopK
++from sglang.srt.layers.moe.topk import TopK, TopKOutputFormat
+ from sglang.srt.layers.quantization.base_config import QuantizationConfig
+ from sglang.srt.layers.radix_attention import RadixAttention
+ from sglang.srt.layers.rotary_embedding import get_rope
+@@ -250,6 +250,7 @@ class AfmoeMoE(nn.Module):
+                 if _is_npu
+                 else {}
+             ),
++            output_format=TopKOutputFormat.STANDARD,
+         )
+ 
+     def pack_params(self) -> None:
+diff --git a/python/sglang/srt/models/bailing_moe.py b/python/sglang/srt/models/bailing_moe.py
+index fef8818a..735aeb0c 100644
+--- a/python/sglang/srt/models/bailing_moe.py
++++ b/python/sglang/srt/models/bailing_moe.py
+@@ -310,6 +310,7 @@ class BailingMoESparseMoeBlock(nn.Module):
+             routed_scaling_factor=self.routed_scaling_factor,
+             prefix=add_prefix("experts", prefix),
+         )
++        self.topk.bind_runner_backend(self.experts.runner_backend)
+         # shared expert
+         if config.num_shared_experts is not None:
+             if hasattr(config, "moe_shared_expert_intermediate_size"):
+diff --git a/python/sglang/srt/models/bailing_moe_linear.py b/python/sglang/srt/models/bailing_moe_linear.py
+index ce8f8770..b36803f8 100644
+--- a/python/sglang/srt/models/bailing_moe_linear.py
++++ b/python/sglang/srt/models/bailing_moe_linear.py
+@@ -317,6 +317,7 @@ class BailingMoE(nn.Module):
+             routed_scaling_factor=self.routed_scaling_factor,
+             prefix=f"{prefix}.experts",
+         )
++        self.topk.bind_runner_backend(self.experts.runner_backend)
+ 
+         if self.num_shared_experts > 0:
+             intermediate_size = self.intermediate_size * self.num_shared_experts
+diff --git a/python/sglang/srt/models/bailing_moe_v3.py b/python/sglang/srt/models/bailing_moe_v3.py
+index b67d4d84..c2d02e62 100644
+--- a/python/sglang/srt/models/bailing_moe_v3.py
++++ b/python/sglang/srt/models/bailing_moe_v3.py
+@@ -601,6 +601,7 @@ class BailingMoE(nn.Module):
+                 and getattr(quant_config, "is_fp4_experts", False)
+             ),
+         )
++        self.topk.bind_runner_backend(self.experts.runner_backend)
+ 
+         # Whether to apply routed_scaling_factor at model layer.
+         # For A2A MoE paths (e.g., DeepEP), the runner/post_permute does not apply it,
+diff --git a/python/sglang/srt/models/cohere2_moe.py b/python/sglang/srt/models/cohere2_moe.py
+index 10c42824..11e3b62e 100644
+--- a/python/sglang/srt/models/cohere2_moe.py
++++ b/python/sglang/srt/models/cohere2_moe.py
+@@ -293,6 +293,7 @@ class Cohere2MoeSparseMoeBlock(nn.Module):
+             # The decoder reads this buffer on another stream, so in-place races it.
+             inplace=False,
+         )
++        self.topk.bind_runner_backend(self.experts.runner_backend)
+ 
+         num_shared_experts = getattr(config, "num_shared_experts", 0)
+         self.num_shared_experts = num_shared_experts
+diff --git a/python/sglang/srt/models/dbrx.py b/python/sglang/srt/models/dbrx.py
+index bc8c7ef8..9998030a 100644
+--- a/python/sglang/srt/models/dbrx.py
++++ b/python/sglang/srt/models/dbrx.py
+@@ -38,7 +38,7 @@ from sglang.srt.layers.linear import (
+ from sglang.srt.layers.logits_processor import LogitsProcessor
+ from sglang.srt.layers.moe.moe_runner import MoeRunnerConfig
+ from sglang.srt.layers.moe.moe_runner.triton_utils.fused_moe import fused_moe
+-from sglang.srt.layers.moe.topk import TopK
++from sglang.srt.layers.moe.topk import TopK, TopKOutputFormat
+ from sglang.srt.layers.quantization.base_config import QuantizationConfig
+ from sglang.srt.layers.radix_attention import RadixAttention
+ from sglang.srt.layers.rotary_embedding import get_rope
+@@ -118,6 +118,7 @@ class DbrxExperts(nn.Module):
+             self.top_k,
+             layer_id=layer_id,
+             renormalize=True,
++            output_format=TopKOutputFormat.STANDARD,
+         )
+         self.moe_runner_config = MoeRunnerConfig(inplace=True)
+         self.ws = nn.Parameter(
+diff --git a/python/sglang/srt/models/deepseek.py b/python/sglang/srt/models/deepseek.py
+index 67ac59ba..9dbc720e 100644
+--- a/python/sglang/srt/models/deepseek.py
++++ b/python/sglang/srt/models/deepseek.py
+@@ -37,7 +37,7 @@ from sglang.srt.layers.linear import (
+ )
+ from sglang.srt.layers.logits_processor import LogitsProcessor
+ from sglang.srt.layers.moe.moe_runner import MoeRunnerConfig
+-from sglang.srt.layers.moe.topk import TopK
++from sglang.srt.layers.moe.topk import TopK, TopKOutputFormat
+ from sglang.srt.layers.quantization.base_config import QuantizationConfig
+ from sglang.srt.layers.radix_attention import RadixAttention
+ from sglang.srt.layers.rotary_embedding import get_rope
+@@ -127,6 +127,7 @@ class DeepseekMoE(nn.Module):
+             top_k=self.top_k,
+             layer_id=layer_id,
+             renormalize=config.norm_topk_prob,
++            output_format=TopKOutputFormat.STANDARD,
+         )
+         self.experts = nn.ModuleList(
+             [
+diff --git a/python/sglang/srt/models/deepseek_v2.py b/python/sglang/srt/models/deepseek_v2.py
+index 4c9ec84f..4b01712e 100644
+--- a/python/sglang/srt/models/deepseek_v2.py
++++ b/python/sglang/srt/models/deepseek_v2.py
+@@ -792,6 +792,7 @@ class DeepseekV2MoE(nn.Module):
+                     ),
+                 )
+             self.topk = TopK(**topk_kwargs)
++            self.topk.bind_runner_backend(self.experts.runner_backend)
+ 
+         self.shared_experts_is_int8 = False
+         self.shared_experts_is_fp8 = False
+diff --git a/python/sglang/srt/models/dots3_common/modeling.py b/python/sglang/srt/models/dots3_common/modeling.py
+index b785dd7b..9ffc78f3 100644
+--- a/python/sglang/srt/models/dots3_common/modeling.py
++++ b/python/sglang/srt/models/dots3_common/modeling.py
+@@ -325,6 +325,7 @@ class Dots3MoE(nn.Module):
+             routed_scaling_factor=self.routed_scaling_factor,
+             apply_routed_scaling_factor_on_output=self.experts.should_fuse_routed_scaling_factor_in_topk,
+         )
++        self.topk.bind_runner_backend(self.experts.runner_backend)
+ 
+         self.shared_experts = None
+         if config.n_shared_experts is not None and self.num_fused_shared_experts == 0:
+diff --git a/python/sglang/srt/models/ernie4.py b/python/sglang/srt/models/ernie4.py
+index 5d30b1e7..5486d838 100644
+--- a/python/sglang/srt/models/ernie4.py
++++ b/python/sglang/srt/models/ernie4.py
+@@ -110,6 +110,7 @@ class Ernie4Moe(nn.Module):
+             quant_config=quant_config,
+             prefix=add_prefix("experts", prefix),
+         )
++        self.topk.bind_runner_backend(self.experts.runner_backend)
+ 
+         if self.moe_num_shared_experts > 0:
+             intermediate_size = (
+diff --git a/python/sglang/srt/models/ernie45_moe_vl.py b/python/sglang/srt/models/ernie45_moe_vl.py
+index 29761990..6511561b 100644
+--- a/python/sglang/srt/models/ernie45_moe_vl.py
++++ b/python/sglang/srt/models/ernie45_moe_vl.py
+@@ -224,6 +224,7 @@ class Ernie4_5_VLMoeMoE(nn.Module):
+                 quant_config=quant_config,
+                 prefix=add_prefix("text_experts", prefix),
+             )
++            self.text_experts_topk.bind_runner_backend(self.text_experts.runner_backend)
+ 
+         assert vision_moe_layer_start_index <= vision_moe_layer_end_index
+         if (
+@@ -256,6 +257,9 @@ class Ernie4_5_VLMoeMoE(nn.Module):
+                 quant_config=quant_config,
+                 prefix=add_prefix("vision_experts", prefix),
+             )
++            self.vision_experts_topk.bind_runner_backend(
++                self.vision_experts.runner_backend
++            )
+ 
+         if self.moe_num_shared_experts > 0:
+             intermediate_size = (
+diff --git a/python/sglang/srt/models/exaone_moe.py b/python/sglang/srt/models/exaone_moe.py
+index 4d759482..e2d5b394 100755
+--- a/python/sglang/srt/models/exaone_moe.py
++++ b/python/sglang/srt/models/exaone_moe.py
+@@ -182,6 +182,7 @@ class ExaoneMoESparseMoEBlock(nn.Module):
+             apply_routed_scaling_factor_on_output=True,
+             scoring_func="sigmoid",
+         )
++        self.topk.bind_runner_backend(self.experts.runner_backend)
+ 
+         if config.num_shared_experts is not None:
+             intermediate_size = config.moe_intermediate_size * config.num_shared_experts
+diff --git a/python/sglang/srt/models/gemma4_causal.py b/python/sglang/srt/models/gemma4_causal.py
+index f0983560..9874bcb8 100644
+--- a/python/sglang/srt/models/gemma4_causal.py
++++ b/python/sglang/srt/models/gemma4_causal.py
+@@ -295,6 +295,7 @@ class Gemma4MoE(nn.Module):
+             activation=activation,
+             reduce_results=reduce_results,
+         )
++        self.topk.bind_runner_backend(self.experts.runner_backend)
+ 
+     def forward(
+         self, hidden_states: torch.Tensor, router_logits: torch.Tensor
+diff --git a/python/sglang/srt/models/glm4_moe.py b/python/sglang/srt/models/glm4_moe.py
+index fc8ebbb4..45bda8fe 100644
+--- a/python/sglang/srt/models/glm4_moe.py
++++ b/python/sglang/srt/models/glm4_moe.py
+@@ -464,6 +464,7 @@ class Glm4MoeSparseMoeBlock(nn.Module):
+             ),
+             fused_shared_experts_scaling_factor=1,
+         )
++        self.topk.bind_runner_backend(self.experts.runner_backend)
+ 
+         self.shared_experts_is_int8 = False
+         self.shared_experts_is_fp8 = False
+diff --git a/python/sglang/srt/models/glm4_moe_lite.py b/python/sglang/srt/models/glm4_moe_lite.py
+index 01e19628..2dc1a455 100644
+--- a/python/sglang/srt/models/glm4_moe_lite.py
++++ b/python/sglang/srt/models/glm4_moe_lite.py
+@@ -236,6 +236,7 @@ class Glm4MoeLiteSparseMoeBlock(nn.Module):
+             output_format=TopKOutputFormat.STANDARD if quant_config is None else None,
+             **({"scoring_func": "sigmoid"} if _is_npu else {}),
+         )
++        self.topk.bind_runner_backend(self.experts.runner_backend)
+ 
+         self.shared_experts_is_int8 = False
+         self.shared_experts_is_fp8 = False
+diff --git a/python/sglang/srt/models/gpt_oss.py b/python/sglang/srt/models/gpt_oss.py
+index 84ae3fa3..daed2891 100644
+--- a/python/sglang/srt/models/gpt_oss.py
++++ b/python/sglang/srt/models/gpt_oss.py
+@@ -252,6 +252,7 @@ class GptOssSparseMoeBlock(nn.Module):
+             prefix=add_prefix("experts", prefix),
+             **extra_kwargs,
+         )
++        self.topk.bind_runner_backend(self.experts.runner_backend)
+ 
+         self.router = TinyGemmLinear(
+             config.hidden_size,
+diff --git a/python/sglang/srt/models/granitemoe.py b/python/sglang/srt/models/granitemoe.py
+index 8010fde0..dbf84d9a 100644
+--- a/python/sglang/srt/models/granitemoe.py
++++ b/python/sglang/srt/models/granitemoe.py
+@@ -150,6 +150,7 @@ class GraniteMoeMoE(nn.Module):
+             quant_config=quant_config,
+             prefix=f"{prefix}.experts",
+         )
++        self.topk.bind_runner_backend(self.experts.runner_backend)
+ 
+     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+         # NOTE: hidden_states can have either 1D or 2D shape.
+diff --git a/python/sglang/srt/models/grok.py b/python/sglang/srt/models/grok.py
+index 9976a3c2..5cf7a559 100644
+--- a/python/sglang/srt/models/grok.py
++++ b/python/sglang/srt/models/grok.py
+@@ -161,6 +161,7 @@ class Grok1MoE(nn.Module):
+             inplace=inplace,
+             no_combine=no_combine,
+         )
++        self.topk.bind_runner_backend(self.experts.runner_backend)
+ 
+     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+         if not _is_npu:
+diff --git a/python/sglang/srt/models/hunyuan.py b/python/sglang/srt/models/hunyuan.py
+index 65ae511e..b8a5bffb 100644
+--- a/python/sglang/srt/models/hunyuan.py
++++ b/python/sglang/srt/models/hunyuan.py
+@@ -161,6 +161,7 @@ class HunYuanSparseMoeBlock(nn.Module):
+             layer_id=layer_id,
+             quant_config=quant_config,
+         )
++        self.topk.bind_runner_backend(self.experts.runner_backend)
+ 
+         self.gate = ReplicatedLinear(
+             config.hidden_size, config.num_experts, bias=False, quant_config=None
+diff --git a/python/sglang/srt/models/hunyuan_v3.py b/python/sglang/srt/models/hunyuan_v3.py
+index fe61d554..094a8db6 100644
+--- a/python/sglang/srt/models/hunyuan_v3.py
++++ b/python/sglang/srt/models/hunyuan_v3.py
+@@ -152,6 +152,7 @@ class HYV3MoEFused(nn.Module):
+             quant_config=quant_config,
+             prefix=f"{prefix}.experts",
+         )
++        self.topk.bind_runner_backend(self.experts.runner_backend)
+ 
+     @staticmethod
+     def ebias_weight_loader(param: nn.Parameter, loaded_weight: torch.Tensor) -> None:
+diff --git a/python/sglang/srt/models/interns1pro.py b/python/sglang/srt/models/interns1pro.py
+index 17851f46..78a93aca 100644
+--- a/python/sglang/srt/models/interns1pro.py
++++ b/python/sglang/srt/models/interns1pro.py
+@@ -126,6 +126,7 @@ class InternS1ProTextDecoderLayer(Qwen3MoeDecoderLayer):
+                 layer_id=layer_id,
+                 custom_routing_function=self._custom_routing_function,
+             )
++            self.mlp.topk.bind_runner_backend(self.mlp.experts.runner_backend)
+ 
+     @staticmethod
+     @functools.lru_cache
+diff --git a/python/sglang/srt/models/interns2_mobius.py b/python/sglang/srt/models/interns2_mobius.py
+index bd0781ce..01790a85 100644
+--- a/python/sglang/srt/models/interns2_mobius.py
++++ b/python/sglang/srt/models/interns2_mobius.py
+@@ -339,6 +339,7 @@ class InternS2MobiusRoutedExpertBank(nn.Module):
+             # The layer-local shared path consumes the same post-attention input.
+             inplace=False,
+         )
++        self.topk.bind_runner_backend(self.experts.runner_backend)
+         self.gate = ReplicatedLinear(
+             config.hidden_size,
+             config.num_experts,
+diff --git a/python/sglang/srt/models/iquest_q1.py b/python/sglang/srt/models/iquest_q1.py
+index 5affe7ee..d6a7bee7 100644
+--- a/python/sglang/srt/models/iquest_q1.py
++++ b/python/sglang/srt/models/iquest_q1.py
+@@ -222,6 +222,7 @@ class IQuestQ1MoEBlock(nn.Module):
+             prefix=add_prefix("experts", prefix),
+             routing_method_type=RoutingMethodType.Renormalize,
+         )
++        self.topk.bind_runner_backend(self.experts.runner_backend)
+ 
+     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+         original_shape = hidden_states.shape
+diff --git a/python/sglang/srt/models/kimi_k3.py b/python/sglang/srt/models/kimi_k3.py
+index da7efb9f..7bfde87b 100644
+--- a/python/sglang/srt/models/kimi_k3.py
++++ b/python/sglang/srt/models/kimi_k3.py
+@@ -551,6 +551,7 @@ class KimiK3MoE(nn.Module):
+                 else None
+             ),
+         )
++        self.topk.bind_runner_backend(self.experts.runner_backend)
+ 
+         # MegaMoE (deep_gemm fused a2a+GEMM over the EP symm buffer) replaces
+         # the routed experts call below. K3 routes ALL batches through it when
+diff --git a/python/sglang/srt/models/kimi_linear.py b/python/sglang/srt/models/kimi_linear.py
+index b0feaa79..6f3e8067 100644
+--- a/python/sglang/srt/models/kimi_linear.py
++++ b/python/sglang/srt/models/kimi_linear.py
+@@ -141,6 +141,7 @@ class KimiMoE(nn.Module):
+             # and requires the output format to be standard. We use quant_config to determine the output format.
+             output_format=TopKOutputFormat.STANDARD if quant_config is None else None,
+         )
++        self.topk.bind_runner_backend(self.experts.runner_backend)
+ 
+         if self.num_shared_experts is not None:
+             intermediate_size = moe_intermediate_size * self.num_shared_experts
+diff --git a/python/sglang/srt/models/laguna.py b/python/sglang/srt/models/laguna.py
+index 71bfdac8..bb585c97 100644
+--- a/python/sglang/srt/models/laguna.py
++++ b/python/sglang/srt/models/laguna.py
+@@ -172,6 +172,7 @@ class LagunaMoE(nn.Module):
+             scoring_func=config.moe_router_score_func,
+             correction_bias=self.gate.e_score_correction_bias,
+         )
++        self.topk.bind_runner_backend(self.experts.runner_backend)
+ 
+         # HF safetensors key is singular `shared_expert.…`; mirror so the
+         # default loader picks it up without remapping.
+diff --git a/python/sglang/srt/models/lfm2_moe.py b/python/sglang/srt/models/lfm2_moe.py
+index c8864cc9..d80e1bed 100644
+--- a/python/sglang/srt/models/lfm2_moe.py
++++ b/python/sglang/srt/models/lfm2_moe.py
+@@ -162,6 +162,7 @@ class Lfm2MoeSparseMoeBlock(nn.Module):
+             quant_config=quant_config,
+             prefix=add_prefix("experts", prefix),
+         )
++        self.topk.bind_runner_backend(self.experts.runner_backend)
+ 
+     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+         """Optimized expert forward pass using FusedMoE."""
+diff --git a/python/sglang/srt/models/llada2.py b/python/sglang/srt/models/llada2.py
+index 1394d112..41fd7e5e 100644
+--- a/python/sglang/srt/models/llada2.py
++++ b/python/sglang/srt/models/llada2.py
+@@ -57,7 +57,6 @@ from sglang.srt.layers.logits_processor import LogitsProcessor
+ from sglang.srt.layers.moe import (
+     get_deepep_mode,
+     get_moe_a2a_backend,
+-    get_moe_runner_backend,
+ )
+ from sglang.srt.layers.moe.ep_moe.layer import get_moe_impl_class
+ from sglang.srt.layers.moe.fused_moe_triton.layer import FusedMoE
+@@ -127,42 +126,22 @@ def _require_block_routing_simulated_experts_compatibility() -> None:
+         )
+ 
+ 
+-def _get_effective_moe_runner_backend(experts):
+-    """Return the runner selected by the quant method, including auto selection."""
+-    quant_method = getattr(experts, "quant_method", None)
+-
+-    # UnquantizedFusedMoEMethod keeps a Triton fallback in ``runner`` but
+-    # forward_cuda executes this AITER runner first whenever auto selection
+-    # created it. Resolve the runner that actually executes, not the fallback.
+-    aiter_runner = getattr(quant_method, "_aiter_runner", None)
+-    backend = getattr(aiter_runner, "runner_backend", None)
+-    if backend is not None:
+-        return backend
+-
+-    backend = getattr(quant_method, "_moe_runner_backend", None)
+-    if backend is not None:
+-        return backend
+-
+-    runner = getattr(quant_method, "runner", None)
+-    backend = getattr(runner, "runner_backend", None)
+-    if backend is not None:
+-        return backend
+-
+-    runner = getattr(experts, "runner", None)
+-    backend = getattr(runner, "runner_backend", None)
+-    if backend is not None:
+-        return backend
+-
+-    return get_moe_runner_backend()
+-
+-
+-def _require_block_routing_runner_compatibility(experts) -> None:
+-    backend = _get_effective_moe_runner_backend(experts)
++def _require_block_routing_runner_compatibility(experts, top_k: int) -> None:
++    backend = experts.runner_backend
++    if backend is None:
++        # Direct standard/local-ID kernels consume the block router's materialized output.
++        return
+     if backend.is_flashinfer_trtllm():
+         raise ValueError(
+             "LLaDA2 block routing does not support --moe-runner-backend "
+             "flashinfer_trtllm; use a compatible runner instead"
+         )
++    if backend.is_triton_kernels() and top_k & (top_k - 1):
++        raise ValueError(
++            "LLaDA2 block routing with --moe-runner-backend "
++            "triton_kernel requires num_experts_per_tok to be a "
++            f"power of two, got {top_k}"
++        )
+ 
+ 
+ def _make_block_routing_triton_output(
+@@ -667,14 +646,6 @@ class LLaDA2MoeSparseMoeBlock(nn.Module):
+                     f"expert_capacity={self.expert_capacity}, "
+                     f"num_experts={self.num_experts}"
+                 )
+-            if get_moe_runner_backend().is_triton_kernels() and self.top_k & (
+-                self.top_k - 1
+-            ):
+-                raise ValueError(
+-                    "LLaDA2 block routing with --moe-runner-backend "
+-                    "triton_kernel requires num_experts_per_tok to be a "
+-                    f"power of two, got {self.top_k}"
+-                )
+ 
+         if self.score_function is not None:
+             assert (
+@@ -709,8 +680,9 @@ class LLaDA2MoeSparseMoeBlock(nn.Module):
+             routed_scaling_factor=self.routed_scaling_factor,
+             prefix=add_prefix("experts", prefix),
+         )
++        self.topk.bind_runner_backend(self.experts.runner_backend)
+         if self.use_block_routing:
+-            _require_block_routing_runner_compatibility(self.experts)
++            _require_block_routing_runner_compatibility(self.experts, self.top_k)
+         # shared expert
+         if config.num_shared_experts is not None:
+             if hasattr(config, "moe_shared_expert_intermediate_size"):
+@@ -791,15 +763,12 @@ class LLaDA2MoeSparseMoeBlock(nn.Module):
+         )
+         get_global_expert_distribution_recorder().on_select_experts(topk_ids=topk_ids)
+ 
+-        runner_backend = _get_effective_moe_runner_backend(self.experts)
+-        if not runner_backend.is_triton_kernels():
++        runner_backend = self.experts.runner_backend
++        if runner_backend is None or not runner_backend.is_triton_kernels():
+             if (
+-                runner_backend.is_aiter()
+-                or getattr(
+-                    self.experts,
+-                    "should_fuse_routed_scaling_factor_in_topk",
+-                    False,
+-                )
++                runner_backend is not None
++                and runner_backend.is_aiter()
++                or self.experts.should_fuse_routed_scaling_factor_in_topk
+             ) and self.routed_scaling_factor is not None:
+                 topk_weights = topk_weights * self.routed_scaling_factor
+             return StandardTopKOutput(
+diff --git a/python/sglang/srt/models/llama4.py b/python/sglang/srt/models/llama4.py
+index 0d14cebc..612e2323 100644
+--- a/python/sglang/srt/models/llama4.py
++++ b/python/sglang/srt/models/llama4.py
+@@ -126,6 +126,7 @@ class Llama4MoE(nn.Module):
+             apply_router_weight_on_input=True,
+             prefix=add_prefix("experts", prefix),
+         )
++        self.topk.bind_runner_backend(self.experts.runner_backend)
+ 
+         self.shared_expert = LlamaMLP(
+             hidden_size=config.hidden_size,
+diff --git a/python/sglang/srt/models/longcat_flash.py b/python/sglang/srt/models/longcat_flash.py
+index 6c8a155a..de3c5924 100644
+--- a/python/sglang/srt/models/longcat_flash.py
++++ b/python/sglang/srt/models/longcat_flash.py
+@@ -295,6 +295,7 @@ class LongcatFlashMoE(nn.Module):
+             quant_config=quant_config,
+             prefix=add_prefix("experts", prefix),
+         )
++        self.topk.bind_runner_backend(self.experts.runner_backend)
+ 
+     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+         num_tokens, hidden_dim = hidden_states.shape
+diff --git a/python/sglang/srt/models/mimo_v2.py b/python/sglang/srt/models/mimo_v2.py
+index 1a63f34f..43c17d59 100644
+--- a/python/sglang/srt/models/mimo_v2.py
++++ b/python/sglang/srt/models/mimo_v2.py
+@@ -470,6 +470,7 @@ class MiMoV2MoE(nn.Module):
+             # and requires the output format to be standard. We use quant_config to determine the output format.
+             output_format=TopKOutputFormat.STANDARD if quant_config is None else None,
+         )
++        self.topk.bind_runner_backend(self.experts.runner_backend)
+ 
+         uses_mxfp4_runner = isinstance(
+             self.experts.quant_method, Mxfp4FlashinferTrtllmMoEMethod
+diff --git a/python/sglang/srt/models/minimax_m2.py b/python/sglang/srt/models/minimax_m2.py
+index 6f06bea8..6e94ec13 100644
+--- a/python/sglang/srt/models/minimax_m2.py
++++ b/python/sglang/srt/models/minimax_m2.py
+@@ -552,6 +552,7 @@ class MiniMaxM2MoE(nn.Module):
+             correction_bias=self.e_score_correction_bias,
+             routed_scaling_factor=1.0,
+         )
++        self.topk.bind_runner_backend(self.experts.runner_backend)
+ 
+         self.gate = ReplicatedLinear(
+             config.hidden_size,
+diff --git a/python/sglang/srt/models/minimax_m3.py b/python/sglang/srt/models/minimax_m3.py
+index dff0a590..118e482f 100644
+--- a/python/sglang/srt/models/minimax_m3.py
++++ b/python/sglang/srt/models/minimax_m3.py
+@@ -433,6 +433,7 @@ class MiniMaxM3MoE(nn.Module):
+             routed_scaling_factor=self.routed_scaling_factor,
+             apply_routed_scaling_factor_on_output=True,
+         )
++        self.topk.bind_runner_backend(self.experts.runner_backend)
+ 
+         if self.n_shared_experts is not None and self.num_fused_shared_experts == 0:
+             intermediate_size = config.intermediate_size * self.n_shared_experts
+diff --git a/python/sglang/srt/models/mixtral.py b/python/sglang/srt/models/mixtral.py
+index ac0e8b4e..5bbe5a96 100644
+--- a/python/sglang/srt/models/mixtral.py
++++ b/python/sglang/srt/models/mixtral.py
+@@ -107,6 +107,7 @@ class MixtralMoE(nn.Module):
+             quant_config=quant_config,
+             prefix=add_prefix("experts", prefix),
+         )
++        self.topk.bind_runner_backend(self.experts.runner_backend)
+ 
+     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+         # NOTE: hidden_states can have either 1D or 2D shape.
+diff --git a/python/sglang/srt/models/nemotron_h.py b/python/sglang/srt/models/nemotron_h.py
+index c32b608f..67da2572 100644
+--- a/python/sglang/srt/models/nemotron_h.py
++++ b/python/sglang/srt/models/nemotron_h.py
+@@ -232,6 +232,7 @@ class NemotronHMoE(nn.Module):
+             routed_scaling_factor=self.routed_scaling_factor,
+             apply_routed_scaling_factor_on_output=self.experts.should_fuse_routed_scaling_factor_in_topk,
+         )
++        self.topk.bind_runner_backend(self.experts.runner_backend)
+         if config.n_shared_experts:
+             self.shared_experts = NemotronHMLP(
+                 config,
+diff --git a/python/sglang/srt/models/olmoe.py b/python/sglang/srt/models/olmoe.py
+index ac97c729..32199a83 100644
+--- a/python/sglang/srt/models/olmoe.py
++++ b/python/sglang/srt/models/olmoe.py
+@@ -94,6 +94,7 @@ class OlmoeMoE(nn.Module):
+             layer_id=layer_id,
+             prefix=add_prefix("experts", prefix),
+         )
++        self.topk.bind_runner_backend(self.experts.runner_backend)
+ 
+     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+         # NOTE: hidden_states can have either 1D or 2D shape.
+diff --git a/python/sglang/srt/models/phimoe.py b/python/sglang/srt/models/phimoe.py
+index 0a4ec8c4..035fe791 100644
+--- a/python/sglang/srt/models/phimoe.py
++++ b/python/sglang/srt/models/phimoe.py
+@@ -215,6 +215,7 @@ class PhiMoE(nn.Module):
+             quant_config=quant_config,
+             prefix=add_prefix("experts", prefix),
+         )
++        self.topk.bind_runner_backend(self.experts.runner_backend)
+ 
+     def forward(
+         self, hidden_states: torch.Tensor, forward_batch: Optional[ForwardBatch] = None
+diff --git a/python/sglang/srt/models/qwen2_moe.py b/python/sglang/srt/models/qwen2_moe.py
+index 72ceef49..11bdb3b1 100644
+--- a/python/sglang/srt/models/qwen2_moe.py
++++ b/python/sglang/srt/models/qwen2_moe.py
+@@ -341,6 +341,7 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
+                 config.model_type == "qwen3_5_moe_text" and uses_cutedsl_ar_fusion()
+             ),
+         )
++        self.topk.bind_runner_backend(self.experts.runner_backend)
+ 
+         self.gate = ReplicatedLinear(
+             config.hidden_size,
+diff --git a/python/sglang/srt/models/qwen3_moe.py b/python/sglang/srt/models/qwen3_moe.py
+index 5cb3b371..9dcc6e1c 100644
+--- a/python/sglang/srt/models/qwen3_moe.py
++++ b/python/sglang/srt/models/qwen3_moe.py
+@@ -273,6 +273,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
+             prefix=add_prefix("experts", prefix),
+             routing_method_type=RoutingMethodType.Renormalize,
+         )
++        self.topk.bind_runner_backend(self.experts.runner_backend)
+ 
+         # Router gate: description-driven quant. Only the offline ModelSlim path
+         # (which carries a per-layer quant_model_description) may quantise the
+diff --git a/python/sglang/srt/models/sarvam_moe.py b/python/sglang/srt/models/sarvam_moe.py
+index 2477ce28..e8b977b4 100644
+--- a/python/sglang/srt/models/sarvam_moe.py
++++ b/python/sglang/srt/models/sarvam_moe.py
+@@ -284,6 +284,7 @@ class SarvamMoESparseMoeBlock(nn.Module):
+             prefix=add_prefix("experts", prefix),
+             routing_method_type=RoutingMethodType.Renormalize,
+         )
++        self.topk.bind_runner_backend(self.experts.runner_backend)
+ 
+         self.gate = ReplicatedLinear(
+             config.hidden_size,
+diff --git a/python/sglang/srt/models/sdar_moe.py b/python/sglang/srt/models/sdar_moe.py
+index df9738f4..172aea4b 100644
+--- a/python/sglang/srt/models/sdar_moe.py
++++ b/python/sglang/srt/models/sdar_moe.py
+@@ -106,6 +106,7 @@ class SDARMoeSparseMoeBlock(nn.Module):
+             prefix=add_prefix("experts", prefix),
+             routing_method_type=RoutingMethodType.Renormalize,
+         )
++        self.topk.bind_runner_backend(self.experts.runner_backend)
+ 
+         self.gate = ReplicatedLinear(
+             config.hidden_size,
+diff --git a/python/sglang/srt/models/step3_vl.py b/python/sglang/srt/models/step3_vl.py
+index 34ae96c4..7effe67e 100644
+--- a/python/sglang/srt/models/step3_vl.py
++++ b/python/sglang/srt/models/step3_vl.py
+@@ -145,6 +145,7 @@ class Step3TextMoEMLP(nn.Module):
+             quant_config=quant_config,
+             prefix=add_prefix("experts", prefix),
+         )
++        self.topk.bind_runner_backend(self.experts.runner_backend)
+ 
+         self.gate = ReplicatedLinear(
+             config.hidden_size,
+diff --git a/python/sglang/srt/models/step3p5.py b/python/sglang/srt/models/step3p5.py
+index 7c7c45b8..fd197ff1 100644
+--- a/python/sglang/srt/models/step3p5.py
++++ b/python/sglang/srt/models/step3p5.py
+@@ -162,6 +162,7 @@ class Step3p5MoEMLP(nn.Module):
+             routing_method_type=RoutingMethodType.Renormalize,
+             gemm1_clamp_limit=self.limit,
+         )
++        self.topk.bind_runner_backend(self.experts.runner_backend)
+ 
+         self.gate = ReplicatedLinear(
+             config.hidden_size,
+diff --git a/python/sglang/srt/models/xllm.py b/python/sglang/srt/models/xllm.py
+index 7c75d842..85954344 100644
+--- a/python/sglang/srt/models/xllm.py
++++ b/python/sglang/srt/models/xllm.py
+@@ -942,6 +942,7 @@ class XllmSparseMoeBlock(nn.Module):
+             prefix=add_prefix("experts", prefix),
+             routing_method_type=RoutingMethodType.RenormalizeNaive,
+         )
++        self.topk.bind_runner_backend(self.experts.runner_backend)
+ 
+         # Shared expert (no gating — output added directly)
+         num_shared_experts = getattr(config, "num_shared_experts", 0)
+diff --git a/python/sglang/srt/models/xverse_moe.py b/python/sglang/srt/models/xverse_moe.py
+index 81029f30..7457cdee 100644
+--- a/python/sglang/srt/models/xverse_moe.py
++++ b/python/sglang/srt/models/xverse_moe.py
+@@ -36,7 +36,7 @@ from sglang.srt.layers.linear import (
+ from sglang.srt.layers.logits_processor import LogitsProcessor
+ from sglang.srt.layers.moe.moe_runner import MoeRunnerConfig
+ from sglang.srt.layers.moe.moe_runner.triton_utils.fused_moe import fused_moe
+-from sglang.srt.layers.moe.topk import TopK
++from sglang.srt.layers.moe.topk import TopK, TopKOutputFormat
+ from sglang.srt.layers.quantization.base_config import QuantizationConfig
+ from sglang.srt.layers.radix_attention import RadixAttention
+ from sglang.srt.layers.rotary_embedding import get_rope
+@@ -136,6 +136,7 @@ class XverseMoE(nn.Module):
+             top_k=self.top_k,
+             layer_id=layer_id,
+             renormalize=getattr(self.config, "norm_topk_prob", False),
++            output_format=TopKOutputFormat.STANDARD,
+         )
+ 
+         if config.num_shared_experts is not None:
