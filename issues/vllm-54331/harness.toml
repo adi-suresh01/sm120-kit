@@ -1,0 +1,47 @@
+issue = "vllm-54331"
+# A hybrid-GDN NVFP4 model under sustained saturation with CUDA graphs on dies after ~7 min on vLLM 0.26-0.28 on one
+# RTX PRO 6000 (SIGSEGV in CUDAGraph::replay); eager survives. Does it still on the nightly? Setup about 6 min
+# (23 GB of weights); each soak variant boots in about 2 min and drives the server for 25 min or until it dies.
+planned_hours = 1.25
+
+[pod]
+# The nightly that issues/puget-team-llm measured, where turning CUDA graphs back on was 4.2x faster: the same
+# question for a server that stays saturated.
+image = "vllm/vllm-openai:nightly-e68efc685ab1e6f1eda004ced7157e3ca411da2f@sha256:1ff6716fe240a922d0d518b8884261e25b0c02eda8e2ce90888e364978249cad"
+count = 1
+min_cuda = "13.0"
+container_disk_gb = 80
+volume_gb = 20
+needs_hf_token = false
+avoid_data_centers = ["EUR-IS-2", "US-NC-1"]
+# The reporter's card.
+gpus = [
+  { id = "NVIDIA RTX PRO 6000 Blackwell Workstation Edition", cloud = "SECURE" },
+  { id = "NVIDIA RTX PRO 6000 Blackwell Server Edition", cloud = "SECURE" },
+]
+
+[server]
+package = "vllm"
+# The reporter's second checkpoint: Qwen3.5-MoE family, 30 of 40 layers GDN linear attention, modelopt mixed
+# precision (FP8 attention, NVFP4 experts), FP8 KV cache from the checkpoint.
+model = "nvidia/Qwen3.6-35B-A3B-NVFP4"
+launch = ["vllm", "serve", "nvidia/Qwen3.6-35B-A3B-NVFP4"]
+base_flags = [
+  "--revision", "1355db6a052410cfd62085d94b58866fd0f2c3c5",
+  "--max-model-len", "32768",
+  "--gpu-memory-utilization", "0.90",
+  "--language-model-only",
+]
+port = 8000
+# The three surfaces the reporter saw, plus the engine dying under them.
+fail_pattern = "Segfault encountered|illegal instruction|illegal memory access|unspecified launch failure|EngineDeadError|EngineCore encountered a fatal error"
+boot_timeout_s = 900
+
+# Graphs on, the default: the report's crashing arm.
+[variants.soak-graphs]
+env = { SOAK_MINUTES = "25" }
+
+# The report's only surviving arm; run only if soak-graphs dies, as the control on the same host.
+[variants.soak-eager]
+flags = ["--enforce-eager"]
+env = { SOAK_MINUTES = "25" }
