@@ -12,7 +12,8 @@ min_cuda = "13.0"
 container_disk_gb = 80
 volume_gb = 20
 needs_hf_token = false
-avoid_data_centers = ["EUR-IS-2", "US-NC-1"]
+# US-NE-1: the first pod (10-19) was still pulling the v0.28.0 image after 30 min.
+avoid_data_centers = ["EUR-IS-2", "US-NC-1", "US-NE-1"]
 # The reporter's card.
 gpus = [
   { id = "NVIDIA RTX PRO 6000 Blackwell Workstation Edition", cloud = "SECURE" },
