@@ -36,7 +36,8 @@ planned, $3.42 worst case.
 
 ## Results (2026-10-19)
 
-Pod gizonyehl8edm8: 1x RTX PRO 6000 Blackwell Server Edition (Workstation Edition out of stock), secure, $2.49/hr.
+Pod gizonyehl8edm8: 1x RTX PRO 6000 Blackwell Workstation Edition (the quote had priced the Server Edition, then the
+Workstation Edition came into stock), secure, $2.59/hr, driver 610.57.04.
 Image `nightly-e68efc68`: vLLM 0.32.1rc1.dev36. Cost $1.53 (estimate) of $3.42.
 
 soak-graphs: **survived 25 minutes**, 7 rounds x 592 requests = 4,144 requests at concurrency 70, 0 failed, output
@@ -44,6 +45,18 @@ throughput 2,863-2,908 tok/s every round, mean TPOT 22.6-22.9 ms, no drift. The 
 `EngineDeadError` the API server logs when the harness stops it at 09:27:52, after round 7 finished at 09:27:45.
 soak-eager was not needed and was stopped before it booted.
 
-Not a fix claim yet: H2 needs the same soak to kill `vllm/vllm-openai:v0.28.0` (issues/vllm-54331-v028). Differences
-from the report that could also explain a survival: text prompts over 16 shared 4096-token prefixes, not multi-turn
-video; Server Edition, not Workstation; the pod's driver, not 610.43.02.
+### Control on 0.28.0 (issues/vllm-54331-v028)
+
+Pod 4lkd6rwrx2rnu0, same card and driver, `vllm/vllm-openai:v0.28.0`, same model, flags and workload. Cost $1.50.
+**Also survived 25 minutes**: 4,144 requests, 0 failed, 2,760-2,790 output tok/s, mean TPOT 23.3-23.6 ms. The only
+`EngineDeadError` is the harness stopping the server at 10:05:55, after round 7 ended at 10:05:49.
+
+Verdict: **does not reproduce** with this workload on either version, so the nightly's survival says nothing about a
+fix. The likely difference is the vision path: the report is offline batch *video* inference, and both runs here pass
+`--language-model-only`, so the vision encoder never runs (the report's 0.25 runs also hit a separate ViT illegal
+memory access). Other differences: offline `LLM` engine vs the OpenAI server, driver 610.57.04 vs 610.43.02, and
+`ornith-ai/Ornith-1.5` for most of the report's arms.
+
+What it does show: text-only serving of this model, saturated at concurrency 70 over shared prefixes with CUDA graphs
+on, ran 25 minutes clean on 0.28.0 and on the 10-19 nightly (2.9K output tok/s on the nightly, 3% above 0.28.0).
+Next for the issue itself: the same soak with the vision encoder on and video inputs.

@@ -1,0 +1,25 @@
+{
+  "issue": "vllm-54331-v028",
+  "budget": {
+    "usd": 2.05,
+    "approved_at": "2026-10-19T09:31:31Z",
+    "note": "Aditya approved 2026-10-19: 1x RTX PRO 6000 SE secure $2.49/hr x 0.75h, worst case $2.05; soak-graphs on v0.28.0 as the control for vllm-54331"
+  },
+  "pods": [
+    {
+      "name": "sm120-vllm-54331-v028-e8b663",
+      "id": "4lkd6rwrx2rnu0",
+      "state": "terminated",
+      "gpu": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+      "count": 1,
+      "cloud": "SECURE",
+      "rate_usd_hr": 2.59,
+      "reserved_usd": 2.0496972222222225,
+      "reserved_at": "2026-10-19T09:31:34Z",
+      "deadline": "2026-10-19T10:14:44Z",
+      "terminated_at": "2026-10-19T10:06:13Z",
+      "cost_usd": 1.495725,
+      "cost_source": "estimate"
+    }
+  ]
+}
