@@ -22,6 +22,19 @@ print("vllm", version("vllm"), "flashinfer", version("flashinfer-python"), "torc
 print("cuda peer access 0->1:", torch.cuda.can_device_access_peer(0, 1), "1->0:", torch.cuda.can_device_access_peer(1, 0))
 EOF
 timeout 60 nvidia-smi --query-gpu=index,pcie.link.gen.max,pcie.link.width.max,power.limit --format=csv
+
+# The 10-23 recheck ran about 2x slower on a host with both GPUs behind one PCIe switch, so measure the all-reduce
+# path itself, with P2P allowed and disabled; NCCL_DEBUG names the transport it picked. A failure here is recorded,
+# not fatal: the variants still answer the question.
+for p2p in default 1; do
+    if [[ $p2p == default ]]; then
+        out=$(env -u NCCL_P2P_DISABLE NCCL_DEBUG=INFO timeout 300 torchrun --standalone --nproc_per_node=2 "$here/allreduce_bw.py" 2>&1) || true
+    else
+        out=$(NCCL_P2P_DISABLE=1 NCCL_DEBUG=INFO timeout 300 torchrun --standalone --nproc_per_node=2 "$here/allreduce_bw.py" 2>&1) || true
+    fi
+    echo "NCCL_P2P_DISABLE=$p2p transports: $(grep -o 'via [A-Za-z/]*' <<<"$out" | sort | uniq -c | tr -s ' ' | tr '\n' ';')"
+    grep '^allreduce ' <<<"$out" || { echo "all-reduce check failed with NCCL_P2P_DISABLE=$p2p:"; tail -15 <<<"$out"; }
+done
 echo "container memory limit: $(python3 -I "$guard" --limit)"
 df -h /workspace /root
 

@@ -3,8 +3,9 @@ issue = "puget-team-llm"
 # fix/installer-docker-restart-intel-check @ ef329d2) on 2x PCIe RTX PRO 6000, menu entry 4, its recommended model for
 # 80 GB+ of VRAM. Setup about 12 min (image, 80 GB of weights to container disk); each variant boots (load, compile,
 # graph capture), runs GSM8K 100 and three benchmark points, about 20 min in eager mode.
-# 1.5 h for the 10-19 run of three variants; the 10-23 recheck runs two.
-planned_hours = 1.0
+# 1.5 h for the 10-19 run of three variants. The 10-23 P2P run does four on one host: installed, shipped,
+# graphs-installed, graphs (`harness run puget-team-llm installed shipped graphs-installed graphs`).
+planned_hours = 1.25
 
 [pod]
 # The tag the pack's NVIDIA menu writes for this entry is the floating `nightly`; this is what it pointed at on 10-19.

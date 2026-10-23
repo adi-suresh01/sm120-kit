@@ -99,3 +99,10 @@ variants. Cost $3.54 (estimate).
 - Conclusion for now: eager costs single-user throughput on every host tested (2.7x here, 4.2x on 10-19 with P2P
   off, 7.2x for entry 7), but the size depends on the host, and the "as installed" multi-user numbers for entry 4
   need a run that measures P2P on and off on one host, with an all-reduce bandwidth check, before they are quoted.
+
+### P2P on vs off on one host (2026-10-23, planned)
+
+Runs all four variants on one pod, so the host is the same for every comparison: installed and graphs-installed
+(NCCL defaults, P2P allowed, as the pack installs) against shipped and graphs (`NCCL_P2P_DISABLE=1`, what the pack's
+`.env` asks for). setup.sh first times an NCCL all-reduce at 8 KiB, 1 MiB and 64 MiB both ways (`allreduce_bw.py`)
+and records which transport NCCL picked, so a slow GPU-to-GPU path shows up directly. `env.txt` records the topology.
