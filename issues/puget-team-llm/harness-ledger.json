@@ -33,7 +33,22 @@
       "reserved_at": "2026-10-23T07:20:01Z",
       "deadline": "2026-10-23T08:20:01Z",
       "terminated_at": "2026-10-23T08:01:04Z",
-      "cost_usd": 3.5439833333333333,
+      "cost_usd": 3.5577654268126935,
+      "cost_source": "billing"
+    },
+    {
+      "name": "sm120-puget-team-llm-99bd70",
+      "id": "nz87k6kv30dkv5",
+      "state": "terminated",
+      "gpu": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+      "count": 2,
+      "cloud": "SECURE",
+      "rate_usd_hr": 5.18,
+      "reserved_usd": 7.119334444444445,
+      "reserved_at": "2026-10-23T08:08:21Z",
+      "deadline": "2026-10-23T09:23:19Z",
+      "terminated_at": "2026-10-23T09:22:00Z",
+      "cost_usd": 6.3584499999999995,
       "cost_source": "estimate"
     }
   ]

@@ -32,7 +32,7 @@ for p2p in default 1; do
     else
         out=$(NCCL_P2P_DISABLE=1 NCCL_DEBUG=INFO timeout 300 torchrun --standalone --nproc_per_node=2 "$here/allreduce_bw.py" 2>&1) || true
     fi
-    echo "NCCL_P2P_DISABLE=$p2p transports: $(grep -o 'via [A-Za-z/]*' <<<"$out" | sort | uniq -c | tr -s ' ' | tr '\n' ';')"
+    echo "NCCL_P2P_DISABLE=$p2p transports: $(grep -o 'via [A-Za-z0-9/]*' <<<"$out" | sort | uniq -c | tr -s ' ' | tr '\n' ';')"
     grep '^allreduce ' <<<"$out" || { echo "all-reduce check failed with NCCL_P2P_DISABLE=$p2p:"; tail -15 <<<"$out"; }
 done
 echo "container memory limit: $(python3 -I "$guard" --limit)"

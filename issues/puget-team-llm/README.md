@@ -100,9 +100,44 @@ variants. Cost $3.54 (estimate).
   off, 7.2x for entry 7), but the size depends on the host, and the "as installed" multi-user numbers for entry 4
   need a run that measures P2P on and off on one host, with an all-reduce bandwidth check, before they are quoted.
 
-### P2P on vs off on one host (2026-10-23, planned)
+### P2P on vs off on one host (2026-10-23)
 
-Runs all four variants on one pod, so the host is the same for every comparison: installed and graphs-installed
-(NCCL defaults, P2P allowed, as the pack installs) against shipped and graphs (`NCCL_P2P_DISABLE=1`, what the pack's
-`.env` asks for). setup.sh first times an NCCL all-reduce at 8 KiB, 1 MiB and 64 MiB both ways (`allreduce_bw.py`)
-and records which transport NCCL picked, so a slow GPU-to-GPU path shows up directly. `env.txt` records the topology.
+All four variants on one pod, so the host is the same for every comparison: installed and graphs-installed (NCCL
+defaults, P2P allowed, as the pack installs) against shipped and graphs (`NCCL_P2P_DISABLE=1`, what the pack's
+`.env` asks for). setup.sh first timed an NCCL all-reduce both ways (`allreduce_bw.py`).
+
+Pod sm120-puget-team-llm-99bd70 landed on the same physical host as the recheck (213.173.111.97): PCIe Gen 4 x16
+link maximum, both GPUs behind one switch (`PIX`), CUDA peer access true, cgroup v1. Same image. Cost $6.36
+(estimate).
+
+NCCL all-reduce, 2 ranks, bf16:
+
+| Message | P2P allowed (transport P2P) | P2P disabled (transport SHM) |
+|---|---|---|
+| 8 KiB | 11.1 us | 11.1 us |
+| 1 MiB | 66.9 us, 15.7 GB/s bus | 153.9 us, 6.8 GB/s bus |
+| 64 MiB | 3.64 ms, 18.5 GB/s bus | 7.54 ms, 8.9 GB/s bus |
+
+Serving, output tok/s (random 1024 in / 512 out), mean TPOT in ms; vLLM used PYNCCL in every variant:
+
+| Variant | P2P | Mode | c=1 | c=16 | c=64 | TPOT c=1 / 16 / 64 | GSM8K, correct / replies with a number |
+|---|---|---|---|---|---|---|---|
+| installed | allowed | eager | 26.6 | 352.6 | 616.9 | 37.2 / 41.5 / 94.5 | 56 / 57 |
+| shipped | disabled | eager | 26.7 | 348.2 | 585.9 | 37.1 / 41.6 / 98.9 | 52 / 53 |
+| graphs-installed | allowed | graphs | 73.2 | 373.5 | 644.6 | 13.2 / 39.4 / 91.7 | 57 / 57 |
+| graphs | disabled | graphs | 69.6 | 362.7 | 618.6 | 13.9 / 40.1 / 94.7 | 56 / 58 |
+
+- P2P is not why this host is slow. Allowing it doubles all-reduce bandwidth for large messages and leaves the
+  8 KiB latency unchanged, and in serving it is worth 0-5%: 4% at 64 users in both modes, 5% at 1 user with graphs.
+  The slowdown against 10-19 is the host itself: the recheck's numbers reproduce here within 1% (installed c=1 26.6
+  vs 26.7, graphs-installed 73.2 vs 73.4), and both P2P settings are equally slow. GPU clocks and throttle reasons
+  were not recorded, so the cause on the GPU side is not established.
+- On this host, as installed, the eager flags cost 2.75x output tok/s at 1 user (26.6 vs 73.2) and 4-6% at 16 and 64
+  users. On the 10-19 host (P2P off on both sides) the same comparison was 4.2x, 2.3x and 1.2x. The single-user cost
+  holds on both hosts; the multi-user cost depends on the host.
+- For the pack: `NCCL_P2P_DISABLE=1` never applied on NVIDIA, and on this host P2P allowed is equal or slightly
+  faster, so the unapplied setting can be dropped rather than wired through. The 10-17 split-NUMA NCCL hang
+  (sglang-33422) is the reason to keep it a per-board check rather than a blanket default either way.
+- GSM8K stays a weak check on this thinking model: 42-47 replies per variant ended without a number, as on 10-19.
+
+The whole recheck cost $3.56 + $6.36 on top of the 10-19 run's $3.20.
