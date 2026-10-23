@@ -1,0 +1,159 @@
+issue = "runpod-worker-vllm-r1d8b"
+# runpod-workers/worker-vllm @ 71d503e6 (release v2.30.1, vLLM v0.32.0) on one RTX 5090: when the worker's startup OOM
+# path fires, what its one relaunch (ENFORCE_EAGER=true, MAX_NUM_BATCHED_TOKENS=8192) buys, and what it costs.
+# Setup about 8 min (image, 16 GB of weights). The three benchmarked variants take about 6 min each, the four
+# boot-only ones about 2 min each.
+planned_hours = 1.0
+
+[pod]
+# The base image of the worker's Dockerfile at this commit (FROM vllm/vllm-openai:${VLLM_VERSION}, v0.32.0), by its
+# manifest-list digest. The worker adds only the RunPod SDK and the bitsandbytes plugin on top.
+image = "vllm/vllm-openai:v0.32.0@sha256:befccf0e7e4089aa23926bb6f887a85c0d46c2a99e6de5c5ffdf5cb7957c5b34"
+count = 1
+# .runpod/hub.json allowedCudaVersions.
+min_cuda = "13.0"
+# The image (9.2 GB compressed), 16 GB of weights, and the download's chunk cache on container disk: /workspace is a
+# FUSE mount on secure pods.
+container_disk_gb = 70
+volume_gb = 20
+needs_hf_token = false
+# A real 32 GB card, not a ballast on a 96 GB one: vLLM picks its batch defaults from the card's total memory (2048
+# batched tokens under 70 GiB, 8192 above), and that default is what the relaunch's 8192 is compared against.
+# Secure 5090 stock went from two data centers to none during 2026-10-23, so community is the fallback. That rules out
+# avoid_data_centers (the harness allows it with secure choices only); it avoided nothing here anyway, since the
+# catalog listed no 5090 in EUR-IS-2, US-NC-1, or US-NE-1. The faults those were for are still caught: `up` refuses
+# a GPU another process holds, and setup.sh stops a download under 40 MB/s.
+gpus = [
+  { id = "NVIDIA GeForce RTX 5090", cloud = "SECURE" },
+  { id = "NVIDIA GeForce RTX 5090", cloud = "COMMUNITY" },
+]
+
+[server]
+package = "vllm"
+model = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
+# The preset model of the worker's Hub listing (.runpod/hub.json presets).
+launch = ["vllm", "serve"]
+# What src/args_builder.py builds from the env defaults .runpod/hub.json writes for a Hub deploy plus the Dockerfile's
+# ENV, in its order, --model last as the worker has it, minus the three flags the variants vary (--enforce-eager,
+# --max-num-seqs, --max-model-len). vLLM 0.32.0 moves --model to the positional slot before it reads --config
+# (argparse_utils.py:287-335), so the band variants' --config works with it. --revision is ours, so every variant
+# loads the same weights.
+base_flags = [
+  "--revision", "6a6f4aa4197940add57724a7707d069478df56b1",
+  "--block-size", "16",
+  "--no-disable-custom-all-reduce",
+  "--no-disable-sliding-window",
+  "--distributed-executor-backend", "mp",
+  "--dtype", "auto",
+  "--no-enable-auto-tool-choice",
+  "--enable-chunked-prefill",
+  "--no-enable-expert-parallel",
+  "--no-enable-log-requests",
+  "--no-enable-lora",
+  "--no-enable-prefix-caching",
+  "--no-fully-sharded-loras",
+  "--gpu-memory-utilization", "0.95",
+  "--kv-cache-dtype", "auto",
+  "--lora-dtype", "auto",
+  "--max-logprobs", "20",
+  "--max-lora-rank", "16",
+  "--max-loras", "1",
+  "--max-parallel-loading-workers", "1",
+  "--pipeline-parallel-size", "1",
+  "--no-ray-workers-use-nsight",
+  "--seed", "0",
+  "--no-skip-tokenizer-init",
+  "--tensor-parallel-size", "1",
+  "--tokenizer-mode", "auto",
+  "--no-trust-remote-code",
+  "--model", "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+]
+port = 8000
+fail_pattern = "Engine core initialization failed|illegal memory access|cudaErrorIllegalAddress"
+boot_timeout_s = 900
+
+# Every variant's env carries the Hub's non-flag env defaults (PYTORCH_ALLOC_CONF, VLLM_USE_DEEP_GEMM) and the
+# Dockerfile's TOKENIZERS_PARALLELISM. WORKER_LAUNCH tells hooks.sh which of the worker's two launches the variant is.
+
+# The Hub deploy as it ships: MAX_MODEL_LEN=auto, so vLLM fits the context to the KV cache it gets.
+[variants.worker-default]
+flags = ["--no-enforce-eager", "--max-num-seqs", "256", "--max-model-len", "auto"]
+[variants.worker-default.env]
+PYTORCH_ALLOC_CONF = "expandable_segments:True"
+VLLM_USE_DEEP_GEMM = "0"
+TOKENIZERS_PARALLELISM = "false"
+WORKER_LAUNCH = "first"
+GSM8K_MAX_TOKENS = "2048"
+[variants.worker-default.quality]
+gsm8k = 50
+bench = [[1, 8], [8, 32], [30, 120]]
+
+# The worker's relaunch after a startup OOM (src/main.py apply_oom_recovery), on the same defaults.
+[variants.worker-fallback]
+flags = ["--enforce-eager", "--max-num-seqs", "256", "--max-model-len", "auto", "--max-num-batched-tokens", "8192"]
+[variants.worker-fallback.env]
+PYTORCH_ALLOC_CONF = "expandable_segments:True"
+VLLM_USE_DEEP_GEMM = "0"
+TOKENIZERS_PARALLELISM = "false"
+WORKER_LAUNCH = "retry"
+GSM8K_MAX_TOKENS = "2048"
+[variants.worker-fallback.quality]
+gsm8k = 50
+bench = [[1, 8], [8, 32], [30, 120]]
+
+# CUDA graphs kept, MAX_NUM_SEQS=32 instead of 256: the worker takes at most MAX_CONCURRENCY=30 jobs at once, so the
+# graphs and sampler buffers sized for 256 sequences are never used.
+[variants.graphs-fit]
+flags = ["--no-enforce-eager", "--max-num-seqs", "32", "--max-model-len", "auto"]
+[variants.graphs-fit.env]
+PYTORCH_ALLOC_CONF = "expandable_segments:True"
+VLLM_USE_DEEP_GEMM = "0"
+TOKENIZERS_PARALLELISM = "false"
+WORKER_LAUNCH = "first"
+GSM8K_MAX_TOKENS = "2048"
+[variants.graphs-fit.quality]
+gsm8k = 50
+bench = [[1, 8], [8, 32], [30, 120]]
+
+# MAX_MODEL_LEN=auto when the weights leave no KV cache at all. 0.45 puts the budget under this 8B's 14.96 GiB of
+# weights, the spot a model that fills the card is in at 0.95 (Qwen3-30B-A3B-Instruct-2507-FP8 is 29.03 GiB). It comes
+# after base_flags' 0.95, and argparse keeps the last value (vLLM logs "Found duplicate keys"). Ahead of the band
+# variants, since a band pre_launch that finds no band stops `exec` and would take this one with it.
+[variants.auto-no-room]
+flags = ["--no-enforce-eager", "--max-num-seqs", "256", "--max-model-len", "auto", "--gpu-memory-utilization", "0.45"]
+[variants.auto-no-room.env]
+PYTORCH_ALLOC_CONF = "expandable_segments:True"
+VLLM_USE_DEEP_GEMM = "0"
+TOKENIZERS_PARALLELISM = "false"
+WORKER_LAUNCH = "first"
+
+# The same three configs at one explicit MAX_MODEL_LEN that hooks.sh picks from the worker-default, worker-fallback,
+# and graphs-fit runs: past what worker-default fits, inside what the retry or graphs-fit fits (BAND=1, see hooks.sh).
+[variants.worker-default-band]
+flags = ["--no-enforce-eager", "--max-num-seqs", "256", "--config", "/workspace/band.yaml"]
+[variants.worker-default-band.env]
+PYTORCH_ALLOC_CONF = "expandable_segments:True"
+VLLM_USE_DEEP_GEMM = "0"
+TOKENIZERS_PARALLELISM = "false"
+WORKER_LAUNCH = "first"
+BAND = "1"
+
+[variants.worker-fallback-band]
+flags = [
+  "--enforce-eager", "--max-num-seqs", "256", "--max-num-batched-tokens", "8192", "--config", "/workspace/band.yaml",
+]
+[variants.worker-fallback-band.env]
+PYTORCH_ALLOC_CONF = "expandable_segments:True"
+VLLM_USE_DEEP_GEMM = "0"
+TOKENIZERS_PARALLELISM = "false"
+WORKER_LAUNCH = "retry"
+BAND = "1"
+
+[variants.graphs-fit-band]
+flags = ["--no-enforce-eager", "--max-num-seqs", "32", "--config", "/workspace/band.yaml"]
+[variants.graphs-fit-band.env]
+PYTORCH_ALLOC_CONF = "expandable_segments:True"
+VLLM_USE_DEEP_GEMM = "0"
+TOKENIZERS_PARALLELISM = "false"
+WORKER_LAUNCH = "first"
+BAND = "1"
