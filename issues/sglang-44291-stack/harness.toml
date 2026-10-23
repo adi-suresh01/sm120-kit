@@ -1,14 +1,14 @@
 issue = "sglang-44291-stack"
-# Reruns the sglang#44291 EP2 + NEXTN repro on #44480 and on the stack built over it (#44991, #44993, #44994),
-# whose description says the full #44291 reproduction was not run. Setup about 10 min (image, 133 GB of weights to
-# container disk); each boot took 150-280 s in stage 2. Variants run in order of value, so the deadline cuts the
-# no-speculation check first.
-planned_hours = 1.25
+# Reruns the sglang#44291 EP2 + NEXTN repro on a stock nightly that carries #44480 and the stack merged over it
+# (#44991, #44993, #44994), with no patches: what the reporter would pull today. Setup about 10 min (image, 133 GB of
+# weights to container disk); each boot took 150-280 s in stage 2. Variants run in order of value, so the deadline cuts
+# the no-speculation check first.
+planned_hours = 1.0
 
 [pod]
-# The nightly built from 3c560089, two commits past the stack's base 6708426728 on main, with the same torch and
-# sglang-kernel pins; no file those two commits touch is in any patch here, so every patch applies unchanged.
-image = "lmsysorg/sglang:nightly-dev-cu13-20261019-3c560089@sha256:c1f4d9fc6fcf50c2269adbc757ce7b1778883af04155edb888fa9eea3b6648c0"
+# Built from main at c1c287a4 (2026-10-21 00:10Z), which contains #44480 (e2e1a97fc3), #44993 (4f8f06faf3) and
+# #44994 (299a75ac5d); checked with the compare API. The newest nightly-dev-cu13 tag as of 10-22.
+image = "lmsysorg/sglang:nightly-dev-cu13-20261021-c1c287a4@sha256:b0473834763b2753e069cb96c1acaf235ba7fd632ccd9bbeb44da809c437fdeb"
 count = 2
 min_cuda = "13.0"
 # The image plus 133 GB of weights, which setup.sh keeps on container disk: /workspace is a FUSE mount on secure
@@ -17,8 +17,9 @@ container_disk_gb = 220
 # HF_HOME's small files and logs.
 volume_gb = 20
 needs_hf_token = false
-# EUR-IS-2 reached HF at 15 MB/s on 10-16; US-NC-1 handed out GPUs another process held on 10-17.
-avoid_data_centers = ["EUR-IS-2", "US-NC-1"]
+# EUR-IS-2 reached HF at 15 MB/s on 10-16; US-NC-1 handed out GPUs another process held on 10-17; US-NE-1 took 30 min
+# to pull an image on 10-19.
+avoid_data_centers = ["EUR-IS-2", "US-NC-1", "US-NE-1"]
 # Stage 2 ran on the Server Edition; the reporter's box is 2x PCIe RTX PRO 6000.
 gpus = [
   { id = "NVIDIA RTX PRO 6000 Blackwell Server Edition", cloud = "SECURE" },
@@ -44,55 +45,24 @@ base_flags = [
 port = 30000
 fail_pattern = "illegal memory access|cudaErrorIllegalAddress|CUDA error: |Received sigquit|SIGQUIT received|Scheduler hit an exception"
 boot_timeout_s = 1200
-patch_strip = 2
 
 # Every variant sets NCCL_P2P_DISABLE=1: a split-NUMA host hung right after NCCL init on 10-17 (sglang-33422). The
-# fault is expert indexing inside one rank, so the transport does not change it; main-nextn checks that.
+# fault was expert indexing inside one rank, so the transport does not change it.
 # 9 concurrent smoke requests pad decode batches up to the next captured graph size, where padding-row bugs live.
 
-# Control: today's main without any fix. Stage 2 crashed here in the draft prefill graph capture.
-[variants.main-nextn]
+# The reporter's config. Stage 2 crashed here on main before #44480 (draft prefill graph capture).
+[variants.nightly-nextn]
 flags = ["--speculative-algorithm", "NEXTN", "--speculative-num-steps", "3", "--speculative-eagle-topk", "1",
   "--speculative-num-draft-tokens", "4"]
 env = { HF_HUB_OFFLINE = "1", NCCL_P2P_DISABLE = "1" }
 smoke_concurrency = 9
-
-# The whole stack at #44994's head, which carries #44480 at 478dd700.
-[variants.stack-nextn]
-flags = ["--speculative-algorithm", "NEXTN", "--speculative-num-steps", "3", "--speculative-eagle-topk", "1",
-  "--speculative-num-draft-tokens", "4"]
-patches = ["stack-54ff1e49"]
-env = { HF_HUB_OFFLINE = "1", NCCL_P2P_DISABLE = "1" }
-smoke_concurrency = 9
-[variants.stack-nextn.quality]
+[variants.nightly-nextn.quality]
 gsm8k = 200
 bench = [[1, 8], [16, 64], [64, 256]]
 
-# #44480 alone on the same pod, so the stack's numbers have a baseline from the same host.
-[variants.pr44480-nextn]
-flags = ["--speculative-algorithm", "NEXTN", "--speculative-num-steps", "3", "--speculative-eagle-topk", "1",
-  "--speculative-num-draft-tokens", "4"]
-patches = ["pr44480"]
+# No speculation: the target model's own MoE layers under EP2, which the merged stack also rebinds.
+[variants.nightly-nospec]
 env = { HF_HUB_OFFLINE = "1", NCCL_P2P_DISABLE = "1" }
 smoke_concurrency = 9
-[variants.pr44480-nextn.quality]
-gsm8k = 200
-bench = [[1, 8], [16, 64], [64, 256]]
-
-# The stack without speculation: the target model's own MoE layers under EP2, which the stack also rebinds.
-[variants.stack-nospec]
-patches = ["stack-54ff1e49"]
-env = { HF_HUB_OFFLINE = "1", NCCL_P2P_DISABLE = "1" }
-smoke_concurrency = 9
-[variants.stack-nospec.quality]
-gsm8k = 50
-
-# Only when stack-nextn fails: #44993's head without #44994, to tell which PR of the stack it is.
-[variants.pr44993-nextn]
-flags = ["--speculative-algorithm", "NEXTN", "--speculative-num-steps", "3", "--speculative-eagle-topk", "1",
-  "--speculative-num-draft-tokens", "4"]
-patches = ["pr44993-3c2aa6c8"]
-env = { HF_HUB_OFFLINE = "1", NCCL_P2P_DISABLE = "1" }
-smoke_concurrency = 9
-[variants.pr44993-nextn.quality]
+[variants.nightly-nospec.quality]
 gsm8k = 50

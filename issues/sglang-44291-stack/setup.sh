@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Checks the image, checks every patch applies, and downloads Qwen3.8-Flash-Next-NVFP4 to container disk, so paid
-# variant time goes to the matrix.
+# Checks the image and downloads Qwen3.8-Flash-Next-NVFP4 to container disk, so paid variant time goes to the matrix.
 set -euo pipefail
 
 : "${HF_HOME:?set HF_HOME to a path on the pod volume}"
@@ -8,8 +7,8 @@ here=$(cd "$(dirname "$0")" && pwd)
 guard="$here/../../harness/pod/mem_guard.py"
 model=nvidia/Qwen3.8-Flash-Next-NVFP4
 revision=fc694b54fb0174e0913e6adf86691ef85a4ead47
-# The patches are diffs from the stack's base; they were checked against this commit only.
-want_sglang=3c560089
+# The first nightly-dev build that contains #44480, #44993 and #44994.
+want_sglang=c1c287a4
 hub=/root/hf-hub
 # The download's chunk cache would otherwise sit under HF_HOME, on the 20 GB volume.
 export HF_XET_CACHE=/root/hf-xet
@@ -26,12 +25,6 @@ print("sglang", version("sglang"), "commit", v, "sglang-kernel", version("sglang
 assert sys.argv[1] in v, f"want sglang at {sys.argv[1]}, got {v}"
 EOF
 
-# A patch that no longer applies would otherwise surface per variant, after a paid boot of the one before it.
-site_root=$(python3 -c 'import importlib.util, os; print(os.path.dirname(os.path.dirname(importlib.util.find_spec("sglang").origin)))')
-for p in "$here"/patches/*.diff; do
-    patch -p2 --dry-run -f -s -d "$site_root" <"$p" >/dev/null || { echo "$(basename "$p") does not apply" >&2; exit 1; }
-done
-echo "patches apply to $site_root"
 # The pinned PLE table alone is 47.7 GiB (stage2.md).
 read -r limit _ < <(python3 -I "$guard" --limit)
 echo "container memory limit: $limit"
