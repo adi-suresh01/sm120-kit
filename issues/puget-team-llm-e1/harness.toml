@@ -1,0 +1,102 @@
+issue = "puget-team-llm-e1"
+# Puget Systems' Team LLM pack v1.1.0 (github.com/Puget-Systems/puget-docker-app-packs @ fed0505e, 2026-10-22; entry 1
+# is unchanged at main 2c83929a) on 2x PCIe RTX PRO 6000, menu entry 1: one of the five entries still shipping eager
+# mode after 4 and 7 were measured, plus the two checks the PR #12 review asks for before graphs ship: sustained load
+# (soak-graphs) and the single 96 GB GPU build (tp1-*). Sized for the slow 10-23 host, where entry 4 (48 layers to this
+# one's 40) took 7.7 min to restore and boot its first variant and 4 min each later one, then 14 min of quality runs
+# eager and 12 with graphs: 9 min to ready, set up (25 GB at the 100 MB/s floor) and terminate, 24 min of restore and
+# boot for five variants, 22 min of quality for the 2-GPU pair and 18 for the 1-GPU pair (no all-reduce, which is where
+# that host was slow), and soak-graphs' 25 min plus one 4-min round: about 100 min. The rest is room for soak-shipped
+# when soak-graphs dies early (README).
+planned_hours = 2.0
+
+[pod]
+# The menu writes the floating `nightly` tag for this entry. Pinned to the 10-19 build entries 4 and 7 ran, so every
+# entry's numbers in the PR come from one image; Puget's PR #14 pins the menu to a mirror of this same digest.
+image = "vllm/vllm-openai:nightly-e68efc685ab1e6f1eda004ced7157e3ca411da2f@sha256:1ff6716fe240a922d0d518b8884261e25b0c02eda8e2ce90888e364978249cad"
+count = 2
+min_cuda = "13.0"
+# 25.0 GB of safetensors, which setup.sh keeps on container disk (/workspace is a FUSE mount on secure pods), plus the
+# xet chunk cache and vLLM's compile cache; the image layers do not count against it.
+container_disk_gb = 60
+volume_gb = 20
+needs_hf_token = false
+# EUR-IS-2 reached HF at 15 MB/s on 10-16; US-NC-1 handed out GPUs another process held on 10-17; US-NE-1 took 30 min
+# to pull an image on 10-19.
+avoid_data_centers = ["EUR-IS-2", "US-NC-1", "US-NE-1"]
+# Puget ships the Workstation Edition; the Server Edition runs the same sm_120 silicon at a lower clock and power cap.
+gpus = [
+  { id = "NVIDIA RTX PRO 6000 Blackwell Workstation Edition", cloud = "SECURE" },
+  { id = "NVIDIA RTX PRO 6000 Blackwell Server Edition", cloud = "SECURE" },
+]
+
+[server]
+package = "vllm"
+model = "cyankiwi/Qwen3.6-35B-A3B-AWQ-4bit"
+# The pack's own entrypoint and flags: packs/team_llm/docker-compose.yml lines 63-78, scripts/lib/vllm_menu_nvidia.sh
+# lines 177-196 (entry 1), and the .env packs/team_llm/init.sh lines 121-135 writes for a 2-GPU box. nvidia-smi reports
+# 97887 MiB per GPU, so gpu_detect.sh lines 86-99 give TOTAL_VRAM 190: 262144 context (>= 48), and 22 GB of menu
+# weights is 11% of 190, so the heuristic at vllm_menu_nvidia.sh lines 566-582 keeps 0.90. Nothing writes MAX_NUM_SEQS,
+# so the compose default 256 holds. On one GPU (TOTAL_VRAM 95) the menu writes the same flags but TP1 (README), so the
+# tensor parallel size is set per variant. --revision is ours, so every variant loads the same weights.
+launch = ["python3", "-m", "vllm.entrypoints.openai.api_server", "--model=cyankiwi/Qwen3.6-35B-A3B-AWQ-4bit"]
+base_flags = [
+  "--revision", "f1e8415c4f29508fe281da4e256df26573213bfd",
+  "--max-model-len=262144",
+  "--gpu-memory-utilization=0.90",
+  "--max-num-seqs=256",
+  "--dtype=float16",
+  "--trust-remote-code",
+  "--reasoning-parser", "qwen3",
+  # THINKING_ARGS: compose pastes the .env text into `bash -c`, which strips the single quotes, so vLLM gets the JSON
+  # as one argument.
+  "--default-chat-template-kwargs", '{"preserve_thinking": true}',
+  "--enable-auto-tool-choice", "--tool-call-parser", "qwen3_coder",
+]
+port = 8000
+# The last three are vllm#54331's surfaces (a segfault in graph replay, an engine dying under load), so a soak stops
+# when the engine dies, not when its clients give up.
+fail_pattern = "illegal memory access|cudaErrorIllegalAddress|CUDA error: |EngineCore failed|Engine core initialization failed|Segfault encountered|EngineDeadError|EngineCore encountered a fatal error"
+boot_timeout_s = 900
+
+# As shipped: eager mode, no prefix caching, custom all-reduce off. NCCL keeps its defaults: init.sh writes
+# NCCL_P2P_DISABLE=1 to .env, but the NVIDIA compose files never pass it into the container.
+[variants.shipped]
+flags = ["--tensor-parallel-size=2", "--disable-custom-all-reduce", "--enforce-eager", "--no-enable-prefix-caching"]
+[variants.shipped.quality]
+gsm8k = 100
+bench = [[1, 8], [16, 64], [64, 256]]
+
+# CUDA graphs and prefix caching back on; all-reduce settings as shipped. The one change the PR would make.
+[variants.graphs]
+flags = ["--tensor-parallel-size=2", "--disable-custom-all-reduce"]
+[variants.graphs.quality]
+gsm8k = 100
+bench = [[1, 8], [16, 64], [64, 256]]
+
+# shipped and graphs as the menu writes them for one 96 GB GPU (README): TP1, the rest unchanged; the compose still
+# adds --disable-custom-all-reduce. GPU 0 of this pod stands in for that box, so the pair shares a host with the rest.
+[variants.tp1-shipped]
+flags = ["--tensor-parallel-size=1", "--disable-custom-all-reduce", "--enforce-eager", "--no-enable-prefix-caching"]
+env = { CUDA_VISIBLE_DEVICES = "0" }
+[variants.tp1-shipped.quality]
+gsm8k = 100
+bench = [[1, 8], [16, 64], [64, 256]]
+
+[variants.tp1-graphs]
+flags = ["--tensor-parallel-size=1", "--disable-custom-all-reduce"]
+env = { CUDA_VISIBLE_DEVICES = "0" }
+[variants.tp1-graphs.quality]
+gsm8k = 100
+bench = [[1, 8], [16, 64], [64, 256]]
+
+# graphs under 25 min of saturation at concurrency 64 (hooks.sh run_soak), the length issues/vllm-54331 ran.
+[variants.soak-graphs]
+flags = ["--tensor-parallel-size=2", "--disable-custom-all-reduce"]
+env = { SOAK_MINUTES = "25" }
+
+# shipped under the same soak: the control, run only if soak-graphs fails, on the same pod. Not in the default list
+# the README runs, since the harness runs every variant when none is named.
+[variants.soak-shipped]
+flags = ["--tensor-parallel-size=2", "--disable-custom-all-reduce", "--enforce-eager", "--no-enable-prefix-caching"]
+env = { SOAK_MINUTES = "25" }
