@@ -1,0 +1,70 @@
+issue = "wowza-vif"
+# Wowza's Video Intelligence Framework (github.com/WowzaMediaSystems/wowza-video-intelligence-framework @ cc057543,
+# main, 2026-10-16): the bundled vLLM sidecar with its nemotron profile, the one of its two default models that ships
+# --enforce-eager, on 1x RTX PRO 6000. Setup about 3 min (15.4 GB of weights at 100 MB/s or better); each variant boots,
+# runs GSM8K 100 and three benchmark points, about 10-12 min, eager the slower.
+planned_hours = 0.75
+
+[pod]
+# The tag docker-compose.yaml line 192 and docker-compose.vlm-multi.yaml line 25 pin, by its index digest.
+image = "vllm/vllm-openai:v0.26.0@sha256:ffb2d59b1c059a5bd8d781320c9f5189de8293693b7d95da54befddaa54abf52"
+count = 1
+# The image is CUDA 13.0.2.
+min_cuda = "13.0"
+# 15.4 GB of safetensors, which setup.sh keeps on container disk (/workspace is a FUSE mount on secure pods), plus the
+# xet chunk cache and vLLM's compile cache; the image layers do not count against it.
+container_disk_gb = 50
+volume_gb = 20
+needs_hf_token = false
+# EUR-IS-2 reached HF at 15 MB/s on 10-16; US-NC-1 handed out GPUs another process held on 10-17; US-NE-1 took 30 min
+# to pull an image on 10-19.
+avoid_data_centers = ["EUR-IS-2", "US-NC-1", "US-NE-1"]
+# The docs' advice is for any 40 GB+ card; both editions are 96 GB sm_120.
+gpus = [
+  { id = "NVIDIA RTX PRO 6000 Blackwell Workstation Edition", cloud = "SECURE" },
+  { id = "NVIDIA RTX PRO 6000 Blackwell Server Edition", cloud = "SECURE" },
+]
+
+[server]
+package = "vllm"
+model = "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-FP8"
+# What vlm-entrypoint.sh (ENTRYPOINT_REVISION 2026-07-24) execs for vlm-env/nemotron.env on one GPU of compute
+# capability 12.0: its fixed ARGS (lines 136-146), fp8 KV from the capability probe (lines 122-131), no
+# --mm-processor-kwargs and no --max-num-seqs (the profile sets no pixel caps and leaves MAX_NUM_SEQS at auto), then
+# VLM_EXTRA_ARGS split on spaces (lines 169-174) minus --enforce-eager, which the shipped variant adds back. The
+# entrypoint's --port is the harness's; --revision is ours, so every variant loads the same weights.
+launch = ["vllm", "serve", "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-FP8"]
+base_flags = [
+  "--revision", "e9550fdec09682d12e8c3e41548b2e05b16db7c1",
+  "--max-model-len=8192",
+  "--gpu-memory-utilization=0.80",
+  "--max-num-batched-tokens=8192",
+  "--tensor-parallel-size=1",
+  "--kv-cache-dtype=fp8",
+  "--no-enable-prefix-caching",
+  "--mm-processor-cache-gb=0",
+  '--limit-mm-per-prompt={"image": 8, "video": 0}',
+  "--quantization", "modelopt",
+  "--trust-remote-code",
+  "--max-cudagraph-capture-size=64",
+  "--structured-outputs-config", '{"backend":"xgrammar","disable_any_whitespace":true}',
+]
+port = 8000
+fail_pattern = "illegal memory access|cudaErrorIllegalAddress|CUDA error: |EngineCore failed|Engine core initialization failed"
+boot_timeout_s = 900
+
+# As shipped: vlm-env/nemotron.env line 14.
+[variants.shipped]
+flags = ["--enforce-eager"]
+[variants.shipped.quality]
+gsm8k = 100
+bench = [[1, 8], [16, 64], [64, 256]]
+
+# The change the profile's own comment (lines 7-11) and docs/VLM_GUIDE.md line 156 make for a 40 GB+ card. Prefix
+# caching stays off, as the entrypoint fixes it. The guide's line 155 also drops --max-cudagraph-capture-size=64; it
+# stays, so graphs differs from shipped by one flag, and it never binds here: GSM8K sends 64 requests at a time and the
+# benchmark at most 64.
+[variants.graphs]
+[variants.graphs.quality]
+gsm8k = 100
+bench = [[1, 8], [16, 64], [64, 256]]
