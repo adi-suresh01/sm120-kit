@@ -34,7 +34,31 @@ Custom all-reduce is left out: the PR keeps the pack's all-reduce settings.
 
 ## Cost
 
-Quoted before the run; see `harness budget show puget-team-llm-e7` for the actual cost.
+`harness quote` on 2026-10-23: 2x Workstation Edition, secure, $5.18/hr, 1.0 h planned, $5.70 worst case. Actual
+$2.54 (estimate).
+
+## Results (2026-10-23)
+
+Pod sm120-puget-team-llm-e7-3a6e58: 2x RTX PRO 6000 Blackwell Workstation Edition, secure, CUDA peer access 0<->1
+true. Image `nightly-e68efc68`: vLLM 0.32.1rc1.dev36+ge68efc685, FlashInfer 0.7.2, torch 2.14.0+cu130. Both variants
+ran with NCCL's defaults, as the pack installs; vLLM chose PYNCCL for all-reduce (custom all-reduce off).
+
+Output tok/s from `vllm bench serve` (random 1024 in / 512 out), mean TPOT and TTFT in ms:
+
+| Variant | Boot | c=1 | c=16 | c=64 | TPOT c=1 / 16 / 64 | TTFT c=1 / 16 / 64 | GSM8K, answered replies correct |
+|---|---|---|---|---|---|---|---|
+| shipped | 175 s | 17.4 | 262.6 | 964.8 | 57.5 / 59.5 / 63.0 | 101 / 779 / 1,724 | 99 / 100 |
+| graphs | 181 s | 125.0 (7.2x) | 860.5 (3.3x) | 1,654.9 (1.7x) | 7.8 / 17.2 / 35.6 | 100 / 732 / 1,601 | 98 / 100 |
+
+- Both variants served with 0 failed requests. The ERROR lines at the end of shipped's server.log are the harness's
+  shutdown (SIGTERM at 07:39:27, after quality_done), not a fault.
+- Every GSM8K reply reached an answer in both variants (0 empty, 0 at the token cap), so here the scores are a real
+  correctness check: 99 vs 98 of 100 is within noise.
+- Prefix caching was on in graphs: the log shows `enable_prefix_caching=True` and Mamba cache mode 'align'. The
+  benchmark's random prompts do not reuse prefixes, so its gain on repeated prompts is not in these numbers.
+- With no `--max-model-len`, vLLM took 262,144 and reported 60.6x maximum concurrency at that length, so the missing
+  `MAX_CONTEXT` does not stop this entry from booting on 2x 96 GB.
+- Eager mode costs more here than on entry 4: 57.5 ms per token for one user versus 7.8 ms with CUDA graphs.
 
 ## Reading the results
 

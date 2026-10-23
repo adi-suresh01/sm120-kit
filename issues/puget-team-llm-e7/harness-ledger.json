@@ -1,0 +1,25 @@
+{
+  "issue": "puget-team-llm-e7",
+  "budget": {
+    "usd": 5.7,
+    "approved_at": "2026-10-23T07:19:53Z",
+    "note": "Aditya approved 2026-10-23: 2x RTX PRO 6000 WS secure $5.18/hr x 1.0h, worst case $5.70; Team LLM v1.1.0 entry 7 shipped vs graphs, NCCL defaults (part of $17 for 3 runs)"
+  },
+  "pods": [
+    {
+      "name": "sm120-puget-team-llm-e7-3a6e58",
+      "id": "epdl4xd9b0saxq",
+      "state": "terminated",
+      "gpu": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+      "count": 2,
+      "cloud": "SECURE",
+      "rate_usd_hr": 5.18,
+      "reserved_usd": 5.698,
+      "reserved_at": "2026-10-23T07:20:03Z",
+      "deadline": "2026-10-23T08:20:03Z",
+      "terminated_at": "2026-10-23T07:49:25Z",
+      "cost_usd": 2.5353222222222223,
+      "cost_source": "estimate"
+    }
+  ]
+}
