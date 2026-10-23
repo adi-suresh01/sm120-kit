@@ -1,0 +1,86 @@
+issue = "aws-g7e-sample"
+# AWS's g7e benchmark notebook (github.com/aws-samples/sagemaker-genai-hosting-examples @ 63f05821, 2026-10-21,
+# 03-features/instances/g7e/g7e_inference_benchmark.ipynb, unchanged since 59c4be3e on 2026-04-16): Qwen3-32B in BF16
+# on ml.g7e.2xlarge, one RTX PRO 6000 Server Edition, in the AWS vLLM 0.15.1 container. Its flags on that container,
+# on vLLM 0.32.0, and on 0.32.0 with Qwen's FP8 checkpoint, all on one pod. Setup 20-32 min (9.3 GB image from public
+# ECR, untimed on RunPod; the 0.32.0 venv, about 5 min; 100 GB of weights, 17 min at setup.sh's 100 MB/s floor); each
+# variant boots (load, compile, graph capture), runs GSM8K 100 and three benchmark points, about 8-12 min. 1.25 h left
+# under 5 min of margin for a host at the floor, so 1.5.
+planned_hours = 1.5
+
+[pod]
+# The notebook's image (cell 2), 763104351884.dkr.ecr.<region>.amazonaws.com/vllm:0.15.1-gpu-py312-cu129-ubuntu22.04-
+# sagemaker, from AWS's public mirror of the same tag; this digest's build is dated 2026-02-06. AWS builds it FROM
+# vllm/vllm-openai:v0.15.1 and deletes the CUDA forward-compat ld.so entry that image adds.
+image = "public.ecr.aws/deep-learning-containers/vllm:0.15.1-gpu-py312-cu129-ubuntu22.04-sagemaker@sha256:4b29ac7606cfd3cca576d8a92328cf615eac660bfedeff0a0392b9763e9c0bb5"
+count = 1
+# CUDA 12.9.1 in the image, and the cu129 build of 0.32.0 in the venv.
+min_cuda = "12.9"
+# 100 GB of safetensors (65.5 GB BF16, 34.3 GB FP8) and the 0.32.0 venv with FlashInfer's kernels (about 15 GB) on
+# container disk, plus the xet chunk cache and vLLM's compile caches; the image layers do not count against it.
+container_disk_gb = 160
+volume_gb = 20
+needs_hf_token = false
+# EUR-IS-2 reached HF at 15 MB/s on 10-16; US-NC-1 handed out GPUs another process held on 10-17; US-NE-1 took 30 min
+# to pull an image on 10-19.
+avoid_data_centers = ["EUR-IS-2", "US-NC-1", "US-NE-1"]
+# The card ml.g7e instances carry; the Workstation Edition runs the same silicon at a higher power cap.
+gpus = [
+  { id = "NVIDIA RTX PRO 6000 Blackwell Server Edition", cloud = "SECURE" },
+]
+
+[server]
+package = "vllm"
+model = "Qwen/Qwen3-32B"
+# The image's SageMaker entrypoint (scripts/vllm/sagemaker_entrypoint.sh in aws/deep-learning-containers @ a226b9bf,
+# the 0.15.1 update this image was built from) turns each SM_VLLM_* variable of the notebook's g7e config (cell 4)
+# into a flag, an empty value into a bare switch, and runs `python3 -m vllm.entrypoints.openai.api_server` on port
+# 8080. api_server.sh runs that module under the Python a variant names. --model and --revision (ours) go with each
+# variant, since fp8 serves another checkpoint.
+launch = ["bash", "/workspace/sm120-kit/issues/aws-g7e-sample/api_server.sh"]
+base_flags = [
+  "--tensor-parallel-size", "1",
+  "--dtype", "bfloat16",
+  "--max-model-len", "4096",
+  "--enable-prefix-caching",
+  "--enable-chunked-prefill",
+  "--max-num-seqs", "64",
+  "--gpu-memory-utilization", "0.9",
+  "--max-num-batched-tokens", "8192",
+  # Ours: the notebook sends enable_thinking false in every request (cell 11), which the harness's GSM8K client
+  # cannot; the benchmark's /v1/completions requests never go through a chat template.
+  "--default-chat-template-kwargs", '{"enable_thinking": false}',
+]
+port = 8080
+fail_pattern = "illegal memory access|cudaErrorIllegalAddress|CUDA error: |EngineCore failed|Engine core initialization failed"
+boot_timeout_s = 900
+
+# As shipped: the image's own vLLM 0.15.1. The notebook sweeps 1-32 concurrent clients with about 1,000 tokens in
+# and 600 out, so the benchmark points stop at 32.
+[variants.shipped]
+flags = ["--model", "Qwen/Qwen3-32B", "--revision", "9216db5781bf21249d130ec9da846c4624c16137"]
+[variants.shipped.quality]
+gsm8k = 100
+bench = [[1, 8], [8, 32], [32, 128]]
+
+# The same flags and weights on vLLM 0.32.0, the current release (setup.sh's venv).
+[variants.current]
+flags = ["--model", "Qwen/Qwen3-32B", "--revision", "9216db5781bf21249d130ec9da846c4624c16137"]
+env = { VLLM_PYTHON = "/root/vllm-0.32.0/bin/python" }
+[variants.current.quality]
+gsm8k = 100
+bench = [[1, 8], [8, 32], [32, 128]]
+
+# vLLM 0.32.0 with Qwen's own FP8 checkpoint (block-wise FP8 weights, half the bytes to read per token), served under
+# the BF16 checkpoint's name so the smoke test, GSM8K and the benchmark address it unchanged; the two repos ship the
+# same tokenizer, which the benchmark loads from server.model.
+[variants.fp8]
+flags = [
+  "--model", "Qwen/Qwen3-32B-FP8",
+  "--revision", "aa55da1ecc13d006e8b8e4f54579b1ea8c3db2df",
+  "--served-model-name", "Qwen/Qwen3-32B",
+]
+env = { VLLM_PYTHON = "/root/vllm-0.32.0/bin/python" }
+[variants.fp8.quality]
+gsm8k = 100
+bench = [[1, 8], [8, 32], [32, 128]]
