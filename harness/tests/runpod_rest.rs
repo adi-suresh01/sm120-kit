@@ -480,14 +480,17 @@ fn delete_succeeds_on_204_and_on_404() {
 #[test]
 fn the_account_is_the_organization_id_or_unknown() {
     let forbidden = r#"{"title":"Forbidden","status":403,"detail":"access denied"}"#;
+    let not_enabled = r#"{"title":"Bad Request","status":400,"detail":"Organizations are not enabled for this user"}"#;
     let server = FixtureServer::start(vec![
         Step::Reply(200, r#"{"id": "org_id_abc_123", "name": "my-org"}"#),
         Step::Reply(403, forbidden),
         Step::Reply(404, NOT_FOUND),
+        Step::Reply(400, not_enabled),
     ]);
     let clock = FakeClock::at("2026-10-16T17:03:00Z");
     let api = RunpodRest::new(&server.base, "k", &clock);
     assert_eq!(api.account().unwrap().as_deref(), Some("org_id_abc_123"));
+    assert_eq!(api.account().unwrap(), None);
     assert_eq!(api.account().unwrap(), None);
     assert_eq!(api.account().unwrap(), None);
     let seen = server.seen();

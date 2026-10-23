@@ -659,12 +659,13 @@ impl Cloud for RunpodRest<'_> {
         Ok((!page.records.is_empty()).then_some(page.metadata.totals.total_amount))
     }
 
-    /// The OpenAPI spec answers 404 for a caller outside any organization and 403 for a key without
-    /// `membership:read`; both mean the account cannot be fingerprinted, not that something failed.
+    /// A caller outside any organization gets 404 per the OpenAPI spec, and since 2026-10-22 also 400 "Organizations
+    /// are not enabled for this user"; a key without `membership:read` gets 403, and a rejected key 401. Each means the
+    /// account cannot be fingerprinted, not that something failed.
     fn account(&self) -> Result<Option<String>, CloudError> {
         match self.get_json::<Organization>("/v2/organization", &[]) {
             Ok(org) => Ok(Some(org.id)),
-            Err(e) if matches!(e.status(), Some(401 | 403 | 404)) => Ok(None),
+            Err(e) if matches!(e.status(), Some(400 | 401 | 403 | 404)) => Ok(None),
             Err(e) => Err(e),
         }
     }
