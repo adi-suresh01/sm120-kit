@@ -27,7 +27,25 @@ prefill graph capture.
 
 ## Cost
 
-Quoted before the run; see `harness budget show sglang-44291-stack` for the actual cost.
+`harness quote` on 2026-10-23: 2x RTX PRO 6000 Server Edition, secure, $4.98/hr, 1.0 h planned, $5.48 worst case.
+Actual $2.06 (estimate): $0.42 for a first pod that landed on a proxy-only host and was ended before setup, $1.64
+for the run.
+
+## Results (2026-10-23)
+
+Pod sm120-sglang-44291-stack-12e9af: 2x RTX PRO 6000 Blackwell Server Edition, secure. Image reports sglang
+`0.0.0.dev1+gc1c287a42` (commit c1c287a42928), sglang-kernel 0.4.10, FlashInfer 0.7.2, torch 2.14.1+cu130.
+
+| Variant | Verdict | Boot | GSM8K | Accept length | Output tok/s c=1 / 16 / 64 | TPOT ms c=1 / 16 / 64 | TTFT ms c=1 / 16 / 64 |
+|---|---|---|---|---|---|---|---|
+| nightly-nextn | OK | 257 s | 0.995 (n=200) | 2.94 | 187.5 / 820.3 / 1,477.8 | 5.15 / 14.91 / 24.84 | 98 / 371 / 7,851 |
+| nightly-nospec | OK | 131 s | 0.98 (n=50) | - | - | - | - |
+
+- The reporter's EP2 + NEXTN config serves on the stock nightly with no patches: 9 concurrent smoke requests, the
+  GSM8K run and all 328 benchmark requests completed, and no fault pattern appears in either server log. Stage 2's
+  A1 crashed in draft prefill graph capture on main without #44480.
+- c=64's 7.9 s mean TTFT is queueing: 256 prompts at concurrency 64, with TPOT at 24.8 ms.
+- See "Reading the results" before comparing these numbers with stage 2.
 
 ## Reading the results
 

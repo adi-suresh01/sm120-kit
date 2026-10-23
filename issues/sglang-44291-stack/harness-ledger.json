@@ -1,0 +1,40 @@
+{
+  "issue": "sglang-44291-stack",
+  "budget": {
+    "usd": 5.48,
+    "approved_at": "2026-10-23T07:19:53Z",
+    "note": "Aditya approved 2026-10-23: 2x RTX PRO 6000 SE secure $4.98/hr x 1.0h, worst case $5.48; #44291 EP2+NEXTN rerun on nightly-dev-cu13-20261021-c1c287a4, no patches (part of $17 for 3 runs)"
+  },
+  "pods": [
+    {
+      "name": "sm120-sglang-44291-stack-a26754",
+      "id": "89c8ez81cqe2qu",
+      "state": "terminated",
+      "gpu": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+      "count": 2,
+      "cloud": "SECURE",
+      "rate_usd_hr": 4.98,
+      "reserved_usd": 5.478000000000001,
+      "reserved_at": "2026-10-23T07:20:05Z",
+      "deadline": "2026-10-23T08:20:05Z",
+      "terminated_at": "2026-10-23T07:25:05Z",
+      "cost_usd": 0.415,
+      "cost_source": "estimate"
+    },
+    {
+      "name": "sm120-sglang-44291-stack-12e9af",
+      "id": "u8edkcfvna75rz",
+      "state": "terminated",
+      "gpu": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+      "count": 2,
+      "cloud": "SECURE",
+      "rate_usd_hr": 4.98,
+      "reserved_usd": 5.064106666666667,
+      "reserved_at": "2026-10-23T07:25:34Z",
+      "deadline": "2026-10-23T08:21:02Z",
+      "terminated_at": "2026-10-23T07:45:23Z",
+      "cost_usd": 1.6447833333333335,
+      "cost_source": "estimate"
+    }
+  ]
+}
