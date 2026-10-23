@@ -1,0 +1,61 @@
+issue = "puget-team-llm-e7"
+# Puget Systems' Team LLM pack v1.1.0 (github.com/Puget-Systems/puget-docker-app-packs @ fed0505e, 2026-10-22) on 2x
+# PCIe RTX PRO 6000, menu entry 7: the other 80 GB+ entry that ships eager mode, after entry 4 in puget-team-llm.
+# Setup about 14 min (image, 80 GB of weights to container disk); each variant boots (load, compile, graph capture),
+# runs GSM8K 100 and three benchmark points. Entry 4 took 37 min from reserve to terminate for three variants.
+planned_hours = 1.0
+
+[pod]
+# The menu writes the floating `nightly` tag for this entry. Pinned to the same 10-19 build as entry 4, so the two
+# entries' numbers in the PR come from one image.
+image = "vllm/vllm-openai:nightly-e68efc685ab1e6f1eda004ced7157e3ca411da2f@sha256:1ff6716fe240a922d0d518b8884261e25b0c02eda8e2ce90888e364978249cad"
+count = 2
+min_cuda = "13.0"
+# The image plus 80 GB of weights, which setup.sh keeps on container disk: /workspace is a FUSE mount on secure pods.
+container_disk_gb = 150
+volume_gb = 20
+needs_hf_token = false
+# EUR-IS-2 reached HF at 15 MB/s on 10-16; US-NC-1 handed out GPUs another process held on 10-17; US-NE-1 took 30 min
+# to pull an image on 10-19.
+avoid_data_centers = ["EUR-IS-2", "US-NC-1", "US-NE-1"]
+# Puget ships the Workstation Edition; the Server Edition runs the same sm_120 silicon at a lower clock and power cap.
+gpus = [
+  { id = "NVIDIA RTX PRO 6000 Blackwell Workstation Edition", cloud = "SECURE" },
+  { id = "NVIDIA RTX PRO 6000 Blackwell Server Edition", cloud = "SECURE" },
+]
+
+[server]
+package = "vllm"
+model = "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4"
+# The pack's own entrypoint and flags (packs/team_llm/docker-compose.yml, scripts/lib/vllm_menu_nvidia.sh entry 7, and
+# the .env init.sh writes for a 2-GPU box: no MAX_CONTEXT, so vLLM takes the model's own length, and 0.90 memory
+# utilization from the menu's weights-to-VRAM heuristic). --revision is ours, so every variant loads the same weights.
+launch = ["python3", "-m", "vllm.entrypoints.openai.api_server", "--model=nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4"]
+base_flags = [
+  "--revision", "ff433f5493e25d631c9f12b5d55c674229923d02",
+  "--tensor-parallel-size=2",
+  "--gpu-memory-utilization=0.90",
+  "--max-num-seqs=256",
+  "--dtype=auto",
+  "--trust-remote-code",
+  "--reasoning-parser", "qwen3",
+  "--enable-auto-tool-choice", "--tool-call-parser", "qwen3_coder",
+]
+port = 8000
+fail_pattern = "illegal memory access|cudaErrorIllegalAddress|CUDA error: |EngineCore failed|Engine core initialization failed"
+boot_timeout_s = 1500
+
+# As shipped: eager mode, no prefix caching, custom all-reduce off. NCCL keeps its defaults: init.sh writes
+# NCCL_P2P_DISABLE=1 to .env, but the NVIDIA compose files never pass it into the container.
+[variants.shipped]
+flags = ["--disable-custom-all-reduce", "--enforce-eager", "--no-enable-prefix-caching"]
+[variants.shipped.quality]
+gsm8k = 100
+bench = [[1, 8], [16, 64], [64, 256]]
+
+# CUDA graphs and prefix caching back on; all-reduce settings as shipped. The one change the PR would make.
+[variants.graphs]
+flags = ["--disable-custom-all-reduce"]
+[variants.graphs.quality]
+gsm8k = 100
+bench = [[1, 8], [16, 64], [64, 256]]
