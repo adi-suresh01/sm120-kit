@@ -3,7 +3,8 @@ issue = "puget-team-llm"
 # fix/installer-docker-restart-intel-check @ ef329d2) on 2x PCIe RTX PRO 6000, menu entry 4, its recommended model for
 # 80 GB+ of VRAM. Setup about 12 min (image, 80 GB of weights to container disk); each variant boots (load, compile,
 # graph capture), runs GSM8K 100 and three benchmark points, about 20 min in eager mode.
-planned_hours = 1.5
+# 1.5 h for the 10-19 run of three variants; the 10-23 recheck runs two.
+planned_hours = 1.0
 
 [pod]
 # The tag the pack's NVIDIA menu writes for this entry is the floating `nightly`; this is what it pointed at on 10-19.
@@ -65,5 +66,20 @@ bench = [[1, 8], [16, 64], [64, 256]]
 [variants.graphs-p2p]
 env = { NCCL_P2P_DISABLE = "0" }
 [variants.graphs-p2p.quality]
+gsm8k = 100
+bench = [[1, 8], [16, 64], [64, 256]]
+
+# Recheck added 2026-10-23: init.sh writes NCCL_P2P_DISABLE=1 to .env, but the NVIDIA compose files never pass it into
+# the container, so installs run with NCCL's defaults. These two are shipped and graphs as the pack really runs them;
+# run them by name (`harness run puget-team-llm installed graphs-installed`).
+[variants.installed]
+flags = ["--disable-custom-all-reduce", "--enforce-eager", "--no-enable-prefix-caching"]
+[variants.installed.quality]
+gsm8k = 100
+bench = [[1, 8], [16, 64], [64, 256]]
+
+[variants.graphs-installed]
+flags = ["--disable-custom-all-reduce"]
+[variants.graphs-installed.quality]
 gsm8k = 100
 bench = [[1, 8], [16, 64], [64, 256]]

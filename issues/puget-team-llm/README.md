@@ -4,8 +4,9 @@
 "Team LLM" server for Puget workstations. Read at `fix/installer-docker-restart-intel-check` @ `ef329d2` (open PR
 #7, 2026-10-14). Its NVIDIA path, for every model:
 
-- `--disable-custom-all-reduce` in `packs/team_llm/docker-compose.yml`, and `NCCL_P2P_DISABLE=1` written to `.env`
-  by `packs/team_llm/init.sh`, so tensor-parallel all-reduce on a multi-GPU box never uses GPU peer-to-peer.
+- `--disable-custom-all-reduce` in `packs/team_llm/docker-compose.yml`. `packs/team_llm/init.sh` also writes
+  `NCCL_P2P_DISABLE=1` to `.env`, but the NVIDIA compose never passes it into the container (corrected 2026-10-23,
+  see below), so installs keep NCCL's peer-to-peer default.
 - `--enforce-eager --no-enable-prefix-caching` ("Common flags for MoE/nightly models that need eager mode") on menu
   entries 1-4 and 6-8, so those run without CUDA graphs and without prefix caching, on a server meant for many
   users at once.
@@ -64,3 +65,17 @@ Output tok/s from `vllm bench serve` (random 1024 in / 512 out), mean TTFT / TPO
   needs reasoning-aware stops before GSM8K means anything on thinking models.
 - Not covered: the other menu entries, 4-GPU and Max-Q boxes, the `latest` (v0.32.0) tag, and prefix caching's gain
   on repeated prompts.
+
+## Correction (2026-10-23)
+
+The 10-19 shipped and graphs variants ran with `NCCL_P2P_DISABLE=1`, read as part of the pack's config. It is not:
+`init.sh` writes it to `.env`, but `docker-compose.yml` has no `env_file:` and its `environment:` lists only the proxy
+and HF variables, and `docker-compose.nvidia.yml` adds none (only `docker-compose.amd-vllm.yml` passes it). So on
+NVIDIA the pack runs with NCCL's defaults, P2P allowed. What that changes:
+
+- shipped was not the exact shipped config, so 29.2 tok/s is not "as installed" and 4.2x is eager vs graphs with P2P
+  off on both sides, not shipped vs tuned.
+- graphs-p2p's +13% / +9% mixes two changes, custom all-reduce and NCCL P2P; the pack already gets the second.
+
+The `installed` and `graphs-installed` variants rerun both with NCCL's defaults. Until they run, quote the 10-19
+numbers only as eager vs graphs at TP2 with P2P off.
