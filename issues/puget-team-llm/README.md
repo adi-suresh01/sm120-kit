@@ -77,5 +77,25 @@ NVIDIA the pack runs with NCCL's defaults, P2P allowed. What that changes:
   off on both sides, not shipped vs tuned.
 - graphs-p2p's +13% / +9% mixes two changes, custom all-reduce and NCCL P2P; the pack already gets the second.
 
-The `installed` and `graphs-installed` variants rerun both with NCCL's defaults. Until they run, quote the 10-19
-numbers only as eager vs graphs at TP2 with P2P off.
+The `installed` and `graphs-installed` variants rerun both with NCCL's defaults.
+
+### Recheck results (2026-10-23): inconclusive, the host differs
+
+Pod sm120-puget-team-llm-ebb837: 2x RTX PRO 6000 Blackwell Workstation Edition, secure, same image. Unlike the
+entry 7 pod run the same hour (PCIe Gen 5, GPUs on different NUMA nodes, `SYS`), this host reports PCIe Gen 4 x16 as
+the link maximum, both GPUs behind one PCIe switch (`PIX`), and cgroup v1. vLLM chose PYNCCL for all-reduce in both
+variants. Cost $3.54 (estimate).
+
+| Variant | Boot | c=1 | c=16 | c=64 | TPOT c=1 / 16 / 64 | TTFT c=1 / 16 / 64 | GSM8K, answered replies correct |
+|---|---|---|---|---|---|---|---|
+| installed | 146 s | 26.7 | 355.8 | 620.3 | 37.1 / 41.1 / 93.9 | 224 / 2,019 / 4,799 | 48 / 48 |
+| graphs-installed | 135 s | 73.4 (2.7x) | 372.7 (1.05x) | 651.1 (1.05x) | 13.2 / 39.3 / 90.8 | 228 / 1,877 / 3,899 | 46 / 46 |
+
+- Both served with 0 failed requests; the ERROR lines at the end of each server.log are the harness's shutdown.
+- Against 10-19, eager at one user is about the same (37.1 vs 34.2 ms per token), but everything that leans on
+  all-reduce is about 2x slower: graphs at one user 13.2 vs 8.0 ms, and both variants at 64 users 91-94 vs 35-42 ms.
+  That fits a slow GPU-to-GPU path on this host with NCCL free to use P2P across the switch, but nothing here
+  measured the path, and the 10-19 pod's topology was not recorded, so the cause is not established.
+- Conclusion for now: eager costs single-user throughput on every host tested (2.7x here, 4.2x on 10-19 with P2P
+  off, 7.2x for entry 7), but the size depends on the host, and the "as installed" multi-user numbers for entry 4
+  need a run that measures P2P on and off on one host, with an all-reduce bandwidth check, before they are quoted.
