@@ -181,3 +181,36 @@ two-variant kit was quoted at 1.0 h, $5.70; the soak and the 1-GPU pair add the 
 - `preserve_thinking` only changes how earlier assistant turns are rendered. GSM8K sends one user turn and the
   benchmarks use the completions endpoint, so neither exercises it; it is in the command line because the pack ships
   it.
+
+## Results (2026-10-24)
+
+One pod, 2x RTX PRO 6000 Blackwell Workstation Edition, EU-CZ-1, driver 595.91.07, GPUs on different NUMA nodes
+(`SYS`), CUDA peer access both ways. `NCCL_P2P_DISABLE` absent from every server process, as installed. SM clocks held
+2.80-2.85 GHz median under load in every variant. All-reduce ran on PYNCCL; `enable_prefix_caching=True` appears in
+graphs' server.log and not in shipped's. Cost $4.94 of the $11.40 budget.
+
+Output tok/s, random 1024-token prompts, 512 output tokens (mean TPOT in ms in brackets):
+
+| Variant | 1 user | 16 users | 64 users | boot |
+|---|---|---|---|---|
+| shipped (TP2, eager, no prefix caching) | 35.6 (28.1) | 526.9 (29.8) | 1,941.9 (31.5) | 100 s |
+| graphs (TP2) | 223.0 (4.4) | 1,983.8 (7.5) | 4,081.6 (14.4) | 105 s |
+| gain | 6.3x | 3.8x | 2.1x | |
+| tp1-shipped (1 GPU) | 38.6 (25.8) | 568.6 (27.5) | 2,065.1 (29.6) | 55 s |
+| tp1-graphs (1 GPU) | 209.3 (4.7) | 1,541.2 (9.8) | 3,032.3 (20.0) | 95 s |
+| gain | 5.4x | 2.7x | 1.5x | |
+
+- Sustained load: soak-graphs ran 19 rounds in 25 min at concurrency 64, 4,864/4,864 requests completed, output
+  3,725-3,750 tok/s and mean TPOT 15.8-16.0 ms in every round, with no drift. The vllm#54331 failure mode did not
+  appear on this build; soak-shipped was not needed.
+- One GPU, memory: graphs plus prefix caching cost 0.96 GiB of graph pool (0.66 + 0.30) and 3.3% of the KV cache:
+  3,019,898 tokens vs 3,123,882 (11.5x vs 11.9x concurrency at 262144). On two GPUs: 7,213,154 vs 7,470,063 tokens
+  (-3.4%), 1.2 GiB of graph pool per GPU.
+- One GPU, startup: 95 s vs 55 s to `/health`; engine init 57 s vs 18 s, of which torch.compile 13 s on a cold cache
+  (a real install compiles once and reuses the cache).
+- Eager on one GPU is slightly faster than eager on two at every load: without graphs the CPU launch path, not the
+  GPUs, is the limit, so the second GPU's all-reduce only adds cost.
+- GSM8K is not usable from this run: the client's server-side stop on "Question:" ended 67-72 of 100 replies inside
+  the reasoning ("- **Question:**"), so content was empty. Every reply that reached an answer was correct in all four
+  variants (28/28, 32/33, 31/31, 29/29; the one miss in graphs hit max_tokens). The client now scores only the text
+  before "Question:" instead of stopping there (`harness/pod/gsm8k_chat.py`); a clean GSM8K pair needs a rerun.
