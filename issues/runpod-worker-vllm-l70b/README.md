@@ -95,3 +95,19 @@ fallback), 1.25 h planned, $3.42 worst case. Setup 8-17 min, then about 40 min o
 - Each boot of the failing pair costs the user a 68 GB load; worker-default-band's plus worker-fallback-band's
   `boot_s` is what a cold start in the band waits before the first token.
 - Numbers for an upstream comment come from these runs, not from the expectations above.
+
+## Results (2026-10-24)
+
+One pod, 1x RTX PRO 6000 Blackwell Server Edition, EUR-NO-1. Cost $1.69 of the $3.42 budget.
+
+| Variant | 1 | 8 | 30 concurrent | GSM8K (n=50) | boot |
+|---|---|---|---|---|---|
+| worker-default (Hub defaults, graphs) | 19.2 | 140.4 | 412.8 | 49/50 | 210 s |
+| worker-fallback (`ENFORCE_EAGER`, 8192 batched tokens) | 19.1 | 137.2 | 399.4 | 50/50 | 45 s |
+| graphs-fit (`MAX_NUM_SEQS=32`) | 19.2 | 140.3 | 412.4 | 48/50 | 90 s |
+
+- On a 70B FP8 model the relaunch costs almost nothing (0-3%): decode is bound by the GPU, not by kernel launches.
+  The 8B model on the 5090 lost 1.5-2.0x to the same relaunch, so its cost depends on the model, not the worker.
+- Band (63,680 tokens): worker-default-band failed with the shortfall the worker matches (relaunch); the fallback and
+  graphs-fit both served it.
+- graphs-fit again matched the default's throughput and booted in 90 s instead of 210 s.

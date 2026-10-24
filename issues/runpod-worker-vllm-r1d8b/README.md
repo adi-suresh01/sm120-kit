@@ -152,3 +152,28 @@ then about 30 min of variants.
   graph estimate (see the l70b kit).
 - A 5090 host's free memory at start (in the setup log) moves every N; compare N across variants of one pod only.
 - Numbers for an upstream comment come from these runs, not from the expectations above.
+
+## Results (2026-10-24)
+
+One pod, 1x RTX 5090 (secure), EU-CZ-1. Cost $0.73 of the $1.31 budget.
+
+| Variant | 1 | 8 | 30 concurrent | GSM8K (n=50) | boot |
+|---|---|---|---|---|---|
+| worker-default (Hub defaults, graphs) | 97.7 | 619.6 | 1,661.0 | 32/50 | 251 s |
+| worker-fallback (`ENFORCE_EAGER`, 8192 batched tokens) | 49.2 | 383.2 | 1,134.5 | 28/50 | 55 s |
+| graphs-fit (`MAX_NUM_SEQS=32`) | 98.0 | 620.5 | 1,657.8 | 30/50 | 80 s |
+
+- The relaunch costs 2.0x at one request, 1.6x at 8 and 1.5x at the worker's 30-request cap, and nothing in the
+  responses says it happened.
+- With the Hub's `auto` context, vLLM fit 106,784 tokens (KV cache 13.04 GiB, 1.00x concurrency at that length).
+- Band (108,440 tokens, between what the default and the fallback fit): worker-default-band failed with the KV cache
+  shortfall the worker matches, and the worker's own `startup_errors.py` says it would relaunch with eager.
+  worker-fallback-band served. graphs-fit-band also served the same length with graphs on, so dropping
+  `MAX_NUM_SEQS` from 256 to 32, still above the worker's 30-request cap, keeps the context without losing graphs.
+- graphs-fit matched the default's throughput at every tested concurrency and booted in 80 s instead of 251 s:
+  capturing graphs for 256 sequences took 158 s of the default's boot, which a serverless cold start pays every time.
+- auto-no-room: vLLM raised "Cannot auto-fit max_model_len: not enough GPU memory available to serve even a single
+  token". `startup_errors.py` does not match it, so the worker exits 1 and the platform restarts it on the same
+  config. The restart loop itself was not observed (no endpoint was deployed).
+- GSM8K ran on the client with the server-side "Question:" stop (fixed after this run in 96177e0); all replies
+  answered, and the three scores are inside each other's sampling error at n=50.

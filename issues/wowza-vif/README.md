@@ -118,3 +118,18 @@ is $2.49/hr ($2.05).
   is a host effect, not eager mode.
 - Prefix caching is off in both variants, as the entrypoint fixes it; the benchmark's random prompts share no
   prefixes anyway.
+
+## Results (2026-10-24)
+
+One pod, 1x RTX PRO 6000 Blackwell Workstation Edition, US-KS-2. `enforce_eager=True` in shipped's engine config and
+`False` in graphs'. Cost $0.74 of the $2.14 budget.
+
+| Variant | 1 user | 16 users | 64 users | GSM8K (n=100) | boot |
+|---|---|---|---|---|---|
+| shipped (`--enforce-eager`) | 38.9 | 611.1 | 1,783.6 | 91/100 | 170 s |
+| graphs | 108.8 | 1,028.9 | 2,130.9 | 94/100 | 160 s |
+| gain | 2.8x | 1.7x | 1.2x | | |
+
+Output tok/s, text only, random 1024-token prompts and 512 output tokens. GSM8K differs by 3 points, inside the
+sampling error at n=100, and every reply answered (no empty or capped replies). Graphs did not slow the boot. The
+video path the framework actually sends was not measured.
