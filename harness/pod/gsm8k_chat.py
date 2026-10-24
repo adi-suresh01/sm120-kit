@@ -4,8 +4,9 @@ client of its own (vLLM). quality.sh runs it on the server that just passed the 
 5-shot from the first 5 train examples, greedy, over the first <questions> test questions, scored on the last number
 in the reply against the number after "####" in the reference. The few-shot text is that of
 issues/vllm-47990/eval_offline.py, but the protocol differs: it goes as one user message through the server's chat
-template instead of as a raw prompt, it stops only on "Question:" (eval_offline.py also stops on three newlines), and
-max_tokens follows max_model_len (see max_tokens) instead of a fixed 512.
+template instead of as a raw prompt, it scores only the reply text before the first "Question:" rather than asking the
+server to stop there (eval_offline.py stops on that and on three newlines), and max_tokens follows max_model_len (see
+max_tokens) instead of a fixed 512.
 Each reply goes to <out_dir>/gsm8k_responses.jsonl as it lands, so a run cut short keeps what it got. Then a line of
 counts, and "Score: <accuracy>", the line verdict.sh also reads from sglang's run_eval. A request that timed out
 scores as a wrong answer; one that failed, or a run where every request timed out, fails with no Score line (see
@@ -160,6 +161,11 @@ def request_timeout(tokens):
     return float(os.environ.get("GSM8K_TIMEOUT_S", 600 + tokens / 4))
 
 
+def own_answer(text):
+    # A model that goes on to write the next few-shot question would otherwise be scored on that question's numbers.
+    return text.split("Question:", 1)[0]
+
+
 def last_number(text):
     found = re.findall(r"-?\d[\d,]*\.?\d*", text)
     if not found:
@@ -209,8 +215,9 @@ def main():
             "messages": [{"role": "user", "content": f"{shots}Question: {row['question']}\nAnswer:"}],
             "temperature": 0,
             "max_tokens": tokens,
-            # A model that goes on to write the next few-shot question would be scored on that question's numbers.
-            "stop": ["Question:"],
+            # No server-side stop on "Question:": vLLM matches stop strings against the reasoning too, and thinking
+            # models write "**Question:**" while planning, which ended 72 of 100 Qwen3.6 replies mid-thought with
+            # empty content. The guard it gave moved to own_answer.
         }
         started = time.monotonic()
         reply, error, tries = attempt(lambda: answer(base, body, timeout), transient)
@@ -231,7 +238,7 @@ def main():
         for future in concurrent.futures.as_completed(futures):
             index = futures[future]
             reply = future.result()
-            got = last_number(reply["response"] or "")
+            got = last_number(own_answer(reply["response"] or ""))
             want = last_number(test[index]["answer"].split("####")[-1])
             row = {
                 "index": index,
@@ -252,9 +259,9 @@ def main():
     counts = {
         "answered": len(answered),
         "correct": sum(row["correct"] for row in rows),
-        # Garbage reads as replies that ran to max_tokens, replies with no number, and requests that timed out. With
-        # the stop on "Question:" a healthy reply ends on its own, so running to max_tokens is the tell even when the
-        # last number before the garbage was right.
+        # Garbage reads as replies that ran to max_tokens, replies with no number, and requests that timed out. A
+        # healthy chat reply ends on the template's end-of-turn token, so running to max_tokens is the tell even when
+        # the last number before the garbage was right.
         "hit_max_tokens": sum(row["finish_reason"] == "length" for row in answered),
         "no_number": sum(row["parsed"] is None for row in answered),
         # Empty content is most often a reasoning model cut off mid-thought rather than garbage. It counts under
