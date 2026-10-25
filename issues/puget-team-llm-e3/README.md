@@ -171,3 +171,31 @@ two-variant kit was quoted at 1.0 h, $5.70; the soak and the 1-GPU pair add the 
 - Soak: `soak-graphs/soak.txt` has one line per round (requests completed, output tok/s, mean TPOT) and the totals;
   per-round tok/s and TPOT that drift across 25 minutes would point at a slow degradation even with no failure.
   `memory.jsonl` tracks container memory. A POST_FAIL has `soak_failure_tail.txt` and the verdict's `fault`.
+
+## Results (2026-10-25)
+
+Lean run under a $5.00 budget: shipped and graphs only. The 1-GPU pair and the soak were not run; the nearest soaked
+configuration is entry 1 (the same `Qwen3_5MoeForConditionalGeneration` architecture, 25 minutes clean at concurrency
+64).
+
+One pod, 2x RTX PRO 6000 Blackwell Workstation Edition, EU-CZ-1, driver 595.91.07, GPUs on different NUMA nodes
+(`SYS`), CUDA peer access both ways. Under load GPU 0 ran at PCIe Gen5 x8 (x16 maximum) and GPU 1 at x16; both
+variants ran on this same host, so the ratios hold. `NCCL_P2P_DISABLE` absent from both server processes. SM clocks
+held 2.82-2.83 GHz median under load. All-reduce ran on PYNCCL; graphs' server.log shows `enable_prefix_caching=True`
+and the Mamba 'align' line, shipped's does not. Cost $1.65 of the $5.00 budget.
+
+Output tok/s, random 1024-token prompts, 512 output tokens (mean TPOT in ms in brackets):
+
+| Variant | 1 user | 16 users | 64 users | boot |
+|---|---|---|---|---|
+| shipped (TP2, eager, no prefix caching) | 34.6 (28.8) | 519.4 (30.1) | 1,864.1 (32.7) | 80 s |
+| graphs (TP2) | 221.7 (4.4) | 1,940.5 (7.6) | 3,905.0 (14.9) | 90 s |
+| gain | 6.4x | 3.7x | 2.1x | |
+
+- GSM8K: every reply that finished was correct, 68 of 68 in both variants. 32 replies in each hit the client's
+  4096-token cap (31 and 30 still inside the reasoning, 1 and 2 cut mid-answer and scored wrong), 18 of them the same
+  questions in both. Finished replies ran 2,321 and 2,132 tokens at the median: this checkpoint reasons long, eager or
+  not. A larger cap would score more replies; it would not change the comparison.
+- Memory: graphs plus prefix caching cost 1.2 GiB of graph pool per GPU (0.89 + 0.31) and 3.5% of the KV cache:
+  7,324,303 tokens vs 7,589,692 (27.9x vs 29.0x concurrency at 262144).
+- Startup: 90 s vs 80 s to `/health`; engine init 52 s vs 32 s, of which torch.compile 13.5 s on a cold cache.

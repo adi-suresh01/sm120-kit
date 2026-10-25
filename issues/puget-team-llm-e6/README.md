@@ -186,3 +186,39 @@ two-variant kit was quoted at 1.0 h, $5.70; the soak and the 1-GPU pair add the 
   `memory.jsonl` tracks container memory. A POST_FAIL has `soak_failure_tail.txt` and the verdict's `fault`.
 - If shipped fails to boot, record the error as the finding and stop; like entry 7's, this checkpoint ships its own
   config code (`configuration_nemotron_h.py`), written for transformers 4.53 against the image's 5.19.
+
+## Results (2026-10-25)
+
+One pod, 2x RTX PRO 6000 Blackwell Workstation Edition, EU-CZ-1, driver 595.91.07, both GPUs on one NUMA node
+(`NODE`), PCIe Gen5 x16 under load, CUDA peer access both ways. `NCCL_P2P_DISABLE` absent from every server process,
+as installed; tp1-* ran with `CUDA_VISIBLE_DEVICES=0`. SM clocks held 2.77-2.82 GHz median under load in every variant.
+All-reduce ran on PYNCCL; graphs' server.log shows `enable_prefix_caching=True` and "Mamba cache mode is set to
+'align' for NemotronHForCausalLM", shipped's does not. The checkpoint's own config code loaded on the image's
+transformers in every variant. Cost $4.44 of the $11.40 budget.
+
+Output tok/s, random 1024-token prompts, 512 output tokens (mean TPOT in ms in brackets):
+
+| Variant | 1 user | 16 users | 64 users | boot |
+|---|---|---|---|---|
+| shipped (TP2, eager, no prefix caching) | 35.6 (28.0) | 556.3 (28.4) | 2,108.0 (29.5) | 106 s |
+| graphs (TP2) | 324.3 (3.0) | 2,492.1 (6.0) | 5,437.9 (10.9) | 106 s |
+| gain | 9.1x | 4.5x | 2.6x | |
+| tp1-shipped (1 GPU) | 38.1 (26.2) | 595.1 (26.6) | 2,141.0 (29.1) | 45 s |
+| tp1-graphs (1 GPU) | 306.3 (3.2) | 1,912.4 (8.0) | 3,886.1 (15.9) | 90 s |
+| gain | 8.0x | 3.2x | 1.8x | |
+
+- GSM8K: 100, 99, 99 and 98 of 100 correct (shipped, graphs, tp1-shipped, tp1-graphs), every reply answered, none
+  cut at the token cap.
+- Sustained load: soak-graphs ran 22 rounds in 25 min at concurrency 64, 5,632/5,632 requests completed, output
+  4,355-4,417 tok/s and mean TPOT 13.5-13.8 ms in every round, with no drift. Container anonymous memory was 9.4 GB at
+  mid-soak and 8.5 GB at the end. soak-shipped was not needed. This is a Mamba2 hybrid with prefix caching's 'align'
+  path in use for the whole soak, the model class vllm#54331 reports.
+- One GPU, memory: graphs plus prefix caching cost 1.80 GiB of graph pool (1.03 + 0.77) and 12.7% of the KV cache in
+  tokens: 18,814,948 vs 21,542,759 (71.8x vs 82.2x concurrency at 262144). Available KV memory fell only 1.5 GiB
+  (64.32 vs 65.79 GiB), so most of the token drop comes with prefix caching's cache layout for the Mamba layers, not
+  with graph memory. On two GPUs: 42,750,443 vs 48,887,899 tokens (-12.6%), 1.84 GiB of graph pool per GPU
+  (1.31 + 0.53). Either way the cache still holds over 70 full-length contexts per GPU.
+- One GPU, startup: 90 s vs 45 s to `/health`; engine init 63 s vs 21 s, of which torch.compile 8.0 s on a cold cache.
+  soak-graphs booted the 2-GPU configuration a second time on this pod with the caches warm (torch.compile 0.2 s, 126
+  FlashInfer autotune configs loaded from cache): engine init 19 s instead of 75 s, 50 s to `/health` instead of 106 s.
+- Largest gain of the five entries: 9.1x at one user on two GPUs, 8.0x on one.

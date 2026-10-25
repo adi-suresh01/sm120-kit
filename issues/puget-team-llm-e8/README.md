@@ -188,3 +188,27 @@ two-variant kit was quoted at 0.75 h, $4.27; the soak and the 1-GPU pair add the
 - Soak: `soak-graphs/soak.txt` has one line per round (requests completed, output tok/s, mean TPOT) and the totals;
   per-round tok/s and TPOT that drift across 10 minutes would point at a slow degradation even with no failure.
   `memory.jsonl` tracks container memory. A POST_FAIL has `soak_failure_tail.txt` and the verdict's `fault`.
+
+## Results (2026-10-25)
+
+Lean run under a $5.00 budget: shipped and graphs only. The 1-GPU pair and the soak were not run.
+
+One pod, 2x RTX PRO 6000 Blackwell Workstation Edition, EU-CZ-1, driver 595.91.07, GPUs on different NUMA nodes
+(`SYS`), CUDA peer access both ways. Under load GPU 0 ran at PCIe Gen5 x8 (x16 maximum) and GPU 1 at x16; both
+variants ran on this same host, so the ratios hold. `NCCL_P2P_DISABLE` absent from both server processes. SM clocks
+held 2.82-2.84 GHz median under load. All-reduce ran on PYNCCL; `enable_prefix_caching=True` in graphs' server.log,
+`False` in shipped's. Cost $1.00 of the $5.00 budget.
+
+Output tok/s, random 1024-token prompts, 512 output tokens (mean TPOT in ms in brackets):
+
+| Variant | 1 user | 16 users | 64 users | boot |
+|---|---|---|---|---|
+| shipped (TP2, eager, no prefix caching) | 47.6 (20.9) | 705.1 (21.8) | 2,452.1 (24.0) | 70 s |
+| graphs (TP2) | 227.3 (4.3) | 1,923.1 (7.5) | 3,495.0 (16.8) | 100 s |
+| gain | 4.8x | 2.7x | 1.4x | |
+
+- GSM8K: 98 of 100 correct in both variants, every reply answered, none cut at the token cap.
+- Memory: graphs plus prefix caching cost 0.83 GiB of graph pool per GPU (0.58 + 0.25) and 0.9% of the KV cache:
+  4,639,931 tokens vs 4,680,895 (17.7x vs 17.9x concurrency at 262144). With no hybrid state, that is graph capture
+  alone.
+- Startup: 100 s vs 70 s to `/health`; engine init 56 s vs 22 s, of which torch.compile 16.9 s on a cold cache.

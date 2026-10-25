@@ -214,3 +214,21 @@ Output tok/s, random 1024-token prompts, 512 output tokens (mean TPOT in ms in b
   the reasoning ("- **Question:**"), so content was empty. Every reply that reached an answer was correct in all four
   variants (28/28, 32/33, 31/31, 29/29; the one miss in graphs hit max_tokens). The client now scores only the text
   before "Question:" instead of stopping there (`harness/pod/gsm8k_chat.py`); a clean GSM8K pair needs a rerun.
+
+## Second run (2026-10-25): GSM8K with the fixed client
+
+shipped and graphs again, on a new pod with the fixed `gsm8k_chat.py`: 2x RTX PRO 6000 Blackwell Workstation Edition,
+EU-CZ-1, both GPUs on one NUMA node (`NODE`, `SYS` in the first run), PCIe Gen5 x16 under load, CUDA peer access both
+ways, SM clocks 2.84-2.85 GHz median under load. Cost $1.71; the entry's total is $6.65 of the $9.21 budget.
+
+| Variant | 1 user | 16 users | 64 users | boot |
+|---|---|---|---|---|
+| shipped (TP2, eager, no prefix caching) | 34.5 (28.9) | 508.5 (30.9) | 1,897.2 (32.4) | 105 s |
+| graphs (TP2) | 245.6 (4.0) | 2,138.7 (7.0) | 4,367.0 (13.5) | 110 s |
+| gain | 7.1x | 4.2x | 2.3x | |
+
+- GSM8K: 98 of 99 answered replies correct in shipped (1 reply hit the 4096-token cap with empty content), 99 of 100
+  in graphs. Graphs and prefix caching do not change this entry's answers.
+- Host to host: eager ran 2-4% slower than on the first pod, graphs 7-10% faster, so the gain moved from 6.3x / 3.8x
+  / 2.1x to 7.1x / 4.2x / 2.3x. The ratio is the figure to quote, with the range across the two hosts.
+- The TP1 rows, the soak and the memory figures above are from the first run.

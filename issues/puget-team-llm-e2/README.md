@@ -174,3 +174,36 @@ two-variant kit was quoted at 1.0 h, $5.70; the soak and the 1-GPU pair add the 
   `memory.jsonl` tracks container memory. A POST_FAIL has `soak_failure_tail.txt` and the verdict's `fault`.
 - A dense 27B decodes every weight per token, so expect lower tok/s than the 3B-active MoE entries at every
   concurrency, and longer soak rounds; the comparisons that matter are within each pair on this pod.
+
+## Results (2026-10-25)
+
+One pod, 2x RTX PRO 6000 Blackwell Workstation Edition, EU-CZ-1, driver 595.91.07, both GPUs on one NUMA node
+(`NODE`), PCIe Gen5 x16 under load, CUDA peer access both ways. `NCCL_P2P_DISABLE` absent from every server process,
+as installed; tp1-* ran with `CUDA_VISIBLE_DEVICES=0`. SM clocks held 2.75-2.82 GHz median under load in every variant.
+All-reduce ran on PYNCCL; graphs' server.log shows `enable_prefix_caching=True` and the Mamba 'align' line, shipped's
+does not. Cost $6.01 of the $12.82 budget.
+
+Output tok/s, random 1024-token prompts, 512 output tokens (mean TPOT in ms in brackets):
+
+| Variant | 1 user | 16 users | 64 users | boot |
+|---|---|---|---|---|
+| shipped (TP2, eager, no prefix caching) | 32.4 (30.7) | 445.1 (33.1) | 1,294.5 (42.5) | 80 s |
+| graphs (TP2) | 112.2 (8.7) | 1,112.6 (12.0) | 1,964.0 (28.0) | 100 s |
+| gain | 3.5x | 2.5x | 1.5x | |
+| tp1-shipped (1 GPU) | 35.2 (28.1) | 451.7 (30.5) | 1,111.3 (47.9) | 40 s |
+| tp1-graphs (1 GPU) | 75.9 (12.8) | 783.0 (16.2) | 1,346.4 (39.8) | 95 s |
+| gain | 2.2x | 1.7x | 1.2x | |
+
+- GSM8K: 98 of 99 answered replies correct in all four variants, with the same counts in each (1 reply hit the
+  4096-token cap with empty content).
+- Sustained load: soak-graphs ran 9 rounds in 26 min at concurrency 64, 2,304/2,304 requests completed, output
+  1,545-1,554 tok/s and mean TPOT 36.0-36.6 ms in every round, with no drift. Container anonymous memory was 10.8 GB
+  at mid-soak and 9.9 GB at the end. soak-shipped was not needed.
+- One GPU, memory: graphs plus prefix caching cost 0.92 GiB of graph pool (0.62 + 0.30) and 4.9% of the KV cache:
+  1,010,665 tokens vs 1,062,536 (3.86x vs 4.05x concurrency at 262144). On two GPUs: 2,356,069 vs 2,434,526 tokens
+  (-3.2%), 1.3 GiB of graph pool per GPU (0.99 + 0.31).
+- One GPU, startup: 95 s vs 40 s to `/health`; engine init 70 s vs 15 s, of which torch.compile 22.5 s on a cold
+  cache. soak-graphs booted the 2-GPU configuration a second time on this pod with the cache warm: torch.compile 0.4
+  s, engine init 39 s instead of 69 s, 70 s to `/health` instead of 100 s. That is the restart a real install sees.
+- The dense model gains least of the five: eager costs it 3.5x at one user on two GPUs, and at 64 users the GPUs are
+  closer to the limit than the CPU launch path, so graphs add 1.5x. On one GPU the gain is 2.2x / 1.7x / 1.2x.

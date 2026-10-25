@@ -1,0 +1,25 @@
+{
+  "issue": "puget-team-llm-e6",
+  "budget": {
+    "usd": 11.4,
+    "approved_at": "2026-10-24T23:18:13Z",
+    "note": "approved 2026-10-24 second round: full kit, worst case at planned_hours"
+  },
+  "pods": [
+    {
+      "name": "sm120-puget-team-llm-e6-5ecff0",
+      "id": "ibechme3c759cw",
+      "state": "terminated",
+      "gpu": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+      "count": 2,
+      "cloud": "SECURE",
+      "rate_usd_hr": 5.18,
+      "reserved_usd": 11.396,
+      "reserved_at": "2026-10-25T00:47:57Z",
+      "deadline": "2026-10-25T02:47:57Z",
+      "terminated_at": "2026-10-25T01:39:22Z",
+      "cost_usd": 4.438972222222222,
+      "cost_source": "estimate"
+    }
+  ]
+}

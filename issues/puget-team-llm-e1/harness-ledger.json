@@ -1,0 +1,40 @@
+{
+  "issue": "puget-team-llm-e1",
+  "budget": {
+    "usd": 9.21,
+    "approved_at": "2026-10-24T23:18:11Z",
+    "note": "approved 2026-10-24 second round: e1 GSM8K rerun (shipped + graphs) with the fixed scorer, ~0.75 h cap on top of round 1's 4.94"
+  },
+  "pods": [
+    {
+      "name": "sm120-puget-team-llm-e1-f5c427",
+      "id": "vqyilxenc2351o",
+      "state": "terminated",
+      "gpu": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+      "count": 2,
+      "cloud": "SECURE",
+      "rate_usd_hr": 5.18,
+      "reserved_usd": 11.396,
+      "reserved_at": "2026-10-24T10:01:03Z",
+      "deadline": "2026-10-24T12:01:03Z",
+      "terminated_at": "2026-10-24T10:58:14Z",
+      "cost_usd": 4.944993870216422,
+      "cost_source": "billing"
+    },
+    {
+      "name": "sm120-puget-team-llm-e1-bc4b65",
+      "id": "6oyxxexogbakyo",
+      "state": "terminated",
+      "gpu": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+      "count": 2,
+      "cloud": "SECURE",
+      "rate_usd_hr": 5.18,
+      "reserved_usd": 4.264003333333333,
+      "reserved_at": "2026-10-24T23:18:37Z",
+      "deadline": "2026-10-25T00:03:31Z",
+      "terminated_at": "2026-10-24T23:38:22Z",
+      "cost_usd": 1.7078988591674715,
+      "cost_source": "billing"
+    }
+  ]
+}
