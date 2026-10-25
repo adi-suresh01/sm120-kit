@@ -1,0 +1,25 @@
+{
+  "issue": "runpod-worker-vllm-r1d8b",
+  "budget": {
+    "usd": 1.31,
+    "approved_at": "2026-10-24T10:00:34Z",
+    "note": "approved 2026-10-24 first sweep round (e1 + wowza + runpod worker), worst case at planned_hours"
+  },
+  "pods": [
+    {
+      "name": "sm120-runpod-worker-vllm-r1d8b-589444",
+      "id": "a48spkccku569m",
+      "state": "terminated",
+      "gpu": "NVIDIA GeForce RTX 5090",
+      "count": 1,
+      "cloud": "SECURE",
+      "rate_usd_hr": 1.19,
+      "reserved_usd": 1.309,
+      "reserved_at": "2026-10-24T10:18:23Z",
+      "deadline": "2026-10-24T11:18:23Z",
+      "terminated_at": "2026-10-24T10:55:12Z",
+      "cost_usd": 0.7301972222222223,
+      "cost_source": "estimate"
+    }
+  ]
+}

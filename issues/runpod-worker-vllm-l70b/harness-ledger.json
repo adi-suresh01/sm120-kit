@@ -1,0 +1,25 @@
+{
+  "issue": "runpod-worker-vllm-l70b",
+  "budget": {
+    "usd": 3.42,
+    "approved_at": "2026-10-24T10:00:35Z",
+    "note": "approved 2026-10-24 first sweep round (e1 + wowza + runpod worker), worst case at planned_hours"
+  },
+  "pods": [
+    {
+      "name": "sm120-runpod-worker-vllm-l70b-ab22f5",
+      "id": "sj35ews54yujl2",
+      "state": "terminated",
+      "gpu": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+      "count": 1,
+      "cloud": "SECURE",
+      "rate_usd_hr": 2.49,
+      "reserved_usd": 3.419945833333334,
+      "reserved_at": "2026-10-24T10:55:15Z",
+      "deadline": "2026-10-24T12:10:10Z",
+      "terminated_at": "2026-10-24T11:35:54Z",
+      "cost_usd": 1.6869750000000001,
+      "cost_source": "estimate"
+    }
+  ]
+}

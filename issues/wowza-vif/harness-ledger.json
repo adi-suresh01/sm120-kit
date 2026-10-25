@@ -1,0 +1,25 @@
+{
+  "issue": "wowza-vif",
+  "budget": {
+    "usd": 2.14,
+    "approved_at": "2026-10-24T10:00:33Z",
+    "note": "approved 2026-10-24 first sweep round (e1 + wowza + runpod worker), worst case at planned_hours"
+  },
+  "pods": [
+    {
+      "name": "sm120-wowza-vif-330841",
+      "id": "pzbafwa2fdhohx",
+      "state": "terminated",
+      "gpu": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+      "count": 1,
+      "cloud": "SECURE",
+      "rate_usd_hr": 2.59,
+      "reserved_usd": 2.13675,
+      "reserved_at": "2026-10-24T10:01:05Z",
+      "deadline": "2026-10-24T10:46:05Z",
+      "terminated_at": "2026-10-24T10:18:20Z",
+      "cost_usd": 0.7446249999999999,
+      "cost_source": "estimate"
+    }
+  ]
+}
