@@ -192,16 +192,38 @@ pub fn plan_reservation(
     remaining_usd: f64,
     rate_usd_hr: f64,
 ) -> Result<Reservation> {
+    plan_reservation_with(now, planned_hours, remaining_usd, rate_usd_hr, 0.0)
+}
+
+/// As `plan_reservation`, holding `fixed_usd` on top of the hours, as a Vast box's downloads bill per TB whatever
+/// the time they take.
+pub fn plan_reservation_with(
+    now: Timestamp,
+    planned_hours: f64,
+    remaining_usd: f64,
+    rate_usd_hr: f64,
+    fixed_usd: f64,
+) -> Result<Reservation> {
     ensure!(
         rate_usd_hr > 0.0 && rate_usd_hr.is_finite(),
         "rate must be positive, got {rate_usd_hr}"
     );
-    let affordable_hours = remaining_usd.max(0.0) / (rate_usd_hr * MARGIN);
+    ensure!(
+        fixed_usd >= 0.0 && fixed_usd.is_finite(),
+        "a fixed charge must not be negative, got {fixed_usd}"
+    );
+    let affordable_hours = (remaining_usd - fixed_usd).max(0.0) / (rate_usd_hr * MARGIN);
     let seconds = (planned_hours.min(affordable_hours) * 3600.0).floor() as i64;
     let length = SignedDuration::from_secs(seconds);
+    let downloads = if fixed_usd > 0.0 {
+        format!(" after ${fixed_usd:.2} for downloads")
+    } else {
+        String::new()
+    };
     ensure!(
         length >= MIN_DEADLINE,
-        "${remaining_usd:.2} left buys {} min at ${rate_usd_hr:.2}/hr with the 10% margin; at least 15 min is needed",
+        "${remaining_usd:.2} left buys {} min at ${rate_usd_hr:.2}/hr with the 10% margin{downloads}; at least 15 min \
+         is needed",
         seconds / 60
     );
     let deadline = now
@@ -209,7 +231,7 @@ pub fn plan_reservation(
         .with_context(|| format!("a deadline {} min after {now} is out of range", seconds / 60))?;
     Ok(Reservation {
         deadline,
-        reserved_usd: rate_usd_hr * MARGIN * seconds as f64 / 3600.0,
+        reserved_usd: rate_usd_hr * MARGIN * seconds as f64 / 3600.0 + fixed_usd,
     })
 }
 
@@ -332,17 +354,20 @@ impl Ledger {
             count: offer.count,
             cloud: offer.cloud,
             rate_usd_hr: offer.rate_usd_hr,
+            fixed_usd: 0.0,
             placement: None,
         };
         self.reserve_terms(name, &terms, planned_hours, now)
     }
 
-    /// A Vast pod has no cloud tier; its entry records Vast's own split instead (`VastOffer::cloud`).
+    /// A Vast pod has no cloud tier; its entry records Vast's own split instead (`VastOffer::cloud`). The reservation
+    /// also holds `download_gb` at the host's price, which bills on top of the hourly rate.
     pub fn reserve_vast(
         &mut self,
         name: &str,
         offer: &VastOffer,
         planned_hours: f64,
+        download_gb: u32,
         now: Timestamp,
     ) -> Result<PodEntry> {
         let terms = Terms {
@@ -350,6 +375,7 @@ impl Ledger {
             count: offer.count,
             cloud: offer.cloud(),
             rate_usd_hr: offer.rate_usd_hr,
+            fixed_usd: offer.download_usd(download_gb),
             placement: Some(offer.placement()),
         };
         self.reserve_terms(name, &terms, planned_hours, now)
@@ -360,11 +386,12 @@ impl Ledger {
         name: &str,
         candidate: &Candidate,
         planned_hours: f64,
+        download_gb: u32,
         now: Timestamp,
     ) -> Result<PodEntry> {
         match candidate {
             Candidate::Runpod(offer) => self.reserve(name, offer, planned_hours, now),
-            Candidate::Vast { offer, .. } => self.reserve_vast(name, offer, planned_hours, now),
+            Candidate::Vast { offer, .. } => self.reserve_vast(name, offer, planned_hours, download_gb, now),
         }
     }
 
@@ -378,7 +405,13 @@ impl Ledger {
                 self.issue
             );
         }
-        let plan = plan_reservation(now, planned_hours, self.remaining_usd()?, terms.rate_usd_hr)?;
+        let plan = plan_reservation_with(
+            now,
+            planned_hours,
+            self.remaining_usd()?,
+            terms.rate_usd_hr,
+            terms.fixed_usd,
+        )?;
         let entry = PodEntry {
             name: name.to_string(),
             provider: if terms.placement.is_some() {
@@ -460,6 +493,8 @@ struct Terms<'a> {
     count: u32,
     cloud: CloudTier,
     rate_usd_hr: f64,
+    /// Held on top of the hours.
+    fixed_usd: f64,
     /// Vast's, which also makes the pod Vast's.
     placement: Option<VastPlacement>,
 }
@@ -906,7 +941,7 @@ mod tests {
     fn a_vast_reservation_records_its_provider_and_where_it_was_rented() {
         let mut ledger = funded(50.0);
         let entry = ledger
-            .reserve_vast("a", &sample_offer(16.0), 1.0, at("2026-10-16T17:00:00Z"))
+            .reserve_vast("a", &sample_offer(16.0), 1.0, 0, at("2026-10-16T17:00:00Z"))
             .unwrap();
         assert_eq!(
             (entry.provider, entry.count, entry.cloud, entry.rate_usd_hr),
@@ -936,7 +971,7 @@ mod tests {
     fn a_pod_whose_provider_and_placement_disagree_fails_the_check() {
         let mut ledger = funded(50.0);
         ledger
-            .reserve_vast("a", &sample_offer(16.0), 1.0, at("2026-10-16T17:00:00Z"))
+            .reserve_vast("a", &sample_offer(16.0), 1.0, 0, at("2026-10-16T17:00:00Z"))
             .unwrap();
         let mut lost_provider = ledger.clone();
         lost_provider.pods[0].provider = Provider::Runpod;
@@ -952,7 +987,7 @@ mod tests {
     fn the_abandoned_mark_is_vasts_written_only_when_set_and_gone_once_booked() {
         let mut ledger = funded(50.0);
         ledger
-            .reserve_vast("a", &sample_offer(16.0), 1.0, at("2026-10-16T17:00:00Z"))
+            .reserve_vast("a", &sample_offer(16.0), 1.0, 0, at("2026-10-16T17:00:00Z"))
             .unwrap();
         assert!(
             serde_json::to_value(&ledger).unwrap()["pods"][0]
@@ -978,7 +1013,7 @@ mod tests {
     fn a_failed_creates_late_instance_is_booked_from_its_reservation() {
         let mut ledger = funded(50.0);
         ledger
-            .reserve_vast("a", &sample_offer(16.0), 1.0, at("2026-10-16T17:00:00Z"))
+            .reserve_vast("a", &sample_offer(16.0), 1.0, 0, at("2026-10-16T17:00:00Z"))
             .unwrap();
         let entry = &mut ledger.pods[0];
         assert!(
@@ -1006,7 +1041,7 @@ mod tests {
             .unwrap();
         ledger.pods[0].mark_create_failed().unwrap();
         ledger
-            .reserve_vast("a", &sample_offer(16.0), 1.0, at("2026-10-16T17:00:00Z"))
+            .reserve_vast("a", &sample_offer(16.0), 1.0, 0, at("2026-10-16T17:00:00Z"))
             .unwrap();
         ledger.vast.account = Some("vast:1".into());
         // What the harness wrote while a side table named each Vast pod.

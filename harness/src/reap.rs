@@ -470,7 +470,7 @@ mod tests {
         });
         let offer = crate::vast::sample_offer(16.0);
         ledger
-            .reserve_vast(VAST_NAME, &offer, 1.0, at("2026-10-16T17:00:00Z"))
+            .reserve_vast(VAST_NAME, &offer, 1.0, 0, at("2026-10-16T17:00:00Z"))
             .unwrap();
         if state == PodState::Live {
             ledger.pods[0].mark_live("31000001").unwrap();

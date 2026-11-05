@@ -124,6 +124,7 @@ fn query() -> OfferQuery {
         min_reliability: 0.95,
         min_inet_down_mbps: 500.0,
         max_download_usd_tb: 50.0,
+        max_upload_usd_tb: 50.0,
         min_cuda: 12.8,
     }
 }
@@ -354,7 +355,8 @@ fn billing_sums_the_instances_charges_across_pages() {
     let seen = server.seen();
     let first = decoded(&seen[0].target);
     assert!(first.starts_with("/api/v0/charges/?select_filters="), "{first}");
-    assert!(first.contains("\"type\":{\"in\":[\"instance\"]}"), "{first}");
+    // Every type, so that bandwidth Vast itemizes apart from the GPU hours is booked too.
+    assert!(!first.contains("\"type\""), "{first}");
     assert!(first.contains("&limit=100&format=table"), "{first}");
     assert!(decoded(&seen[1].target).ends_with("&after_token=c1"));
 }

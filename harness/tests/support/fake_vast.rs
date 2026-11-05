@@ -37,6 +37,7 @@ pub fn offer(offer_id: u64, machine_id: u64, rate_usd_hr: f64) -> VastOffer {
         disk_space: 500.0,
         inet_down: 2000.0,
         internet_down_cost_per_tb: Some(3.0),
+        internet_up_cost_per_tb: Some(3.0),
         rentable: Some(true),
         rented: Some(false),
         cuda_max_good: Some(13.2),

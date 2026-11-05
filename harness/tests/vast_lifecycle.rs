@@ -63,7 +63,11 @@ struct World {
 
 impl World {
     fn new() -> Self {
-        let repo = repo_with_issue(ISSUE, &[("harness.toml", SPEC)]);
+        Self::with_spec(SPEC)
+    }
+
+    fn with_spec(spec: &str) -> Self {
+        let repo = repo_with_issue(ISSUE, &[("harness.toml", spec)]);
         let clock = Rc::new(WatchClock::at("2026-11-04T17:00:00Z"));
         LedgerStore::new(repo.path(), ISSUE)
             .update(|ledger| {
@@ -457,10 +461,10 @@ fn a_watch_without_a_budget_reports_the_offer_and_rents_nothing() {
 #[test]
 fn a_budget_short_of_the_planned_hours_at_the_cheapest_cap_only_reports() {
     let w = World::new();
-    // 3.00 x 1.10 x 1 h = 3.30 is needed.
+    // 3.00 x 1.10 x 1 h = 3.30, plus 120 GB at $20 per TB = 2.40, is needed.
     LedgerStore::new(w.repo.path(), ISSUE)
         .update(|ledger| {
-            ledger.budget.as_mut().unwrap().usd = 3.2;
+            ledger.budget.as_mut().unwrap().usd = 5.69;
             Ok(())
         })
         .unwrap();
@@ -727,4 +731,41 @@ fn a_box_billing_above_max_usd_hr_is_ended_even_inside_the_margin() {
             result.unwrap();
         }
     }
+}
+
+#[test]
+fn a_vast_reservation_holds_the_downloads_on_top_of_the_hours() {
+    let w = World::new();
+    w.up().unwrap();
+    let entry = &w.ledger().pods[0];
+    // $2.46 x 1.10 x 1 h, plus 120 GB (the whole disk, with no expected_download_gb) at $3 per TB.
+    assert!(
+        (entry.reserved_usd - (2.706 + 0.36)).abs() < 1e-9,
+        "{}",
+        entry.reserved_usd
+    );
+    let events = w.events();
+    let reserve = events
+        .lines()
+        .find(|line| line.contains("\"kind\":\"reserve\""))
+        .unwrap();
+    assert!(
+        reserve.contains("\"expected_download_gb\":120,\"download_reserved_usd\":0.36"),
+        "{reserve}"
+    );
+}
+
+#[test]
+fn quote_holds_the_downloads_that_expected_download_gb_names() {
+    let w = World::with_spec(&SPEC.replace("volume_gb = 80", "volume_gb = 80\nexpected_download_gb = 40"));
+    let spec = w.spec();
+    w.with(|ctx| budget::quote(ctx, &spec)).unwrap();
+    let events = w.events();
+    let quote = events.lines().find(|line| line.contains("\"kind\":\"quote\"")).unwrap();
+    // $2.71 for the hour and 40 GB at $3 per TB.
+    assert!(quote.contains("\"worst_case_usd\":2.83"), "{quote}");
+    assert!(
+        quote.contains("\"expected_download_gb\":40,\"download_reserved_usd\":0.12"),
+        "{quote}"
+    );
 }

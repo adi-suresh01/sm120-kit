@@ -90,7 +90,7 @@ fn the_vast_account_is_recorded_with_the_first_vast_pod_and_holds_after() {
     let ledger = store(None).load().unwrap();
     assert_eq!(ledger.vast.account, None, "no Vast pod yet, so nothing to fingerprint");
     store(Some("vast:424242"))
-        .update(|ledger| ledger.reserve_vast("sm120-harness-test-vast-0a0b0c", &offer(), 0.25, at))
+        .update(|ledger| ledger.reserve_vast("sm120-harness-test-vast-0a0b0c", &offer(), 0.25, 0, at))
         .unwrap();
     let ledger = store(None).load().unwrap();
     assert_eq!(ledger.vast.account.as_deref(), Some("vast:424242"));

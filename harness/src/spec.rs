@@ -111,6 +111,8 @@ pub struct PodSpec {
     pub avoid_data_centers: Vec<String>,
     /// Vast machines this issue's pods must not land on, such as one whose GPUs failed the P2P check.
     pub avoid_machines: Vec<u64>,
+    /// What setup downloads on a Vast box, which bills per TB on top of the hourly rate.
+    expected_download_gb: Option<u32>,
 }
 
 /// `[pod]` as written.
@@ -134,6 +136,7 @@ struct RawPod {
     avoid_data_centers: Vec<String>,
     #[serde(default)]
     avoid_machines: Vec<u64>,
+    expected_download_gb: Option<u32>,
 }
 
 impl From<RawPod> for PodSpec {
@@ -160,6 +163,7 @@ impl From<RawPod> for PodSpec {
             gpus,
             avoid_data_centers: raw.avoid_data_centers,
             avoid_machines: raw.avoid_machines,
+            expected_download_gb: raw.expected_download_gb,
         }
     }
 }
@@ -182,8 +186,10 @@ pub struct VastChoice {
     pub max_usd_hr: f64,
     pub min_reliability: f64,
     pub min_inet_down_mbps: f64,
-    /// The most a host may charge per TB downloaded, which bills on top of `max_usd_hr` and outside the reservation.
+    /// The most a host may charge per TB downloaded, which bills on top of `max_usd_hr`.
     pub max_download_usd_tb: f64,
+    /// The same per TB uploaded: results and logs leave the box, and a host may price them like downloads.
+    pub max_upload_usd_tb: f64,
 }
 
 const DEFAULT_MIN_RELIABILITY: f64 = 0.95;
@@ -191,6 +197,8 @@ const DEFAULT_MIN_RELIABILITY: f64 = 0.95;
 const DEFAULT_MIN_INET_DOWN_MBPS: f64 = 500.0;
 /// Hosts charge from nothing to $40 per TB, and a big checkpoint is most of a TB: at this cap 600 GB costs $12.
 const DEFAULT_MAX_DOWNLOAD_USD_TB: f64 = 20.0;
+/// Hosts price uploads as they price downloads.
+const DEFAULT_MAX_UPLOAD_USD_TB: f64 = 20.0;
 
 /// One entry of `pod.gpus`.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -221,6 +229,7 @@ struct RawChoice {
     min_reliability: Option<f64>,
     min_inet_down_mbps: Option<f64>,
     max_download_usd_tb: Option<f64>,
+    max_upload_usd_tb: Option<f64>,
 }
 
 impl TryFrom<RawChoice> for Choice {
@@ -234,6 +243,7 @@ impl TryFrom<RawChoice> for Choice {
                     ("min_reliability", raw.min_reliability.is_some()),
                     ("min_inet_down_mbps", raw.min_inet_down_mbps.is_some()),
                     ("max_download_usd_tb", raw.max_download_usd_tb.is_some()),
+                    ("max_upload_usd_tb", raw.max_upload_usd_tb.is_some()),
                 ];
                 if let Some((key, _)) = vast_keys.iter().find(|(_, set)| *set) {
                     return Err(format!(
@@ -256,6 +266,7 @@ impl TryFrom<RawChoice> for Choice {
                     min_reliability: raw.min_reliability.unwrap_or(DEFAULT_MIN_RELIABILITY),
                     min_inet_down_mbps: raw.min_inet_down_mbps.unwrap_or(DEFAULT_MIN_INET_DOWN_MBPS),
                     max_download_usd_tb: raw.max_download_usd_tb.unwrap_or(DEFAULT_MAX_DOWNLOAD_USD_TB),
+                    max_upload_usd_tb: raw.max_upload_usd_tb.unwrap_or(DEFAULT_MAX_UPLOAD_USD_TB),
                 }))
             }
         }
@@ -515,6 +526,12 @@ impl PodSpec {
         self.container_disk_gb + self.volume_gb
     }
 
+    /// What a Vast reservation holds for downloads: `expected_download_gb`, else the whole disk, the most setup could
+    /// write.
+    pub fn vast_download_gb(&self) -> u32 {
+        self.expected_download_gb.unwrap_or_else(|| self.vast_disk_gb())
+    }
+
     pub fn vast_choices(&self) -> impl Iterator<Item = &VastChoice> {
         self.choices.iter().filter_map(|choice| match choice {
             Choice::Vast(vast) => Some(vast),
@@ -542,8 +559,16 @@ impl PodSpec {
                 choice.max_download_usd_tb.is_finite() && choice.max_download_usd_tb >= 0.0,
                 "Vast choice {id:?}: max_download_usd_tb must not be negative"
             );
+            ensure!(
+                choice.max_upload_usd_tb.is_finite() && choice.max_upload_usd_tb >= 0.0,
+                "Vast choice {id:?}: max_upload_usd_tb must not be negative"
+            );
         }
         let has_vast = self.vast_choices().next().is_some();
+        ensure!(
+            self.expected_download_gb.is_none() || has_vast,
+            "pod.expected_download_gb sizes a Vast reservation, so it needs at least one provider = \"vast\" choice"
+        );
         // The RunPod secret reference means nothing to Vast, and the token itself would sit in the instance's env.
         ensure!(
             !(has_vast && self.needs_hf_token),
@@ -1058,12 +1083,16 @@ smoke_concurrency = 13
                 min_reliability: 0.97,
                 min_inet_down_mbps: 500.0,
                 max_download_usd_tb: 20.0,
+                max_upload_usd_tb: 20.0,
             }
         );
         assert_eq!((vast[1].min_reliability, vast[1].max_usd_hr), (0.95, 9.5));
         assert!(spec.pod.require_p2p);
         assert_eq!(spec.pod.avoid_machines, [156482, 43934]);
         assert_eq!(spec.pod.vast_disk_gb(), 120);
+        assert_eq!(spec.pod.vast_download_gb(), 120);
+        let sized = parse(&text.replace("volume_gb = 80", "volume_gb = 80\nexpected_download_gb = 70")).unwrap();
+        assert_eq!(sized.pod.vast_download_gb(), 70);
     }
 
     #[test]
@@ -1078,6 +1107,8 @@ smoke_concurrency = 13
         assert!(error_of(&with_choices(runpod)).contains("missing field `cloud`"));
         let runpod = "  { id = \"NVIDIA GeForce RTX 5090\", cloud = \"SECURE\", max_download_usd_tb = 9.0 },\n";
         assert!(error_of(&with_choices(runpod)).contains("max_download_usd_tb is for provider = \"vast\""));
+        let runpod = "  { id = \"NVIDIA GeForce RTX 5090\", cloud = \"SECURE\", max_upload_usd_tb = 9.0 },\n";
+        assert!(error_of(&with_choices(runpod)).contains("max_upload_usd_tb is for provider = \"vast\""));
         let other = "  { provider = \"verda\", id = \"RTX 5090\", max_usd_hr = 9.5 },\n";
         assert!(error_of(&with_choices(other)).contains("unknown variant `verda`"));
         let typo = "  { provider = \"vast\", id = \"RTX 5090\", max_usd_hr = 9.5, min_reliabilty = 0.9 },\n";
@@ -1101,6 +1132,10 @@ smoke_concurrency = 13
                 "max_usd_hr = 9.5, max_download_usd_tb = -1.0",
                 "max_download_usd_tb must not be negative",
             ),
+            (
+                "max_usd_hr = 9.5, max_upload_usd_tb = -1.0",
+                "max_upload_usd_tb must not be negative",
+            ),
         ] {
             let choice = format!("  {{ provider = \"vast\", id = \"RTX 5090\", {bad} }},\n");
             let err = error_of(&with_choices(&choice));
@@ -1118,6 +1153,8 @@ smoke_concurrency = 13
         assert!(error_of(&twice).contains("lists 7 more than once"));
         let token = with_choices(VAST_8X).replace("count = 1", "count = 1\nneeds_hf_token = true");
         assert!(error_of(&token).contains("Vast cannot read"));
+        let sized = example().replace("volume_gb = 80", "volume_gb = 80\nexpected_download_gb = 70");
+        assert!(error_of(&sized).contains("expected_download_gb sizes a Vast reservation"));
     }
 
     #[test]

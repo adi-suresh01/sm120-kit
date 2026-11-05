@@ -45,14 +45,23 @@ pub fn cheapest_cap(pod: &PodSpec) -> Option<f64> {
     pod.vast_choices().map(|choice| choice.max_usd_hr).reduce(f64::min)
 }
 
-/// Rent only with a budget that covers the planned hours, at the margin a reservation holds, for a box at the
-/// cheapest cap. RunPod-only choices have no cap, and their own reservation decides what the budget buys.
+/// The least a Vast reservation can hold: the planned hours at a choice's cap with the margin, and the downloads at
+/// its highest download price.
+pub fn least_vast_hold(pod: &PodSpec, planned_hours: f64) -> Option<f64> {
+    let download_tb = f64::from(pod.vast_download_gb()) / 1000.0;
+    pod.vast_choices()
+        .map(|choice| choice.max_usd_hr * MARGIN * planned_hours + download_tb * choice.max_download_usd_tb)
+        .reduce(f64::min)
+}
+
+/// Rent only with a budget that covers what a reservation at the cheapest choice holds. RunPod-only choices have no
+/// cap, and their own reservation decides what the budget buys.
 pub fn mode(remaining: Option<f64>, pod: &PodSpec, planned_hours: f64) -> Mode {
     let Some(remaining) = remaining.filter(|usd| *usd > 0.0) else {
         return Mode::ReportOnly;
     };
-    match cheapest_cap(pod) {
-        Some(cap) if remaining < cap * MARGIN * planned_hours => Mode::ReportOnly,
+    match least_vast_hold(pod, planned_hours) {
+        Some(hold) if remaining < hold => Mode::ReportOnly,
         _ => Mode::Rent,
     }
 }
@@ -72,7 +81,8 @@ pub fn watch(ctx: &Ctx, mut spec: IssueSpec, every: Duration, limit: Duration) -
         Some(&issue),
         Kind::Watch,
         json!({"mode": mode.as_str(), "every_s": every.as_secs(), "for_s": limit.as_secs(),
-               "remaining_usd": remaining.map(pod::cents), "cheapest_cap_usd_hr": cheapest_cap(&spec.pod)}),
+               "remaining_usd": remaining.map(pod::cents), "cheapest_cap_usd_hr": cheapest_cap(&spec.pod),
+               "rent_needs_usd": least_vast_hold(&spec.pod, spec.planned_hours).map(pod::cents)}),
     );
     let started = ctx.clock.now();
     let limit = SignedDuration::try_from(limit)?;
@@ -236,13 +246,14 @@ boot_timeout_s = 60
         { provider = "vast", id = "RTX PRO 6000 WS", max_usd_hr = 12.0 }"#;
 
     #[test]
-    fn it_rents_only_with_a_budget_that_holds_the_planned_hours_at_the_cheapest_cap() {
+    fn it_rents_only_with_a_budget_that_holds_the_planned_hours_and_downloads_at_the_cheapest_choice() {
         let pod = pod(TWO_CAPS);
         assert_eq!(cheapest_cap(&pod), Some(12.0));
-        // 12 x 1.10 x 2 h = 26.40
+        // 12 x 1.10 x 2 h = 26.40, plus 120 GB (the whole disk) at $20 per TB = 2.40
+        assert!((least_vast_hold(&pod, 2.0).unwrap() - 28.80).abs() < 1e-9);
         assert_eq!(mode(None, &pod, 2.0), Mode::ReportOnly);
-        assert_eq!(mode(Some(26.39), &pod, 2.0), Mode::ReportOnly);
-        assert_eq!(mode(Some(26.41), &pod, 2.0), Mode::Rent);
+        assert_eq!(mode(Some(28.79), &pod, 2.0), Mode::ReportOnly);
+        assert_eq!(mode(Some(28.81), &pod, 2.0), Mode::Rent);
         assert_eq!(mode(Some(0.0), &pod, 2.0), Mode::ReportOnly);
         assert_eq!(mode(Some(-3.0), &pod, 2.0), Mode::ReportOnly);
     }

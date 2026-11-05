@@ -709,11 +709,18 @@ impl Candidate {
 
     /// The size of the entrypoint a Vast box gets in its env goes with it, since the live box is where a limit on
     /// that size would show.
-    fn reserve_fields(&self, name: &str, entry: &PodEntry, vast_entrypoint: &str) -> serde_json::Value {
+    fn reserve_fields(
+        &self,
+        name: &str,
+        entry: &PodEntry,
+        spec: &IssueSpec,
+        vast_entrypoint: &str,
+    ) -> serde_json::Value {
         let mut fields = serde_json::Map::from_iter([("pod".to_string(), json!(name))]);
         fields.extend(self.fields());
         fields.insert("reserved_usd".into(), json!(cents(entry.reserved_usd)));
         fields.insert("deadline".into(), json!(entry.deadline));
+        fields.extend(self.reservation_fields(&spec.pod));
         if let Self::Vast { .. } = self {
             fields.insert("entrypoint_b64_bytes".into(), json!(vast_entrypoint.len()));
         }
@@ -738,11 +745,13 @@ fn create_first_available<'c>(ctx: &Ctx<'c>, spec: &IssueSpec, candidates: &[Can
         let cloud = bound.cloud();
         let name = pod_name(issue)?;
         let now = ctx.clock.now();
-        let entry = store.update(|ledger| ledger.reserve_candidate(&name, candidate, spec.planned_hours, now))?;
+        let download_gb = spec.pod.vast_download_gb();
+        let entry =
+            store.update(|ledger| ledger.reserve_candidate(&name, candidate, spec.planned_hours, download_gb, now))?;
         ctx.events.emit(
             Some(issue),
             Kind::Reserve,
-            candidate.reserve_fields(&name, &entry, &vast_entrypoint),
+            candidate.reserve_fields(&name, &entry, spec, &vast_entrypoint),
         );
         match bound.create(spec, &entry, &vast_entrypoint) {
             Ok(pod) => {

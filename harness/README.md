@@ -92,9 +92,12 @@ avoid_machines = [156482]       # Vast machine ids; needs a Vast choice
 
 - `id` is Vast's `gpu_name`, matched exactly (`vastai search offers` prints it). A Vast choice takes no `cloud`.
 - `max_usd_hr` (required) caps the whole box per hour: every GPU and the disk, Vast's `dph_total`. It is a hard cap:
-  `up` ends a box whose instance bills above it, even inside the reservation's 10% margin. Downloads bill
-  on top at the host's own rate, which the reservation does not cover: `max_download_usd_tb` (default 20, so 600 GB
-  of weights costs at most $12) caps it, and `quote` prints it as `download_usd_tb`.
+  `up` ends a box whose instance bills above it, even inside the reservation's 10% margin.
+- Downloads and uploads bill on top at the host's own prices. `max_download_usd_tb` and `max_upload_usd_tb`
+  (default 20 each, so 600 GB of weights costs at most $12) cap them, and `quote` prints them as `download_usd_tb`
+  and `upload_usd_tb`. The reservation holds the downloads too: `expected_download_gb` under `[pod]` (Vast only;
+  default the whole disk, `container_disk_gb + volume_gb`, the most setup could write) at the host's price per
+  1000 GB, shown as `download_reserved_usd` in the quote and reserve events.
 - `min_reliability` (default 0.95) and `min_inet_down_mbps` (default 500, since setup downloads the weights on every
   box) are floors. The host's driver must also support `min_cuda`.
 - Vast has no separate volume: the box gets one disk of `container_disk_gb + volume_gb`, and a host with less free
@@ -196,8 +199,9 @@ time, and `harness down <issue>`.
 For boxes that come free rarely and go within minutes, such as an 8x Max-Q on Vast. At the start it prints its
 mode as a `watch` event:
 
-- `will rent`: the issue has a budget, and what is left covers `planned_hours` at the cheapest Vast cap with the 10%
-  margin (an issue without Vast choices only needs some budget left). On the first offer it runs `up` exactly as
+- `will rent`: the issue has a budget, and what is left covers a reservation at the cheapest Vast choice:
+  `planned_hours` at its cap with the 10% margin, and the downloads at its `max_download_usd_tb` (an issue without
+  Vast choices only needs some budget left). On the first offer it runs `up` exactly as
   `harness up` does: reservation, create, watchdog, topology, P2P, setup. It exits 0 with the pod live.
 - `report only`: no budget, or too little. On the first offer it prints the quote and exits 0, renting nothing.
   `harness budget set` is the approval that turns a watch into a rental.
@@ -242,10 +246,10 @@ That endpoint needs `membership:read` and answers 404 for an account outside any
 The same layers, mapped:
 
 1. **Ledger.** The reservation is made before the create, at the offer's `dph_total` (every GPU and the disk at the
-   size the create asks for) with the same 10% margin and `planned_hours` deadline. The ledger's `vast` section names
-   each Vast pod with its offer, machine, and host; an entry's `cloud` there is Vast's own split, `SECURE` for a
-   datacenter host. Downloads bill on top of `dph_total` and are not reserved; `max_download_usd_tb` caps their
-   price, and `quote` shows it.
+   size the create asks for) with the same 10% margin and `planned_hours` deadline, plus `expected_download_gb` at the
+   host's download price. A Vast entry carries `"provider": "vast"` and its `placement` (offer, machine, and host);
+   its `cloud` is Vast's own split, `SECURE` for a datacenter host. A ledger written while a `vast.pods` table named
+   the Vast pods reads with each of them moved onto its entry.
 2. **Watchdog on the box.** The create sends `entrypoint.sh` with `entrypoint_vast.sh` spliced in before its last
    line, base64 in `HARNESS_ENTRYPOINT_B64`, and a short `onstart` that decodes it and starts it as
    `/bin/bash -c <text>`. At `HARNESS_DEADLINE_EPOCH` it destroys its own instance with the instance's key
@@ -281,7 +285,8 @@ The same layers, mapped:
    it (that reservation is then booked as a failed create). The reaper destroys an abandoned pod as soon as Vast
    lists it, whatever its deadline, and does the same for any instance listed under a failed create's label.
 6. **Cost.** From Vast's charges for the instance (`cost_source: billing`) when they list it, else `dph_total` x the
-   time from reservation to end (`estimate`), under the same rules as RunPod's billing.
+   time from reservation to end (`estimate`), under the same rules as RunPod's billing. Every charge row whose source
+   is the instance counts, whatever its type, so bandwidth Vast itemizes apart from the GPU hours is booked too.
 7. **Prepaid Vast credit** is the ceiling under all of these.
 
 Vast answers a key that cannot see an instance as if it were gone, so the ledger records the Vast account

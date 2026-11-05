@@ -70,6 +70,8 @@ pub struct VastOffer {
     #[serde(default)]
     pub internet_down_cost_per_tb: Option<f64>,
     #[serde(default)]
+    pub internet_up_cost_per_tb: Option<f64>,
+    #[serde(default)]
     pub rentable: Option<bool>,
     #[serde(default)]
     pub rented: Option<bool>,
@@ -105,6 +107,11 @@ impl VastOffer {
         }
     }
 
+    /// What downloading `gb` costs on this host. Per 1000 GB, while Vast's TB is 1024 GB, so it never comes out low.
+    pub fn download_usd(&self, gb: u32) -> f64 {
+        f64::from(gb) / 1000.0 * self.internet_down_cost_per_tb.unwrap_or(0.0)
+    }
+
     pub fn describe(&self) -> String {
         let mut line = format!(
             "{} x{} on Vast machine {} ${:.2}/hr",
@@ -138,6 +145,7 @@ pub struct OfferQuery {
     pub min_reliability: f64,
     pub min_inet_down_mbps: f64,
     pub max_download_usd_tb: f64,
+    pub max_upload_usd_tb: f64,
     pub min_cuda: f64,
 }
 
@@ -154,6 +162,7 @@ impl OfferQuery {
             min_reliability: choice.min_reliability,
             min_inet_down_mbps: choice.min_inet_down_mbps,
             max_download_usd_tb: choice.max_download_usd_tb,
+            max_upload_usd_tb: choice.max_upload_usd_tb,
             // The spec validates min_cuda as major.minor, which parses as a float.
             min_cuda: pod.min_cuda.parse().unwrap_or(f64::INFINITY),
         }
@@ -174,6 +183,7 @@ impl OfferQuery {
             "reliability": {"gte": self.min_reliability},
             "inet_down": {"gte": self.min_inet_down_mbps},
             "inet_down_cost": {"lte": self.max_download_usd_tb / GB_PER_TB},
+            "inet_up_cost": {"lte": self.max_upload_usd_tb / GB_PER_TB},
             "cuda_max_good": {"gte": self.min_cuda},
             "order": [["dph_total", "asc"]],
             "type": "on-demand",
@@ -196,6 +206,9 @@ impl OfferQuery {
             && offer
                 .internet_down_cost_per_tb
                 .is_some_and(|per_tb| per_tb <= self.max_download_usd_tb + 1e-9)
+            && offer
+                .internet_up_cost_per_tb
+                .is_some_and(|per_tb| per_tb <= self.max_upload_usd_tb + 1e-9)
             && offer.disk_space >= f64::from(self.disk_gb)
             && offer.cuda_max_good.is_some_and(|cuda| cuda + 1e-9 >= self.min_cuda)
             && !avoid_machines.contains(&offer.machine_id)
@@ -412,16 +425,18 @@ struct ChargePage {
     next_token: Option<String>,
 }
 
-/// Whether a charge row is this instance's. The CLI reads `source` as `instance-<id>` or as the bare id.
+/// Whether a charge row is this instance's. The CLI reads `source` as `instance-<id>` or as the bare id; a row with
+/// that source counts whatever its type, so bandwidth itemized apart from the GPU hours is booked too. A row that
+/// names the instance only in its metadata counts when it is an instance charge.
 fn charge_of(row: &Value, id: &str) -> bool {
-    let kind_ok = row["type"]
+    let source = text(&row["source"]).is_some_and(|source| source == id || source == format!("instance-{id}"));
+    let instance_kind = row["type"]
         .as_str()
         .is_none_or(|kind| kind.eq_ignore_ascii_case("instance"));
-    let source = text(&row["source"]).is_some_and(|source| source == id || source.rsplit('-').next() == Some(id));
     let metadata = ["instance_id", "contract_id"]
         .iter()
         .any(|key| whole(&row["metadata"][key]).is_some_and(|n| n.to_string() == id));
-    kind_ok && (source || metadata)
+    source || (instance_kind && metadata)
 }
 
 /// The sum of this instance's charges across every page, or `None` when no row names it.
@@ -598,7 +613,6 @@ impl Cloud for VastRest<'_> {
         let now = self.clock.now();
         let filters = json!({
             "day": {"gte": (now - CHARGE_WINDOW).as_second(), "lte": (now + SignedDuration::from_hours(24)).as_second()},
-            "type": {"in": ["instance"]},
         })
         .to_string();
         let mut pages = Vec::new();
@@ -728,6 +742,7 @@ pub(crate) fn sample_offer(rate_usd_hr: f64) -> VastOffer {
         disk_space: 500.0,
         inet_down: 2000.0,
         internet_down_cost_per_tb: Some(4.0),
+        internet_up_cost_per_tb: Some(4.0),
         rentable: Some(true),
         rented: Some(false),
         cuda_max_good: Some(13.2),
@@ -758,6 +773,7 @@ mod tests {
             min_reliability: 0.95,
             min_inet_down_mbps: 500.0,
             max_download_usd_tb: 50.0,
+            max_upload_usd_tb: 50.0,
             min_cuda: 13.0,
         }
     }
@@ -802,9 +818,13 @@ mod tests {
         let mut lax = query(8, 22.0);
         lax.min_reliability = 0.5;
         assert_eq!(pick(&lax, maxq(), &[]).len(), 1);
-        // 9100000 charges $30.62 per TB downloaded, 9100002 $12.
+        // 9100000 charges $30.62 per TB downloaded or uploaded, 9100002 $12.
         let mut thrifty = query(1, 2.0);
         thrifty.max_download_usd_tb = 20.0;
+        let ids: Vec<u64> = pick(&thrifty, maxq(), &[]).iter().map(|o| o.offer_id).collect();
+        assert_eq!(ids, [9100002]);
+        let mut thrifty = query(1, 2.0);
+        thrifty.max_upload_usd_tb = 20.0;
         let ids: Vec<u64> = pick(&thrifty, maxq(), &[]).iter().map(|o| o.offer_id).collect();
         assert_eq!(ids, [9100002]);
     }
@@ -823,6 +843,7 @@ mod tests {
             min_reliability: 0.95,
             min_inet_down_mbps: 500.0,
             max_download_usd_tb: 50.0,
+            max_upload_usd_tb: 50.0,
             min_cuda: 12.8,
         };
         assert_eq!(pick(&query("GTX 1650"), cheap.clone(), &[]).len(), 1);
@@ -835,8 +856,9 @@ mod tests {
         let q = query(1, 2.0);
         let base = maxq().remove(0);
         assert!(q.admits(&base, &[]));
-        let variants: [fn(&mut VastOffer); 8] = [
+        let variants: [fn(&mut VastOffer); 9] = [
             |o| o.internet_down_cost_per_tb = None,
+            |o| o.internet_up_cost_per_tb = None,
             |o| o.rented = None,
             |o| o.rentable = Some(false),
             |o| o.cuda_max_good = None,
@@ -873,6 +895,7 @@ mod tests {
         assert_eq!(body["type"], "on-demand");
         // $50 per TB is $0.0488 per GB, the unit Vast's filter takes.
         assert_eq!(body["inet_down_cost"], json!({"lte": 50.0 / 1024.0}));
+        assert_eq!(body["inet_up_cost"], json!({"lte": 50.0 / 1024.0}));
     }
 
     #[test]
@@ -977,6 +1000,18 @@ mod tests {
         assert_eq!(charges_usd(&pages, "31000002"), Some(3.2));
         assert_eq!(charges_usd(&pages, "3100000"), None);
         assert_eq!(charges_usd(&[], "31000001"), None);
+    }
+
+    #[test]
+    fn charges_of_any_type_count_when_their_source_is_the_instance() {
+        let page: Value = serde_json::from_str(include_str!("../tests/fixtures/vast/charges_page.json")).unwrap();
+        let mut rows = page["results"].as_array().unwrap().clone();
+        rows.push(
+            json!({"amount": 0.004, "description": "bandwidth", "source": "instance-31000001", "type": "bandwidth"}),
+        );
+        rows.push(json!({"amount": 9.0, "description": "storage", "source": "volume-31000001", "type": "volume"}));
+        let total = charges_usd(&[rows], "31000001").unwrap();
+        assert!((total - 0.0557).abs() < 1e-9, "{total}");
     }
 
     #[test]

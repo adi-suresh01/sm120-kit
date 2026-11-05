@@ -3,7 +3,7 @@ use serde_json::json;
 
 use crate::cloud::{Candidate, find_candidates};
 use crate::events::Kind;
-use crate::ledger::{Budget, plan_reservation};
+use crate::ledger::{Budget, plan_reservation_with};
 use crate::pod::{Ctx, NothingInStock, cents, reconcile_billing};
 use crate::spec::{IssueSpec, Provider, is_slug};
 
@@ -94,16 +94,18 @@ pub fn emit_quote(ctx: &Ctx, spec: &IssueSpec, candidates: &[Candidate], remaini
     let Some(first) = candidates.first() else {
         bail!("no offer to quote for {}", spec.issue);
     };
-    let plan = plan_reservation(
+    let plan = plan_reservation_with(
         ctx.clock.now(),
         spec.planned_hours,
         remaining.unwrap_or(f64::INFINITY),
         first.rate_usd_hr(),
+        first.download_usd(&spec.pod),
     )?;
     let fallbacks: Vec<String> = candidates[1..].iter().map(Candidate::describe).collect();
     let mut fields = first.fields();
     fields.insert("deadline".into(), json!(plan.deadline));
     fields.insert("worst_case_usd".into(), json!(cents(plan.reserved_usd)));
+    fields.extend(first.reservation_fields(&spec.pod));
     fields.insert("remaining_usd".into(), json!(remaining.map(cents)));
     fields.insert("fallbacks".into(), json!(fallbacks));
     let Candidate::Runpod(first) = first else {

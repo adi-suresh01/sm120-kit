@@ -14,6 +14,7 @@ use anyhow::Context;
 
 use crate::clock::Clock;
 use crate::ledger::ADOPT_WINDOW;
+use crate::pod::cents;
 use crate::spec::{Choice, CloudTier, GpuChoice, PodSpec, Provider};
 use crate::vast::{self, VastApi, VastOffer};
 
@@ -376,6 +377,24 @@ impl Candidate {
         }
     }
 
+    /// What the reservation holds for downloads on top of the hours: a Vast host bills them per TB.
+    pub fn download_usd(&self, pod: &PodSpec) -> f64 {
+        match self {
+            Self::Runpod(_) => 0.0,
+            Self::Vast { offer, .. } => offer.download_usd(pod.vast_download_gb()),
+        }
+    }
+
+    /// The fields a reservation for this candidate adds to the reserve and quote events.
+    pub fn reservation_fields(&self, pod: &PodSpec) -> serde_json::Map<String, serde_json::Value> {
+        let mut fields = serde_json::Map::new();
+        if let Self::Vast { .. } = self {
+            fields.insert("expected_download_gb".into(), pod.vast_download_gb().into());
+            fields.insert("download_reserved_usd".into(), cents(self.download_usd(pod)).into());
+        }
+        fields
+    }
+
     /// The most the pod may bill per hour once it runs: a Vast choice's own cap. RunPod's price is the catalog's.
     pub fn cap_usd_hr(&self) -> Option<f64> {
         match self {
@@ -416,7 +435,7 @@ impl Candidate {
                 "gpu": offer.gpu, "provider": Provider::Vast, "machine": offer.machine_id, "offer": offer.offer_id,
                 "count": offer.count, "rate_usd_hr": offer.rate_usd_hr, "reliability": offer.reliability(),
                 "inet_down_mbps": offer.inet_down, "download_usd_tb": offer.internet_down_cost_per_tb,
-                "location": offer.geolocation,
+                "upload_usd_tb": offer.internet_up_cost_per_tb, "location": offer.geolocation,
             }),
         };
         match fields {
