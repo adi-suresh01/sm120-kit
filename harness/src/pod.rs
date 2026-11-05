@@ -590,6 +590,8 @@ const READY_TIMEOUT: SignedDuration = SignedDuration::from_mins(30);
 const NO_DIRECT_SSH: SignedDuration = SignedDuration::from_mins(3);
 const NAME_LOOKUPS: usize = 3;
 const GONE_CHECKS: usize = 6;
+/// How long a Vast read may come back empty right after the create before the instance counts as gone.
+const VAST_FIRST_READ: SignedDuration = SignedDuration::from_mins(2);
 
 pub fn up(ctx: &Ctx, spec: &IssueSpec, run_setup: bool, after_failure: AfterFailure) -> Result<LivePod> {
     let issue = spec.issue.as_str();
@@ -1011,9 +1013,13 @@ fn wait_ready(
         );
         ctx.clock.sleep(POLL);
         let id = &pod.id;
-        pod = cloud
-            .get_pod(id)?
-            .with_context(|| format!("pod {id} disappeared while starting"))?;
+        pod = match cloud.get_pod(id)? {
+            Some(read) => read,
+            // A new Vast instance can take a moment to show; ending it on the first empty read would destroy a box
+            // that may be about to appear.
+            None if provider == Provider::Vast && ctx.clock.now().duration_since(started) < VAST_FIRST_READ => pod,
+            None => bail!("pod {id} disappeared while starting"),
+        };
     }
 }
 

@@ -71,6 +71,8 @@ struct VastState {
     searches: usize,
     /// Searches that find nothing before the offers show up, as while a watch waits.
     empty_searches: usize,
+    /// Reads that do not see an instance yet, as right after a create.
+    hidden_reads: usize,
     deleted: Vec<String>,
     billing: Option<f64>,
     next_id: u64,
@@ -108,6 +110,7 @@ impl Default for FakeVast {
             instances: Vec::new(),
             searches: 0,
             empty_searches: 0,
+            hidden_reads: 0,
             deleted: Vec::new(),
             billing: None,
             next_id: 31000000,
@@ -169,6 +172,10 @@ impl Cloud for FakeVast {
     /// A new instance loads on its first read and runs with SSH from the second on.
     fn get_pod(&self, id: &str) -> Result<Option<Pod>, CloudError> {
         let mut state = self.0.borrow_mut();
+        if state.hidden_reads > 0 {
+            state.hidden_reads -= 1;
+            return Ok(None);
+        }
         let Some((pod, _)) = state.instances.iter_mut().find(|(pod, _)| pod.id == id) else {
             return Ok(None);
         };
@@ -446,6 +453,24 @@ fn a_lost_create_reply_is_adopted_by_its_label() {
         (PodState::Live, Some("31000001"))
     );
     assert!(w.events().contains("\"adopted\":true"));
+}
+
+#[test]
+fn a_new_instance_vast_does_not_show_yet_is_waited_for_not_destroyed() {
+    let w = World::new();
+    w.vast.0.borrow_mut().hidden_reads = 4;
+    w.up().unwrap();
+    assert!(w.vast.0.borrow().deleted.is_empty());
+    assert_eq!(w.ledger().pods[0].state, PodState::Live);
+}
+
+#[test]
+fn an_instance_vast_never_shows_is_destroyed_after_two_minutes() {
+    let w = World::new();
+    w.vast.0.borrow_mut().hidden_reads = usize::MAX;
+    let err = format!("{:#}", w.up().unwrap_err());
+    assert!(err.contains("pod 31000001 disappeared while starting"), "{err}");
+    assert_eq!(w.vast.0.borrow().deleted, ["31000001"]);
 }
 
 #[test]
