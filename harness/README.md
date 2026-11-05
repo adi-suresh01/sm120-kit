@@ -397,5 +397,7 @@ package snapshot, `serve_variant.sh` against a fake server with both quality pro
 cgroup directories, and stage 2 log replay) and the job start and poll scripts in local bash.
 `tests/runpod_golden.rs` pins the RunPod create body for real issue specs byte for byte, and
 `tests/fixtures/vast/` holds Vast replies with ids and addresses replaced (the offers are a real search).
+`tests/vast_back_compat.rs` writes every ledger in the repo back (byte for byte when it holds no Vast pod) and reads
+`tests/fixtures/ledger_*.json`, ledgers as the RunPod-only harness and the `vast.pods` table wrote them.
 
 `issues/harness-test-vast` is the live test of the Vast path: the cheapest 1x box, no model, a 15 min deadline.

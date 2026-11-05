@@ -1,0 +1,51 @@
+{
+  "issue": "vast-fixture",
+  "account": "org-fixture",
+  "budget": {
+    "usd": 50.0,
+    "approved_at": "2026-11-04T16:00:00Z",
+    "note": "fixture"
+  },
+  "pods": [
+    {
+      "name": "sm120-vast-fixture-0a0b0b",
+      "id": null,
+      "state": "create_failed",
+      "gpu": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+      "count": 2,
+      "cloud": "SECURE",
+      "rate_usd_hr": 4.98,
+      "reserved_usd": 5.478,
+      "reserved_at": "2026-11-04T16:30:00Z",
+      "deadline": "2026-11-04T17:30:00Z",
+      "terminated_at": null,
+      "cost_usd": null,
+      "cost_source": null
+    },
+    {
+      "name": "sm120-vast-fixture-0a0b0c",
+      "id": "31000001",
+      "state": "live",
+      "gpu": "RTX PRO 6000 Max-Q",
+      "count": 2,
+      "cloud": "COMMUNITY",
+      "rate_usd_hr": 2.46,
+      "reserved_usd": 2.706,
+      "reserved_at": "2026-11-04T17:00:00Z",
+      "deadline": "2026-11-04T18:00:00Z",
+      "terminated_at": null,
+      "cost_usd": null,
+      "cost_source": null
+    }
+  ],
+  "vast": {
+    "account": "vast:424242",
+    "pods": {
+      "sm120-vast-fixture-0a0b0c": {
+        "offer": 9100001,
+        "machine": 70001,
+        "host": 150001
+      }
+    }
+  }
+}

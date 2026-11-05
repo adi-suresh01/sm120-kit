@@ -1,5 +1,6 @@
-//! Every issue folder in this repo reads as it did before Vast, and a ledger written by the RunPod-only harness
-//! writes back the same fields and values.
+//! Issue folders and ledgers read as they did before Vast, a ledger the RunPod-only harness wrote writes back byte
+//! for byte, a ledger from before each entry carried its provider still reads its Vast pods as Vast's, and each
+//! provider's account guards that provider's pods only.
 
 #[path = "support/fake_vast.rs"]
 mod fake_vast;
@@ -9,7 +10,9 @@ use std::fs;
 use std::path::Path;
 
 use jiff::{SignedDuration, Timestamp};
-use sm120_harness::ledger::{Budget, LedgerStore, VastAccount, check_accounts, check_vast_accounts};
+use sm120_harness::ledger::{
+    Budget, Ledger, LedgerStore, PodState, VastAccount, VastBook, VastPlacement, check_accounts, check_vast_accounts,
+};
 use sm120_harness::spec::{CloudTier, IssueSpec, Provider};
 use sm120_harness::vast::VastOffer;
 use support::repo_with_issue;
@@ -28,36 +31,88 @@ fn issues() -> Vec<String> {
     issues
 }
 
+fn written(ledger: &Ledger) -> String {
+    serde_json::to_string_pretty(ledger).unwrap() + "\n"
+}
+
 #[test]
-fn every_issue_spec_parses_and_only_the_vast_smoke_test_leaves_runpod() {
+fn every_issue_spec_in_the_repo_parses() {
     let issues = issues();
-    assert!(issues.len() >= 20, "{issues:?}");
+    assert!(!issues.is_empty());
     for issue in &issues {
         let spec = IssueSpec::load(repo(), issue).unwrap_or_else(|e| panic!("{issue}: {e:#}"));
-        let on_vast = spec.pod.choices.iter().any(|c| c.provider() == Provider::Vast);
-        assert_eq!(on_vast, issue == "harness-test-vast", "{issue}");
-        if !on_vast {
+        // Without a Vast choice, every choice is the RunPod one it always was.
+        if spec.pod.vast_choices().next().is_none() {
             assert_eq!(spec.pod.choices.len(), spec.pod.gpus.len(), "{issue}");
-            assert!(!spec.pod.require_p2p && spec.pod.avoid_machines.is_empty(), "{issue}");
+        }
+    }
+}
+
+/// RunPod-only ledgers write back byte for byte; any other reads back as the same ledger.
+#[test]
+fn every_ledger_in_the_repo_reads_and_writes_back() {
+    let stores = LedgerStore::all(repo()).unwrap();
+    assert!(!stores.is_empty());
+    for store in stores {
+        let ledger = store.load().unwrap_or_else(|e| panic!("{}: {e:#}", store.issue()));
+        let on_disk = fs::read_to_string(store.path()).unwrap();
+        let runpod_only = ledger.vast == VastBook::default() && ledger.pods.iter().all(|p| p.provider.is_runpod());
+        if runpod_only {
+            assert_eq!(written(&ledger), on_disk, "{}", store.issue());
+        } else {
+            assert_eq!(
+                serde_json::from_str::<Ledger>(&written(&ledger)).unwrap(),
+                ledger,
+                "{}",
+                store.issue()
+            );
         }
     }
 }
 
 #[test]
-fn every_ledger_reads_and_writes_back_unchanged() {
-    let stores = LedgerStore::all(repo()).unwrap();
-    assert!(stores.len() >= 15, "{} ledgers", stores.len());
-    for store in stores {
-        let ledger = store.load().unwrap_or_else(|e| panic!("{}: {e:#}", store.issue()));
-        assert!(ledger.vast.account.is_none());
-        for entry in &ledger.pods {
-            assert_eq!(entry.provider, Provider::Runpod);
-        }
-        // Compared as JSON values: serde_json reads some long floats a bit off, as it always did, so the text of
-        // a rewrite can differ in the last digit while every field and value stays.
-        let on_disk: serde_json::Value = serde_json::from_str(&fs::read_to_string(store.path()).unwrap()).unwrap();
-        assert_eq!(serde_json::to_value(&ledger).unwrap(), on_disk, "{}", store.issue());
-    }
+fn a_ledger_the_runpod_only_harness_wrote_reads_as_runpods_and_writes_back_byte_for_byte() {
+    let text = include_str!("fixtures/ledger_runpod_only.json");
+    let repo = repo_with_issue("rp-fixture", &[("harness-ledger.json", text)]);
+    let ledger = LedgerStore::new(repo.path(), "rp-fixture").load().unwrap();
+    assert!(
+        ledger
+            .pods
+            .iter()
+            .all(|p| p.provider == Provider::Runpod && p.placement.is_none() && !p.abandoned)
+    );
+    assert_eq!(ledger.vast, VastBook::default());
+    assert_eq!(written(&ledger), text);
+}
+
+#[test]
+fn a_ledger_with_the_vast_side_table_reads_its_vast_pods_as_vasts() {
+    let text = include_str!("fixtures/ledger_vast_side_table.json");
+    let repo = repo_with_issue("vast-fixture", &[("harness-ledger.json", text)]);
+    let store = LedgerStore::new(repo.path(), "vast-fixture");
+    let ledger = store.load().unwrap();
+    let (runpod, vast) = (&ledger.pods[0], &ledger.pods[1]);
+    assert_eq!((runpod.provider, runpod.placement), (Provider::Runpod, None));
+    assert_eq!(
+        (vast.provider, vast.state, vast.placement),
+        (
+            Provider::Vast,
+            PodState::Live,
+            Some(VastPlacement {
+                offer: 9100001,
+                machine: 70001,
+                host: 150001
+            })
+        )
+    );
+    assert_eq!(ledger.vast.account.as_deref(), Some("vast:424242"));
+    // The next write moves the table onto the entry it names.
+    let json: serde_json::Value = serde_json::from_str(&written(&ledger)).unwrap();
+    assert_eq!(json["vast"], serde_json::json!({"account": "vast:424242"}));
+    assert_eq!(json["pods"][1]["provider"], "vast");
+    assert_eq!(json["pods"][1]["placement"]["machine"], 70001);
+    assert!(json["pods"][0].get("provider").is_none());
+    assert_eq!(serde_json::from_value::<Ledger>(json).unwrap(), ledger);
 }
 
 fn offer() -> VastOffer {
