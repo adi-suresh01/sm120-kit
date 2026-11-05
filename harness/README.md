@@ -1,19 +1,23 @@
 # harness
 
-Rents a RunPod pod for one issue, runs server variants on it, pulls the results, and terminates it, inside a GPU
-budget Aditya approved for that issue.
+Rents a RunPod pod or a Vast.ai box for one issue, runs server variants on it, pulls the results, and terminates it,
+inside a GPU budget Aditya approved for that issue.
 
 ## One-time setup
 
 1. RunPod key: see `docs/runpod.md` (a Restricted key in the macOS Keychain, exported as `RUNPOD_API_KEY` by
-   `~/.zshrc`). The harness reads it from the environment and never writes or prints it.
-2. SSH: the key registered with RunPod must work without a prompt, because ssh runs with `BatchMode=yes`. Either
-   load it into ssh-agent (`ssh-add -l` lists it), or set `HARNESS_SSH_KEY` to its private key file; then ssh
-   offers only that key (`IdentitiesOnly=yes`), and a key file without a passphrase needs no agent. `up` checks
-   this before any money moves. ssh never forwards the agent to the pod.
-3. Install from the repo root: `cargo install --path harness --locked`. Run `harness` from anywhere inside the
+   `~/.zshrc`). The harness reads it from the environment and never writes or prints it. Every command needs it.
+2. Vast key, only for issues with a Vast choice: `VAST_API_KEY`, else `~/.config/vastai/vast_api_key`, the file
+   `vastai set api-key` writes. Never printed. With no key, RunPod-only issues work as before, and a ledger's Vast
+   pods are left alone with a warning.
+3. SSH: the key registered with RunPod, and with the Vast account for Vast boxes, must work without a prompt,
+   because ssh runs with `BatchMode=yes`. Either load it into ssh-agent (`ssh-add -l` lists it), or set
+   `HARNESS_SSH_KEY` to its private key file; then ssh offers only that key (`IdentitiesOnly=yes`), and a key file
+   without a passphrase needs no agent. `up` checks this before any money moves. ssh never forwards the agent to the
+   pod, and never passes either API key.
+4. Install from the repo root: `cargo install --path harness --locked`. Run `harness` from anywhere inside the
    repo.
-4. Tests need bash 4.4 or newer on `PATH` (`brew install bash` on macOS), python3, curl, and patch.
+5. Tests need bash 4.4 or newer on `PATH` (`brew install bash` on macOS), python3, curl, and patch.
 
 ## An issue folder
 
@@ -23,7 +27,7 @@ issues/<repo>-<num>/
   setup.sh            optional: installs and downloads; runs once per pod, after env_report.sh
   hooks.sh            optional: defines pre_launch, post_smoke, and post_stop (below)
   patches/<name>.diff patches a variant can apply to an installed Python package
-  harness-ledger.json written by the harness: budget, pods, cost, RunPod organization. Commit it.
+  harness-ledger.json written by the harness: budget, pods, cost, RunPod organization, Vast machines. Commit it.
 ```
 
 `harness.toml`:
@@ -69,6 +73,37 @@ patches = [
 env = { MEM_BUDGET_GIB = "31.45" }               # exported for the hooks and the server
 smoke_concurrency = 13                           # parallel smoke requests
 ```
+
+### Vast choices
+
+A `gpus` entry with `provider = "vast"` rents on Vast.ai; an entry without `provider` is RunPod's, so every issue
+written before stays as it was. The list may mix providers, and `up` walks it in order.
+
+```
+[pod]
+count = 8
+require_p2p = true              # default false; any provider
+gpus = [
+  { provider = "vast", id = "RTX PRO 6000 Max-Q", max_usd_hr = 17.0, min_reliability = 0.95 },
+  { id = "NVIDIA RTX PRO 6000 Blackwell Server Edition", cloud = "SECURE" },
+]
+avoid_machines = [156482]       # Vast machine ids; needs a Vast choice
+```
+
+- `id` is Vast's `gpu_name`, matched exactly (`vastai search offers` prints it). A Vast choice takes no `cloud`.
+- `max_usd_hr` (required) caps the whole box per hour: every GPU and the disk, Vast's `dph_total`. Downloads bill
+  on top at the host's own rate; `quote` prints it as `download_usd_tb`, and the reservation does not cover it.
+- `min_reliability` (default 0.95) and `min_inet_down_mbps` (default 500, since setup downloads the weights on every
+  box) are floors. The host's driver must also support `min_cuda`.
+- Vast has no separate volume: the box gets one disk of `container_disk_gb + volume_gb`, and a host with less free
+  is no offer.
+- `needs_hf_token` is refused with a Vast choice: the RunPod secret it passes means nothing to Vast.
+- Each Vast choice is every qualifying offer, cheapest first (up to five): an offer someone takes before the create
+  falls through to the next machine, and the same offer is never tried twice.
+
+`require_p2p = true` runs `nvidia-smi topo -p2p r` after the topology gate and refuses a box where any GPU pair reads
+anything but `OK` (`NS`, `CNS`, ...), keeping the matrix in `results/<issue>/env.txt`. `avoid_machines` keeps the
+issue off those Vast machines; `avoid_data_centers` stays RunPod's and is refused beside a Vast choice.
 
 `avoid_data_centers = ["EUR-IS-2"]` under `[pod]` keeps the issue's pods out of the named RunPod data centers, for
 hosts where `setup.sh` cannot finish (see `docs/runpod.md` on host network speed). Ids must have RunPod's shape
@@ -139,18 +174,38 @@ one variant into the next.
 | Command | Does |
 |---|---|
 | `harness budget set <issue> <usd> --note <text>` | Records Aditya's approval. Nothing rents without it |
-| `harness budget show <issue>` | Spent, reserved, remaining; upgrades estimates to RunPod billing records |
-| `harness quote <issue>` | First in-stock choice, $/hr, the deadline `up` would set, worst-case cost; works before `budget set` |
-| `harness up <issue> [--no-setup]` | Reserve, create, wait for SSH, topology gate, idle-GPU gate (every GPU under 2 GiB used), copy the kit, `env_report.sh`, `setup.sh` |
+| `harness budget show <issue>` | Spent, reserved, remaining; upgrades estimates to RunPod or Vast billing records |
+| `harness quote <issue>` | First in-stock choice, $/hr, the deadline `up` would set, worst-case cost; for Vast also the machine, reliability, and download price; works before `budget set` |
+| `harness up <issue> [--no-setup]` | Reserve, create, wait for SSH, watchdog check, topology gate, P2P gate with `require_p2p`, idle-GPU gate (every GPU under 2 GiB used), copy the kit, `env_report.sh`, `setup.sh` |
+| `harness watch <issue> [--every 4m] [--for 24h]` | Searches every `--every` until an offer turns up, then rents it as `up` does, or only reports it (below); exit 3 when `--for` runs out |
 | `harness exec <issue> <variant>...` | Copies the issue folder again, runs variants on the live pod, pulls each one's results |
 | `harness pull <issue>` | Pulls `results/<issue>/` from the pod |
 | `harness down <issue>` | Pulls (at most 5 min), terminates, books the cost |
 | `harness run <issue> [<variant>...]` | `up`, `exec`, `down`; `down` runs on errors, Ctrl-C, SIGTERM, and SIGHUP too |
-| `harness reap` | Settles every ledger against RunPod; every command runs it first |
+| `harness reap` | Settles every ledger against RunPod and Vast; every command runs it first |
 | `harness ssh <issue> -- <cmd>` | Runs a command on the pod in `/workspace/sm120-kit` with the container env; killed after 15 min |
 
-Exit status is non-zero only for harness errors. A server that crashes is a verdict (`BOOT_FAIL`), not an error.
-An error after the pod exists names the pod, its deadline in local time, and `harness down <issue>`.
+Exit status is non-zero only for harness errors, and 3 for a `watch` that found nothing in time. A server that
+crashes is a verdict (`BOOT_FAIL`), not an error. An error after the pod exists names the pod, its deadline in local
+time, and `harness down <issue>`.
+
+### `harness watch`
+
+For boxes that come free rarely and go within minutes, such as an 8x Max-Q on Vast. At the start it prints its
+mode as a `watch` event:
+
+- `will rent`: the issue has a budget, and what is left covers `planned_hours` at the cheapest Vast cap with the 10%
+  margin (an issue without Vast choices only needs some budget left). On the first offer it runs `up` exactly as
+  `harness up` does: reservation, create, watchdog, topology, P2P, setup. It exits 0 with the pod live.
+- `report only`: no budget, or too little. On the first offer it prints the quote and exits 0, renting nothing.
+  `harness budget set` is the approval that turns a watch into a rental.
+
+An offer taken before the create keeps it watching. A box that fails a check is destroyed by `up` as always, and its
+machine avoided for the rest of the watch; after 3 such boxes the watch stops with an error rather than spend more on
+the same failure, and a RunPod pod failing a check stops it at once, since RunPod picks the host. Anything that
+leaves a pod billing (a failed setup, a failed terminate) ends the watch with `up`'s error. Ctrl-C stops it between
+searches, or inside `up` the way it stops `up`. Vast's search has a daily quota; a search refused for it only warns,
+and the watch goes on.
 
 ## What keeps a pod from billing past its budget
 
@@ -178,6 +233,47 @@ since a terminate never sent costs more, and the ledger write after it still ref
 That endpoint needs `membership:read` and answers 404 for an account outside any organization; on a 401, 403, or
 404 the check is skipped, and nothing is recorded.
 
+### On Vast
+
+The same layers, mapped:
+
+1. **Ledger.** The reservation is made before the create, at the offer's `dph_total` (every GPU and the disk at the
+   size the create asks for) with the same 10% margin and `planned_hours` deadline. The ledger's `vast` section names
+   each Vast pod with its offer, machine, and host; an entry's `cloud` there is Vast's own split, `SECURE` for a
+   datacenter host. Downloads bill on top of `dph_total` and are not reserved: `quote` shows the host's price per TB.
+2. **Watchdog on the box.** The create sends `entrypoint.sh` with `entrypoint_vast.sh` spliced in before its last
+   line, base64 in `HARNESS_ENTRYPOINT_B64`, and a short `onstart` that decodes it and starts it as
+   `/bin/bash -c <text>`. At `HARNESS_DEADLINE_EPOCH` it destroys its own instance with the instance's key
+   (`DELETE /api/v0/instances/$CONTAINER_ID/` with `CONTAINER_API_KEY`, which Vast sets in the container), falls back
+   to a stop (which ends the GPU charge; the reaper destroys the stopped box), and keeps retrying, each attempt in
+   `/workspace/harness-watchdog.log`. A box whose env lacks the key or the id logs `VAST SELF-DESTRUCT MISSING`. Vast
+   runs `onstart` beside its own init, so the watchdog is not the container's main process as on RunPod, and a
+   process that kills it leaves the box to `down` and the reaper. `up` waits (up to 5 min) until the log shows the
+   watchdog armed for the ledger's deadline in a live `/bin/bash -c` process, ready to destroy this instance's id,
+   and (up to 15 min more) apt done, since Vast's own sshd answers first; otherwise it destroys the box. It also
+   warns when the box's key could not read its own instance, the one sign before the deadline that the destroy can
+   work.
+3. **Reaper.** Lists Vast's instances (all pages, or an error) beside RunPod's, whenever a Vast key is set. Each
+   provider's entries are settled against that provider's own list only, so neither list books, releases, or ends a
+   pod on the other. Only instances a ledger tracks are ever ended; others named `sm120-*` get a warning, and every
+   other instance on the account is left alone.
+4. **Destroy, never stop.** `down` and the reaper destroy, then wait until neither a GET nor the list shows the
+   instance before the ledger books it: a stopped instance still bills its disk.
+5. **Cost.** From Vast's charges for the instance (`cost_source: billing`) when they list it, else `dph_total` x the
+   time from reservation to end (`estimate`), under the same rules as RunPod's billing.
+6. **Prepaid Vast credit** is the ceiling under all of these.
+
+Vast answers a key that cannot see an instance as if it were gone, so the ledger records the Vast account
+(`vast:<user id>`, from `GET /api/v0/users/current/`) with its first Vast pod, and a Vast key of another account is
+refused before anything reads a Vast pod as gone. A RunPod key is never checked against a Vast pod, or the reverse.
+Any command but `down` and `reap` whose Vast account check fails sets Vast aside with a warning, so a Vast outage
+never stops a RunPod-only command.
+
+Taken from the vastai 1.10 CLI and still to confirm on the first live box: the env names `CONTAINER_ID` and
+`CONTAINER_API_KEY` (with `VAST_CONTAINERLABEL`, `C.<id>`, as a fallback for the id), that the instance key may
+destroy its own instance, that `onstart` runs on every container start, and the shape of the charge rows (matched
+on `source`, `instance-<id>` or the bare id).
+
 ## Watching a run
 
 Every event is one JSON line in `results/<issue>/events.jsonl`, mirrored to stdout. Events that belong to no
@@ -187,13 +283,13 @@ issue (for example an `sm120-*` pod whose name matches no issue folder) go to `r
 tail -F results/vllm-47990/events.jsonl | grep --line-buffered -oE '"kind":"(phase|verdict|error|warn|terminate)".*'
 ```
 
-Kinds: `budget, quote, reserve, create, ready, setup, variant_start, phase, verdict, pull, terminate, reap, warn,
-error`. A `phase` line carries `variant, phase, detail, t` as `serve_variant.sh` reports each step. A verdict line
+Kinds: `budget, quote, reserve, create, ready, setup, variant_start, phase, verdict, pull, terminate, reap, watch,
+warn, error`. A `phase` line carries `variant, phase, detail, t` as `serve_variant.sh` reports each step. A verdict line
 carries `variant, verdict (OK|BOOT_FAIL|SMOKE_FAIL|POST_FAIL|TIMEOUT), boot_s, fault, where, gsm8k, gsm8k_counts,
 accept, tok_s, mem_guard, result`; `mem_guard` is null unless the memory guard (below) fired, and then holds the
 reading it fired at. An `error` line for a pod that is still up adds `pod, id, deadline, deadline_local, next`.
 
-When a poll of a running job fails, the harness reads the pod from RunPod once, without retries. A pod RunPod
+When a poll of a running job fails, the harness reads the pod from its provider once, without retries. A pod RunPod
 reports `EXITED`, `ERROR`, or `TERMINATED`, or one a GET answers 404 for and the pod list leaves out too, ends `exec`
 (and `up` during setup) at once: its container is gone, and with it every file on the pod that was not pulled, and
 the error says to run `harness down <issue>`, since a stopped pod still bills its disk. A RunPod read that fails only
@@ -258,6 +354,10 @@ cd harness && cargo fmt --check && cargo clippy --all-targets -- -D warnings && 
 shellcheck pod/*.sh tests/pod/*.sh
 ```
 
-`cargo test` also runs the bash tests in `tests/pod/` (watchdog, package snapshot, `serve_variant.sh` against a
-fake server with both quality protocols, the memory guard against fake cgroup directories, and stage 2 log replay)
-and the job start and poll scripts in local bash.
+`cargo test` also runs the bash tests in `tests/pod/` (watchdog on RunPod and on Vast with the onstart loader,
+package snapshot, `serve_variant.sh` against a fake server with both quality protocols, the memory guard against fake
+cgroup directories, and stage 2 log replay) and the job start and poll scripts in local bash.
+`tests/runpod_golden.rs` pins the RunPod create body for real issue specs byte for byte, and
+`tests/fixtures/vast/` holds Vast replies with ids and addresses replaced (the offers are a real search).
+
+`issues/harness-test-vast` is the live test of the Vast path: the cheapest 1x box, no model, a 15 min deadline.
