@@ -576,9 +576,18 @@ pub fn up(ctx: &Ctx, spec: &IssueSpec, run_setup: bool, after_failure: AfterFail
     for &provider in &providers {
         refuse_clock_skew(ctx, issue, provider)?;
     }
-    let Created { entry, pod, cloud } = create_first_available(ctx, spec, &candidates)?;
+    let Created {
+        entry,
+        pod,
+        cloud,
+        cap_usd_hr,
+    } = create_first_available(ctx, spec, &candidates)?;
+    let limits = Limits {
+        avoid: &spec.pod.avoid_data_centers,
+        cap_usd_hr,
+    };
     let ready = first_read(cloud, &entry, pod)
-        .and_then(|pod| wait_ready(ctx, cloud, issue, &entry, pod, &spec.pod.avoid_data_centers))
+        .and_then(|pod| wait_ready(ctx, cloud, issue, &entry, pod, &limits))
         .and_then(|target| gate_and_copy(ctx, spec, &entry, &target).map(|()| target));
     let target = match ready {
         Ok(target) => target,
@@ -637,6 +646,7 @@ struct Created<'c> {
     entry: PodEntry,
     pod: Pod,
     cloud: &'c dyn Cloud,
+    cap_usd_hr: Option<f64>,
 }
 
 /// A candidate with its provider's client, found before the reservation so that a missing client cannot come
@@ -688,7 +698,7 @@ impl Candidate {
                 cloud: clouds.runpod(),
                 offer,
             },
-            Self::Vast(offer) => Bound::Vast {
+            Self::Vast { offer, .. } => Bound::Vast {
                 vast: clouds
                     .vast()
                     .with_context(|| format!("{}: {NO_VAST_KEY}", Provider::Vast))?,
@@ -704,7 +714,7 @@ impl Candidate {
         fields.extend(self.fields());
         fields.insert("reserved_usd".into(), json!(cents(entry.reserved_usd)));
         fields.insert("deadline".into(), json!(entry.deadline));
-        if let Self::Vast(_) = self {
+        if let Self::Vast { .. } = self {
             fields.insert("entrypoint_b64_bytes".into(), json!(vast_entrypoint.len()));
         }
         fields.into()
@@ -739,11 +749,21 @@ fn create_first_available<'c>(ctx: &Ctx<'c>, spec: &IssueSpec, candidates: &[Can
                 let entry = track(cloud, &store, &name, &pod.id)?;
                 ctx.events
                     .emit(Some(issue), Kind::Create, json!({"pod": name, "id": pod.id}));
-                return Ok(Created { entry, pod, cloud });
+                return Ok(Created {
+                    entry,
+                    pod,
+                    cloud,
+                    cap_usd_hr: candidate.cap_usd_hr(),
+                });
             }
             Err(e) if e.create_outcome_unknown() => {
                 let (entry, pod) = adopt_by_name(ctx, cloud, &store, &entry, e)?;
-                return Ok(Created { entry, pod, cloud });
+                return Ok(Created {
+                    entry,
+                    pod,
+                    cloud,
+                    cap_usd_hr: candidate.cap_usd_hr(),
+                });
             }
             Err(e) => {
                 store.update(|ledger| ledger.entry_mut(&name)?.mark_create_failed())?;
@@ -854,9 +874,15 @@ fn adopt_by_name(
     ))
 }
 
+/// Where a new pod may land and what it may bill, checked on every read while it starts.
+struct Limits<'s> {
+    avoid: &'s [String],
+    cap_usd_hr: Option<f64>,
+}
+
 /// The deadline was sized for the quoted rate, so a pod that bills above it, or whose rate cannot be read, could
-/// outspend its reservation before the watchdog fires.
-fn check_rate(ctx: &Ctx, issue: &str, entry: &PodEntry, pod: &Pod, warned: &mut bool) -> Result<()> {
+/// outspend its reservation before the watchdog fires. A Vast choice's `max_usd_hr` holds without the margin.
+fn check_rate(ctx: &Ctx, issue: &str, entry: &PodEntry, pod: &Pod, cap: Option<f64>, warned: &mut bool) -> Result<()> {
     let provider = entry.provider;
     let reserved_rate = entry.reserved_rate_usd_hr();
     if pod.cost.is_none() && !*warned {
@@ -864,6 +890,13 @@ fn check_rate(ctx: &Ctx, issue: &str, entry: &PodEntry, pod: &Pod, warned: &mut 
         ctx.warn(
             issue,
             format!("{provider}'s reply for pod {} has no cost field", entry.name),
+        );
+    }
+    if let (Some(cost), Some(cap)) = (pod.cost, cap) {
+        ensure!(
+            cost <= cap,
+            "pod {} bills ${cost:.3}/hr, above the ${cap:.2}/hr max_usd_hr its choice allows",
+            entry.name
         );
     }
     match pod.cost {
@@ -904,8 +937,9 @@ fn wait_ready(
     issue: &str,
     entry: &PodEntry,
     mut pod: Pod,
-    avoid: &[String],
+    limits: &Limits,
 ) -> Result<Target> {
+    let avoid = limits.avoid;
     let provider = entry.provider;
     let started = ctx.clock.now();
     let mut warned_no_cost = false;
@@ -913,7 +947,7 @@ fn wait_ready(
     let mut proxy_only_since = None;
     let mut placed = false;
     loop {
-        check_rate(ctx, issue, entry, &pod, &mut warned_no_cost)?;
+        check_rate(ctx, issue, entry, &pod, limits.cap_usd_hr, &mut warned_no_cost)?;
         check_placement(entry, &pod, avoid)?;
         placed |= pod.data_center_id.is_some();
         let now = ctx.clock.now();

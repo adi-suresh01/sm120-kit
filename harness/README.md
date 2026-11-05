@@ -91,7 +91,8 @@ avoid_machines = [156482]       # Vast machine ids; needs a Vast choice
 ```
 
 - `id` is Vast's `gpu_name`, matched exactly (`vastai search offers` prints it). A Vast choice takes no `cloud`.
-- `max_usd_hr` (required) caps the whole box per hour: every GPU and the disk, Vast's `dph_total`. Downloads bill
+- `max_usd_hr` (required) caps the whole box per hour: every GPU and the disk, Vast's `dph_total`. It is a hard cap:
+  `up` ends a box whose instance bills above it, even inside the reservation's 10% margin. Downloads bill
   on top at the host's own rate, which the reservation does not cover: `max_download_usd_tb` (default 20, so 600 GB
   of weights costs at most $12) caps it, and `quote` prints it as `download_usd_tb`.
 - `min_reliability` (default 0.95) and `min_inet_down_mbps` (default 500, since setup downloads the weights on every

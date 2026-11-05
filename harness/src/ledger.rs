@@ -364,7 +364,7 @@ impl Ledger {
     ) -> Result<PodEntry> {
         match candidate {
             Candidate::Runpod(offer) => self.reserve(name, offer, planned_hours, now),
-            Candidate::Vast(offer) => self.reserve_vast(name, offer, planned_hours, now),
+            Candidate::Vast { offer, .. } => self.reserve_vast(name, offer, planned_hours, now),
         }
     }
 

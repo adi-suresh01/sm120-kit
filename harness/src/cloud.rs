@@ -347,35 +347,47 @@ pub fn find_offers(api: &dyn Cloud, pod: &PodSpec) -> Result<Vec<Offer>, CloudEr
 #[derive(Debug, Clone, PartialEq)]
 pub enum Candidate {
     Runpod(Offer),
-    Vast(VastOffer),
+    /// With the `max_usd_hr` of the choice that found it, which the box is held to once it runs.
+    Vast {
+        offer: VastOffer,
+        max_usd_hr: f64,
+    },
 }
 
 impl Candidate {
     pub fn provider(&self) -> Provider {
         match self {
             Self::Runpod(_) => Provider::Runpod,
-            Self::Vast(_) => Provider::Vast,
+            Self::Vast { .. } => Provider::Vast,
         }
     }
 
     pub fn gpu(&self) -> &str {
         match self {
             Self::Runpod(offer) => &offer.gpu,
-            Self::Vast(offer) => &offer.gpu,
+            Self::Vast { offer, .. } => &offer.gpu,
         }
     }
 
     pub fn count(&self) -> u32 {
         match self {
             Self::Runpod(offer) => offer.count,
-            Self::Vast(offer) => offer.count,
+            Self::Vast { offer, .. } => offer.count,
+        }
+    }
+
+    /// The most the pod may bill per hour once it runs: a Vast choice's own cap. RunPod's price is the catalog's.
+    pub fn cap_usd_hr(&self) -> Option<f64> {
+        match self {
+            Self::Runpod(_) => None,
+            Self::Vast { max_usd_hr, .. } => Some(*max_usd_hr),
         }
     }
 
     pub fn rate_usd_hr(&self) -> f64 {
         match self {
             Self::Runpod(offer) => offer.rate_usd_hr,
-            Self::Vast(offer) => offer.rate_usd_hr,
+            Self::Vast { offer, .. } => offer.rate_usd_hr,
         }
     }
 
@@ -389,7 +401,7 @@ impl Candidate {
                 }
                 line
             }
-            Self::Vast(offer) => offer.describe(),
+            Self::Vast { offer, .. } => offer.describe(),
         }
     }
 
@@ -400,7 +412,7 @@ impl Candidate {
                 "gpu": offer.gpu, "cloud": offer.cloud, "count": offer.count, "rate_usd_hr": offer.rate_usd_hr,
             }),
             // Downloads bill on top of the hourly rate, so their price goes with the offer.
-            Self::Vast(offer) => serde_json::json!({
+            Self::Vast { offer, .. } => serde_json::json!({
                 "gpu": offer.gpu, "provider": Provider::Vast, "machine": offer.machine_id, "offer": offer.offer_id,
                 "count": offer.count, "rate_usd_hr": offer.rate_usd_hr, "reliability": offer.reliability(),
                 "inet_down_mbps": offer.inet_down, "download_usd_tb": offer.internet_down_cost_per_tb,
@@ -419,7 +431,7 @@ impl Candidate {
     pub fn refusal_moves_on(&self, error: &CloudError) -> bool {
         match self {
             Self::Runpod(_) => error.status() == Some(400),
-            Self::Vast(_) => !matches!(error.status(), Some(401 | 403 | 429)),
+            Self::Vast { .. } => !matches!(error.status(), Some(401 | 403 | 429)),
         }
     }
 }
@@ -443,11 +455,14 @@ pub fn find_candidates(clouds: &dyn Clouds, pod: &PodSpec) -> anyhow::Result<Vec
                     .vast()
                     .with_context(|| format!("pod.gpus lists Vast's {:?}, but {NO_VAST_KEY}", vast.id))?;
                 for offer in vast::offers_for(api, vast, pod)? {
-                    let seen = found
-                        .iter()
-                        .any(|c| matches!(c, Candidate::Vast(earlier) if earlier.offer_id == offer.offer_id));
+                    let seen = found.iter().any(
+                        |c| matches!(c, Candidate::Vast { offer: earlier, .. } if earlier.offer_id == offer.offer_id),
+                    );
                     if !seen {
-                        found.push(Candidate::Vast(offer));
+                        found.push(Candidate::Vast {
+                            offer,
+                            max_usd_hr: vast.max_usd_hr,
+                        });
                     }
                 }
             }

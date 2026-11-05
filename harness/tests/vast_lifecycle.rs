@@ -707,3 +707,24 @@ fn a_watchdog_check_that_cannot_run_ends_nothing() {
     assert!(w.vast.0.borrow().deleted.is_empty());
     assert!(w.events().contains("went unchecked"), "{}", w.events());
 }
+
+#[test]
+fn a_box_billing_above_max_usd_hr_is_ended_even_inside_the_margin() {
+    for (cost, ended) in [(3.05, true), (3.0, false)] {
+        let w = World::new();
+        {
+            let mut vast = w.vast.0.borrow_mut();
+            // $2.80/hr reserves $3.08/hr with the margin, but the choice allows $3.00/hr at most.
+            vast.offers = vec![offer(9100002, 70002, 2.80)];
+            vast.instance_cost = Some(cost);
+        }
+        let result = w.up();
+        if ended {
+            let err = format!("{:#}", result.unwrap_err());
+            assert!(err.contains("above the $3.00/hr max_usd_hr"), "{err}");
+            assert_eq!(w.vast.0.borrow().deleted, ["31000001"]);
+        } else {
+            result.unwrap();
+        }
+    }
+}
