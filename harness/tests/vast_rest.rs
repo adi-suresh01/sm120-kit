@@ -209,6 +209,18 @@ fn one_instance_reads_as_gone_on_null_or_404_and_never_otherwise() {
 }
 
 #[test]
+fn a_refusal_in_a_200_is_an_error_never_an_empty_list_or_a_gone_instance() {
+    let refused = r#"{"success": false, "error": "server_busy", "msg": "try later"}"#;
+    let server = Server::start(vec![(200, refused), (200, refused), (200, refused)]);
+    let clock = clock();
+    let api = VastRest::new(&server.base, "k", &clock);
+    assert!(matches!(api.list_pods(), Err(CloudError::Vast(_))));
+    assert!(api.get_pod("31000001").is_err());
+    assert!(api.pod_billing_usd("31000001").is_err());
+    assert_eq!(server.seen().len(), 3);
+}
+
+#[test]
 fn destroy_sends_delete_and_takes_404_as_sent() {
     let server = Server::start(vec![(200, r#"{"success": true}"#), (404, "{}"), (200, "")]);
     let clock = clock();

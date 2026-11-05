@@ -370,9 +370,10 @@ struct OfferPage {
     offers: Vec<Value>,
 }
 
+/// `instances` is required in both shapes: a reply without it, such as Vast's `{"success": false, ...}`, must fail
+/// as garbled, never read as an empty list or an instance gone.
 #[derive(Deserialize)]
 struct InstancePage {
-    #[serde(default)]
     instances: Vec<Value>,
     #[serde(default)]
     next_token: Option<String>,
@@ -380,7 +381,6 @@ struct InstancePage {
 
 #[derive(Deserialize)]
 struct OneInstance {
-    #[serde(default)]
     instances: Value,
 }
 
@@ -398,7 +398,6 @@ struct CreateReply {
 
 #[derive(Deserialize)]
 struct ChargePage {
-    #[serde(default)]
     results: Vec<Value>,
     #[serde(default)]
     next_token: Option<String>,
