@@ -8,8 +8,9 @@ mod support;
 use std::fs;
 use std::path::Path;
 
-use sm120_harness::ledger::{Budget, LedgerStore, VastAccount};
-use sm120_harness::spec::{IssueSpec, Provider};
+use jiff::{SignedDuration, Timestamp};
+use sm120_harness::ledger::{Budget, LedgerStore, VastAccount, check_accounts, check_vast_accounts};
+use sm120_harness::spec::{CloudTier, IssueSpec, Provider};
 use sm120_harness::vast::VastOffer;
 use support::repo_with_issue;
 
@@ -109,5 +110,108 @@ fn the_vast_account_is_recorded_with_the_first_vast_pod_and_holds_after() {
     // A command without a Vast key reads nothing on Vast, so it may still write.
     store(None)
         .update(|ledger| ledger.entry_mut("sm120-harness-test-vast-0a0b0c")?.mark_create_failed())
+        .unwrap();
+}
+
+/// A ledger with one Vast pod booked from billing and one RunPod pod live, its accounts recorded as `vast:1` and
+/// `org-sm120`.
+fn mixed(repo: &Path) -> &'static str {
+    let at: Timestamp = "2026-11-04T17:00:00Z".parse().unwrap();
+    LedgerStore::new(repo, ISSUE)
+        .with_account(Some("org-sm120"))
+        .with_vast_account(VastAccount::Known("vast:1".into()))
+        .update(|ledger| {
+            ledger.budget = Some(Budget {
+                usd: 20.0,
+                approved_at: at,
+                note: "both".into(),
+            });
+            ledger.reserve_vast("sm120-mixed-1-0a0b0c", &offer(), 1.0, 0, at)?;
+            let entry = ledger.entry_mut("sm120-mixed-1-0a0b0c")?;
+            entry.mark_live("31000001")?;
+            entry.mark_terminated(at)?;
+            entry.apply_billing(0.01, at + SignedDuration::from_hours(25));
+            ledger.reserve(
+                "sm120-mixed-1-0a0b0d",
+                &sm120_harness::cloud::Offer {
+                    gpu: "g".into(),
+                    cloud: CloudTier::Secure,
+                    count: 1,
+                    rate_usd_hr: 1.0,
+                    data_centers: Vec::new(),
+                    unlisted_avoided: Vec::new(),
+                },
+                1.0,
+                at,
+            )?;
+            ledger.entry_mut("sm120-mixed-1-0a0b0d")?.mark_live("p1")
+        })
+        .unwrap();
+    "sm120-mixed-1-0a0b0d"
+}
+
+const ISSUE: &str = "mixed-1";
+
+#[test]
+fn a_runpod_write_never_needs_the_vast_account_of_settled_vast_pods() {
+    let repo = repo_with_issue(ISSUE, &[]);
+    let runpod_pod = mixed(repo.path());
+    let at = "2026-11-04T19:00:00Z".parse().unwrap();
+    LedgerStore::new(repo.path(), ISSUE)
+        .with_account(Some("org-sm120"))
+        .with_vast_account(VastAccount::Unknown)
+        .update(|ledger| ledger.entry_mut(runpod_pod)?.mark_terminated(at))
+        .unwrap();
+    check_vast_accounts(repo.path(), &VastAccount::Known("vast:2".into())).unwrap();
+}
+
+#[test]
+fn another_vast_account_still_never_changes_a_vast_pod() {
+    let repo = repo_with_issue(ISSUE, &[]);
+    mixed(repo.path());
+    let at: Timestamp = "2026-11-06T19:00:00Z".parse().unwrap();
+    let err = LedgerStore::new(repo.path(), ISSUE)
+        .with_account(Some("org-sm120"))
+        .with_vast_account(VastAccount::Known("vast:2".into()))
+        .update(|ledger| {
+            ledger.entry_mut("sm120-mixed-1-0a0b0c")?.apply_billing(5.0, at);
+            Ok(())
+        })
+        .unwrap_err();
+    assert!(format!("{err:#}").contains("Vast key belongs to vast:2"), "{err:#}");
+}
+
+#[test]
+fn a_vast_only_ledger_never_needs_the_runpod_organization() {
+    let repo = repo_with_issue("harness-test-vast", &[]);
+    let at: Timestamp = "2026-11-04T17:00:00Z".parse().unwrap();
+    let store = |runpod: Option<&str>| {
+        LedgerStore::new(repo.path(), "harness-test-vast")
+            .with_account(runpod)
+            .with_vast_account(VastAccount::Known("vast:424242".into()))
+    };
+    store(Some("org-sm120"))
+        .update(|ledger| {
+            ledger.budget = Some(Budget {
+                usd: 1.0,
+                approved_at: at,
+                note: "smoke".into(),
+            });
+            ledger.reserve_vast("sm120-harness-test-vast-0a0b0c", &offer(), 0.25, 0, at)
+        })
+        .unwrap();
+    // RunPod's organization read fails, or the key is another organization's: no RunPod pod here is at stake.
+    for runpod in [None, Some("org-other")] {
+        check_accounts(repo.path(), runpod).unwrap();
+    }
+    store(None)
+        .update(|ledger| {
+            ledger
+                .entry_mut("sm120-harness-test-vast-0a0b0c")?
+                .mark_live("31000001")
+        })
+        .unwrap();
+    store(Some("org-other"))
+        .update(|ledger| ledger.entry_mut("sm120-harness-test-vast-0a0b0c")?.mark_terminated(at))
         .unwrap();
 }

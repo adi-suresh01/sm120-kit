@@ -7,15 +7,15 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand};
-use jiff::SignedDuration;
+use jiff::{SignedDuration, Timestamp};
 use serde_json::json;
-use sm120_harness::clock::SystemClock;
+use sm120_harness::clock::{Clock, SystemClock};
 use sm120_harness::cloud::{API_BASE, Providers, RunpodRest};
 use sm120_harness::events::{Events, Kind};
 use sm120_harness::ledger::LedgerStore;
 use sm120_harness::pod::{self, AfterFailure, Ctx};
 use sm120_harness::session::{SshRemote, TRANSFER_LIMIT};
-use sm120_harness::spec::{IssueSpec, Provider, is_slug};
+use sm120_harness::spec::{IssueSpec, is_slug};
 use sm120_harness::vast::{self, VastApi, VastRest};
 use sm120_harness::watch::{self, Outcome};
 use sm120_harness::{budget, exec, reap};
@@ -212,13 +212,16 @@ fn run(cli: Cli) -> Result<ExitCode> {
     let clock = SystemClock;
     let events = Events::new(&repo.join("results"), &clock, true);
     let runpod = RunpodRest::new(API_BASE, &api_key, &clock);
-    let vast_key = match vast::configured_key() {
-        Ok(key) => key.filter(|_| vast_in_use(&repo, issue.as_deref())),
-        Err(e) => {
+    // The key is read only when this command may touch Vast, so a key file that cannot be read never warns on a
+    // RunPod-only command.
+    let vast_key = if vast_in_use(&repo, issue.as_deref(), clock.now()) {
+        vast::configured_key().unwrap_or_else(|e| {
             let detail = format!("Vast is set aside for this command, and its pods are left alone: {e:#}");
             events.emit(issue.as_deref(), Kind::Warn, json!({ "detail": detail }));
             None
-        }
+        })
+    } else {
+        None
     };
     let vast = vast_key.map(|key| VastRest::new(vast::API_BASE, &key, &clock));
     let result = dispatch(
@@ -236,16 +239,14 @@ fn run(cli: Cli) -> Result<ExitCode> {
     result
 }
 
-/// Whether this command may touch Vast: some ledger holds a Vast pod, or the command's issue has a Vast choice. Any
-/// other command never calls Vast, so a hung Vast API cannot hold up a RunPod `down` while its pod bills. A ledger
-/// that does not load could hold a Vast pod, so it counts as one.
-fn vast_in_use(repo: &Path, issue: Option<&str>) -> bool {
+/// Whether this command may touch Vast: some ledger holds a Vast pod that is not settled yet, or the command's issue
+/// has a Vast choice. Any other command never calls Vast, so a hung Vast API cannot hold up a RunPod `down` while its
+/// pod bills. A ledger that does not load could hold a Vast pod, so it counts as one.
+fn vast_in_use(repo: &Path, issue: Option<&str>, now: Timestamp) -> bool {
     let ledgers = LedgerStore::all(repo).map(|stores| {
-        stores.iter().any(|store| {
-            store.load().map_or(true, |ledger| {
-                ledger.pods.iter().any(|pod| pod.provider == Provider::Vast)
-            })
-        })
+        stores
+            .iter()
+            .any(|store| store.load().map_or(true, |ledger| ledger.holds_unsettled_vast(now)))
     });
     let spec = issue
         .and_then(|issue| IssueSpec::load(repo, issue).ok())
@@ -364,17 +365,49 @@ mod tests {
         let repo = std::env::temp_dir().join(format!("sm120-vast-in-use-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&repo);
         let issue = |name: &str| repo.join("issues").join(name);
+        let now: Timestamp = "2026-11-06T17:00:00Z".parse().unwrap();
         std::fs::create_dir_all(issue("rp-1")).unwrap();
         let runpod_ledger = r#"{"issue": "rp-1", "budget": null, "pods": []}"#;
         std::fs::write(issue("rp-1").join("harness-ledger.json"), runpod_ledger).unwrap();
-        assert!(!vast_in_use(&repo, Some("rp-1")) && !vast_in_use(&repo, None));
+        assert!(!vast_in_use(&repo, Some("rp-1"), now) && !vast_in_use(&repo, None, now));
         let real = Path::new(env!("CARGO_MANIFEST_DIR")).join("../issues/harness-test-vast/harness.toml");
         std::fs::create_dir_all(issue("harness-test-vast")).unwrap();
         std::fs::copy(real, issue("harness-test-vast").join("harness.toml")).unwrap();
-        assert!(vast_in_use(&repo, Some("harness-test-vast")) && !vast_in_use(&repo, Some("rp-1")));
+        assert!(vast_in_use(&repo, Some("harness-test-vast"), now) && !vast_in_use(&repo, Some("rp-1"), now));
+        std::fs::create_dir_all(issue("vast-1")).unwrap();
+        let vast_ledger = |state: &str, abandoned: bool| {
+            let booked = match state {
+                "terminated" => {
+                    r#""id": "31000001", "terminated_at": "2026-11-04T17:30:00Z", "cost_usd": 0.1, "cost_source": "billing""#
+                }
+                "live" => r#""id": "31000001", "terminated_at": null, "cost_usd": null, "cost_source": null"#,
+                _ => r#""id": null, "terminated_at": null, "cost_usd": null, "cost_source": null"#,
+            };
+            let ledger = format!(
+                r#"{{"issue": "vast-1", "budget": null, "vast": {{"account": "vast:1"}}, "pods": [{{
+                "name": "sm120-vast-1-0a0b0c", "provider": "vast", "state": "{state}", "gpu": "g", "count": 1,
+                "cloud": "COMMUNITY", "rate_usd_hr": 1.0, "reserved_usd": 1.1, "reserved_at": "2026-11-04T17:00:00Z",
+                "deadline": "2026-11-06T18:00:00Z", {booked}, "abandoned": {abandoned},
+                "placement": {{"offer": 1, "machine": 2, "host": 3}}}}]}}"#
+            );
+            std::fs::write(issue("vast-1").join("harness-ledger.json"), ledger).unwrap();
+        };
+        // Booked from a bill that has had two days to settle: nothing on Vast is left to read.
+        vast_ledger("terminated", false);
+        assert!(!vast_in_use(&repo, Some("rp-1"), now));
+        vast_ledger("live", false);
+        assert!(vast_in_use(&repo, Some("rp-1"), now));
+        // A failed create the harness gave up on counts until its deadline.
+        vast_ledger("create_failed", true);
+        assert!(vast_in_use(&repo, Some("rp-1"), now));
+        assert!(!vast_in_use(
+            &repo,
+            Some("rp-1"),
+            "2026-11-06T18:00:01Z".parse().unwrap()
+        ));
         std::fs::write(issue("rp-1").join("harness-ledger.json"), "{not json").unwrap();
         assert!(
-            vast_in_use(&repo, None),
+            vast_in_use(&repo, None, now),
             "a ledger that does not load could hold a Vast pod"
         );
         std::fs::remove_dir_all(repo).unwrap();

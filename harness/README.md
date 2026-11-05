@@ -279,8 +279,9 @@ The same layers, mapped:
    nothing ties the box's life to the watchdog's, the check runs again before each variant and after any failed
    poll, and a box whose watchdog is gone is destroyed then; a check that cannot run only warns.
 3. **Reaper.** Lists Vast's instances (all pages, or an error) beside RunPod's, whenever a Vast key is set and some
-   ledger holds a Vast pod or the command's issue has a Vast choice; other commands never call Vast, so a hung Vast
-   API cannot hold up a RunPod `down`. A pod missing from the list within 10 min of its reservation is left alone,
+   ledger holds a Vast pod that is not settled (live, reserved, abandoned, or with a bill that may still change), or
+   the command's issue has a Vast choice; other commands never read the Vast key or call Vast, so a hung Vast API
+   cannot hold up a RunPod `down`. A pod missing from the list within 10 min of its reservation is left alone,
    since Vast can be slow to show a new instance. Each provider's entries are settled against that provider's own
    list only, so neither list books, releases, or ends a pod on the other. Only instances a ledger tracks are ever
    ended; others named `sm120-*` get a warning, and every other instance on the account is left alone.
@@ -299,7 +300,10 @@ The same layers, mapped:
 Vast answers a key that cannot see an instance as if it were gone, so the ledger records the Vast account
 (`vast:<user id>`, from `GET /api/v0/users/current/`) with its first Vast pod, and a Vast key of another account is
 refused before anything reads a Vast pod as gone, as is a key whose account cannot be read. A RunPod key is never
-checked against a Vast pod, or the reverse. Any command but `down` and `reap` whose Vast account check fails sets Vast
+checked against a Vast pod, or the reverse: each provider's key is checked only against ledgers where that provider
+has a pod at stake (live, reserved, abandoned, or booked at an estimate), or that the write adds or changes one of
+its pods, so an account that differs or cannot be read never changes that provider's pods. A ledger with no Vast pod
+keeps RunPod's rule, where every write checks the RunPod key. Any command but `down` and `reap` whose Vast account check fails sets Vast
 aside with a warning, as does a key file that cannot be read, so neither stops a RunPod-only command.
 
 Taken from the vastai 1.10 CLI and still to confirm on the first live box: the env names `CONTAINER_ID` and

@@ -246,6 +246,44 @@ impl Ledger {
         }
     }
 
+    /// Whether this ledger holds a pod of `provider` that a key of another account could misread: one that may still
+    /// bill (live, reserved, or abandoned) or is booked at an estimate that billing replaces. A ledger without Vast pods
+    /// keeps the rule RunPod always had, where every write checks the RunPod key.
+    pub fn needs_account(&self, provider: Provider) -> bool {
+        let at_stake = self.pods.iter().any(|pod| {
+            pod.provider == provider
+                && (matches!(pod.state, PodState::Live | PodState::Reserved)
+                    || pod.abandoned
+                    || pod.cost_source == Some(CostSource::Estimate))
+        });
+        at_stake || (provider == Provider::Runpod && self.pods.iter().all(|pod| pod.provider == Provider::Runpod))
+    }
+
+    /// Whether a command has to reach Vast for this ledger: a Vast pod that may still bill or whose bill may still
+    /// change. An abandoned failed create counts until its deadline, past which any box it made has destroyed itself.
+    pub fn holds_unsettled_vast(&self, now: Timestamp) -> bool {
+        self.pods.iter().any(|pod| {
+            pod.provider == Provider::Vast
+                && (matches!(pod.state, PodState::Live | PodState::Reserved)
+                    || (pod.abandoned && now <= pod.deadline)
+                    || pod.needs_billing(now))
+        })
+    }
+
+    /// Whether this ledger, written over `before`, puts pods of `provider` at stake: it needs that provider's
+    /// account, or the write added, removed, or changed one of that provider's pods.
+    fn at_stake(&self, before: &Ledger, provider: Provider) -> bool {
+        let on = |ledger: &Ledger| -> Vec<PodEntry> {
+            ledger
+                .pods
+                .iter()
+                .filter(|pod| pod.provider == provider)
+                .cloned()
+                .collect()
+        };
+        self.needs_account(provider) || before.needs_account(provider) || on(self) != on(before)
+    }
+
     /// With no Vast key nothing reads Vast, so no Vast pod can be read as gone. A key of another account, or one whose
     /// account could not be read, is refused once the ledger has recorded one, as for RunPod.
     pub fn check_vast_account(&self, current: &VastAccount) -> Result<()> {
@@ -627,7 +665,9 @@ pub struct LedgerStore {
 /// does not load is left to the reaper, which reports it.
 pub fn check_accounts(repo: &Path, current: Option<&str>) -> Result<()> {
     for store in LedgerStore::all(repo)? {
-        if let Ok(ledger) = store.load() {
+        if let Ok(ledger) = store.load()
+            && ledger.needs_account(Provider::Runpod)
+        {
             ledger.check_account(current)?;
         }
     }
@@ -637,7 +677,9 @@ pub fn check_accounts(repo: &Path, current: Option<&str>) -> Result<()> {
 /// As `check_accounts`, for the Vast key against every ledger's Vast pods.
 pub fn check_vast_accounts(repo: &Path, current: &VastAccount) -> Result<()> {
     for store in LedgerStore::all(repo)? {
-        if let Ok(ledger) = store.load() {
+        if let Ok(ledger) = store.load()
+            && ledger.needs_account(Provider::Vast)
+        {
             ledger.check_vast_account(current)?;
         }
     }
@@ -725,12 +767,17 @@ impl LedgerStore {
         lock.lock()
             .with_context(|| format!("locking {}", self.lock_path.display()))?;
         let before = self.load()?;
-        before.check_account(self.account.as_deref())?;
-        before.check_vast_account(&self.vast_account)?;
+        self.check_accounts_for(&before, &before, &Provider::ALL)?;
         let mut ledger = before.clone();
         let out = change(&mut ledger)?;
         if ledger != before {
-            if ledger.account.is_none() {
+            // A write that puts a provider's pods at stake checks that provider's key as well.
+            let newly: Vec<Provider> = Provider::ALL
+                .into_iter()
+                .filter(|&provider| !before.needs_account(provider) && ledger.at_stake(&before, provider))
+                .collect();
+            self.check_accounts_for(&before, &ledger, &newly)?;
+            if ledger.account.is_none() && ledger.at_stake(&before, Provider::Runpod) {
                 ledger.account.clone_from(&self.account);
             }
             if ledger.vast.account.is_none() && ledger.pods.iter().any(|pod| pod.provider == Provider::Vast) {
@@ -740,6 +787,20 @@ impl LedgerStore {
             self.write(&ledger)?;
         }
         Ok(out)
+    }
+
+    /// Checks the key of each of `providers` whose pods `after` puts at stake, against what `before` recorded.
+    fn check_accounts_for(&self, before: &Ledger, after: &Ledger, providers: &[Provider]) -> Result<()> {
+        for &provider in providers {
+            if !after.at_stake(before, provider) {
+                continue;
+            }
+            match provider {
+                Provider::Runpod => before.check_account(self.account.as_deref())?,
+                Provider::Vast => before.check_vast_account(&self.vast_account)?,
+            }
+        }
+        Ok(())
     }
 
     fn write(&self, ledger: &Ledger) -> Result<()> {
