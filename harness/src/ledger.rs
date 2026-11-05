@@ -51,6 +51,30 @@ impl VastBook {
     }
 }
 
+/// What a command knows of its Vast key, for the account check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VastAccount {
+    /// No Vast client.
+    Absent,
+    /// A Vast client whose account could not be read.
+    Unknown,
+    /// `vast:<user id>`.
+    Known(String),
+}
+
+impl VastAccount {
+    pub fn of(account: Option<&str>) -> Self {
+        account.map_or(Self::Unknown, |account| Self::Known(account.to_string()))
+    }
+
+    fn known(&self) -> Option<&str> {
+        match self {
+            Self::Known(account) => Some(account),
+            Self::Absent | Self::Unknown => None,
+        }
+    }
+}
+
 /// Where a Vast pod was rented: the offer it was created from and the machine and host behind it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VastPlacement {
@@ -151,12 +175,18 @@ impl Ledger {
         }
     }
 
-    /// Only a recorded account that differs refuses: with no Vast key, or none readable, nothing reads Vast at all.
-    pub fn check_vast_account(&self, current: Option<&str>) -> Result<()> {
+    /// With no Vast key nothing reads Vast, so no Vast pod can be read as gone. A key of another account, or one whose
+    /// account could not be read, is refused once the ledger has recorded one, as for RunPod.
+    pub fn check_vast_account(&self, current: &VastAccount) -> Result<()> {
         match (self.vast.account.as_deref(), current) {
-            (Some(recorded), Some(current)) if recorded != current => bail!(
+            (Some(recorded), VastAccount::Known(current)) if recorded != current => bail!(
                 "issues/{}/harness-ledger.json holds Vast pods of account {recorded}, but the Vast key belongs to \
                  {current}; Vast shows that key none of these pods, so the harness stops before reading one as gone",
+                self.issue
+            ),
+            (Some(recorded), VastAccount::Unknown) => bail!(
+                "issues/{}/harness-ledger.json holds Vast pods of account {recorded}, and the Vast key's account could \
+                 not be read, so the harness cannot tell it is the same account",
                 self.issue
             ),
             _ => Ok(()),
@@ -432,6 +462,12 @@ impl PodEntry {
         }
     }
 
+    /// Within the adopt window of its reservation, a provider may still leave a new pod out of every read, so its
+    /// absence there is no evidence that it is gone.
+    pub fn may_be_unlisted(&self, now: Timestamp) -> bool {
+        now.duration_since(self.reserved_at) <= ADOPT_WINDOW
+    }
+
     pub fn needs_billing(&self, now: Timestamp) -> bool {
         match (self.state, self.cost_source, self.terminated_at) {
             (PodState::Terminated, Some(CostSource::Estimate), Some(_)) => true,
@@ -466,7 +502,7 @@ pub struct LedgerStore {
     path: PathBuf,
     lock_path: PathBuf,
     account: Option<String>,
-    vast_account: Option<String>,
+    vast_account: VastAccount,
 }
 
 /// Run before anything reads a 404 as "gone": every ledger that loads must match the key's account. A ledger that
@@ -481,7 +517,7 @@ pub fn check_accounts(repo: &Path, current: Option<&str>) -> Result<()> {
 }
 
 /// As `check_accounts`, for the Vast key against every ledger's Vast pods.
-pub fn check_vast_accounts(repo: &Path, current: Option<&str>) -> Result<()> {
+pub fn check_vast_accounts(repo: &Path, current: &VastAccount) -> Result<()> {
     for store in LedgerStore::all(repo)? {
         if let Ok(ledger) = store.load() {
             ledger.check_vast_account(current)?;
@@ -498,7 +534,7 @@ impl LedgerStore {
             path: dir.join("harness-ledger.json"),
             lock_path: dir.join(".harness-ledger.lock"),
             account: None,
-            vast_account: None,
+            vast_account: VastAccount::Absent,
         }
     }
 
@@ -509,8 +545,8 @@ impl LedgerStore {
     }
 
     /// As `with_account`, for the Vast key, recorded once the ledger holds a Vast pod.
-    pub fn with_vast_account(mut self, account: Option<&str>) -> Self {
-        self.vast_account = account.map(str::to_string);
+    pub fn with_vast_account(mut self, account: VastAccount) -> Self {
+        self.vast_account = account;
         self
     }
 
@@ -572,7 +608,7 @@ impl LedgerStore {
             .with_context(|| format!("locking {}", self.lock_path.display()))?;
         let before = self.load()?;
         before.check_account(self.account.as_deref())?;
-        before.check_vast_account(self.vast_account.as_deref())?;
+        before.check_vast_account(&self.vast_account)?;
         let mut ledger = before.clone();
         let out = change(&mut ledger)?;
         if ledger != before {
@@ -580,7 +616,7 @@ impl LedgerStore {
                 ledger.account.clone_from(&self.account);
             }
             if ledger.vast.account.is_none() && !ledger.vast.pods.is_empty() {
-                ledger.vast.account.clone_from(&self.vast_account);
+                ledger.vast.account = self.vast_account.known().map(str::to_string);
             }
             ledger.check()?;
             self.write(&ledger)?;
@@ -848,17 +884,26 @@ mod tests {
     }
 
     #[test]
-    fn the_vast_account_refuses_only_a_different_one() {
+    fn the_vast_account_refuses_another_or_an_unreadable_one_once_recorded() {
+        let known = |account: &str| VastAccount::Known(account.into());
         let mut ledger = funded(50.0);
-        ledger.check_vast_account(Some("vast:1")).unwrap();
+        for current in [known("vast:1"), VastAccount::Unknown, VastAccount::Absent] {
+            ledger.check_vast_account(&current).unwrap();
+        }
         ledger.vast.account = Some("vast:1".into());
-        ledger.check_vast_account(Some("vast:1")).unwrap();
-        ledger.check_vast_account(None).unwrap();
-        let err = ledger.check_vast_account(Some("vast:2")).unwrap_err().to_string();
+        ledger.check_vast_account(&known("vast:1")).unwrap();
+        // Without a Vast key nothing reads Vast, so nothing can read one of these pods as gone.
+        ledger.check_vast_account(&VastAccount::Absent).unwrap();
+        let err = ledger.check_vast_account(&known("vast:2")).unwrap_err().to_string();
         assert!(
             err.contains("Vast pods of account vast:1, but the Vast key belongs to vast:2"),
             "{err}"
         );
+        let err = ledger
+            .check_vast_account(&VastAccount::Unknown)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("could not be read"), "{err}");
         // The RunPod organization is a separate fingerprint.
         ledger.check_account(Some("org-a")).unwrap();
     }

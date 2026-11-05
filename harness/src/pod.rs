@@ -18,7 +18,9 @@ use crate::cloud::{
     PodStatus, SshEndpoint, find_candidates,
 };
 use crate::events::{Events, Kind};
-use crate::ledger::{ADOPT_WINDOW, Ledger, LedgerStore, PodEntry, PodState, check_accounts, check_vast_accounts};
+use crate::ledger::{
+    ADOPT_WINDOW, Ledger, LedgerStore, PodEntry, PodState, VastAccount, check_accounts, check_vast_accounts,
+};
 use crate::session::{Remote, TRANSFER_LIMIT, Target, Watch, start_job, wait_job};
 use crate::spec::{IssueSpec, Provider};
 use crate::vast::{VastApi, VastCreateRequest, VastOffer};
@@ -70,9 +72,13 @@ pub struct Ctx<'a> {
 
 impl Ctx<'_> {
     pub fn ledger(&self, issue: &str) -> LedgerStore {
+        let vast = match self.cloud.vast() {
+            Some(_) => VastAccount::of(self.cloud.vast_account()),
+            None => VastAccount::Absent,
+        };
         LedgerStore::new(self.repo, issue)
             .with_account(self.account)
-            .with_vast_account(self.cloud.vast_account())
+            .with_vast_account(vast)
     }
 
     /// The client for a pod on `provider`.
@@ -80,12 +86,6 @@ impl Ctx<'_> {
         self.cloud
             .on(provider)
             .with_context(|| format!("this pod is on {provider}, but {NO_VAST_KEY}"))
-    }
-
-    pub fn vast(&self) -> Result<&dyn VastApi> {
-        self.cloud
-            .vast()
-            .with_context(|| format!("this needs Vast, but {NO_VAST_KEY}"))
     }
 
     pub fn check_interrupted(&self) -> Result<()> {
@@ -212,7 +212,7 @@ pub fn vast_key_account(
     issue: Option<&str>,
     ends_pods: bool,
 ) -> Result<Option<String>> {
-    let check = |account: Option<&str>| check_vast_accounts(repo, account);
+    let check = |account: Option<&str>| check_vast_accounts(repo, &VastAccount::of(account));
     settle_account(
         vast.account(),
         "the Vast key's account",
@@ -1321,7 +1321,15 @@ fn end_pod(ctx: &Ctx, issue: &str, entry: &PodEntry, provider: Provider, overdue
         .as_deref()
         .with_context(|| format!("pod {} has no id to terminate", entry.name))?;
     let cloud = ctx.cloud_on(provider)?;
+    // A Vast instance no read has shown yet may still appear, so after its destroy, absence would prove nothing.
+    let unseen = provider == Provider::Vast && entry.may_be_unlisted(ctx.clock.now()) && cloud.get_pod(id)?.is_none();
     cloud.delete_pod(id)?;
+    ensure!(
+        !unseen,
+        "Vast does not show instance {id} yet, so its destroy cannot be confirmed; it stays live in the ledger, and \
+         the reaper books it once Vast has had {} min to show it",
+        ADOPT_WINDOW.as_mins()
+    );
     confirm_gone(ctx, cloud, id)?;
     let at = ctx.clock.now();
     let entry = ctx.ledger(issue).update(|ledger| {

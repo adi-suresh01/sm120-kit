@@ -44,11 +44,20 @@ fn listed<'a>(pods: &'a [Pod], id: &str) -> Option<&'a Pod> {
         .find(|pod| pod.id == id && pod.status != PodStatus::Terminated)
 }
 
-fn live_action(issue: &str, entry: &PodEntry, id: &str, pods: &[Pod], now: Timestamp) -> Option<Action> {
+fn live_action(
+    provider: Provider,
+    issue: &str,
+    entry: &PodEntry,
+    id: &str,
+    pods: &[Pod],
+    now: Timestamp,
+) -> Option<Action> {
     let (issue, name, id) = (issue.to_string(), entry.name.clone(), id.to_string());
     // A deadline too close to the end of time to add the grace to is not one the watchdog will ever reach.
     let overdue = entry.deadline.checked_add(GRACE).is_ok_and(|end| now > end);
     match listed(pods, &id) {
+        // Vast can leave a new instance out of its list for a while; another command's `up` may have just made it.
+        None if provider == Provider::Vast && entry.may_be_unlisted(now) => None,
         None => Some(Action::MarkGone { issue, name }),
         Some(pod) if overdue => Some(Action::Terminate {
             issue,
@@ -77,7 +86,7 @@ pub fn decide_on(provider: Provider, ledgers: &[Ledger], pods: &[Pod], now: Time
             .filter(|entry| ledger.provider_of(&entry.name) == provider);
         for entry in ours {
             match (entry.state, entry.id.as_deref()) {
-                (PodState::Live, Some(id)) => actions.extend(live_action(issue, entry, id, pods, now)),
+                (PodState::Live, Some(id)) => actions.extend(live_action(provider, issue, entry, id, pods, now)),
                 (PodState::Reserved, _) => match pods.iter().find(|pod| pod.name == entry.name) {
                     Some(pod) => {
                         actions.push(Action::Adopt {
@@ -85,7 +94,7 @@ pub fn decide_on(provider: Provider, ledgers: &[Ledger], pods: &[Pod], now: Time
                             name: entry.name.clone(),
                             id: pod.id.clone(),
                         });
-                        actions.extend(live_action(issue, entry, &pod.id, pods, now));
+                        actions.extend(live_action(provider, issue, entry, &pod.id, pods, now));
                     }
                     None if now.duration_since(entry.reserved_at) > ADOPT_WINDOW => actions.push(Action::Release {
                         issue: issue.to_string(),
@@ -475,6 +484,20 @@ mod tests {
         assert_eq!(
             decide_on(Provider::Vast, &ledgers, &stopped, at("2026-10-16T18:02:01Z")),
             [overdue]
+        );
+    }
+
+    #[test]
+    fn a_new_vast_pod_missing_from_the_list_is_not_booked_gone_inside_the_adopt_window() {
+        let ledgers = [vast_ledger_with(PodState::Live)];
+        assert!(decide_on(Provider::Vast, &ledgers, &[], at("2026-10-16T17:09:59Z")).is_empty());
+        let gone = Action::MarkGone {
+            issue: VAST_ISSUE.into(),
+            name: VAST_NAME.into(),
+        };
+        assert_eq!(
+            decide_on(Provider::Vast, &ledgers, &[], at("2026-10-16T17:10:01Z")),
+            [gone]
         );
     }
 

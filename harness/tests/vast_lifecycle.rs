@@ -465,12 +465,20 @@ fn a_new_instance_vast_does_not_show_yet_is_waited_for_not_destroyed() {
 }
 
 #[test]
-fn an_instance_vast_never_shows_is_destroyed_after_two_minutes() {
+fn an_instance_vast_never_shows_is_destroyed_and_booked_only_after_the_adopt_window() {
     let w = World::new();
     w.vast.0.borrow_mut().hidden_reads = usize::MAX;
     let err = format!("{:#}", w.up().unwrap_err());
     assert!(err.contains("pod 31000001 disappeared while starting"), "{err}");
+    assert!(err.contains("its destroy cannot be confirmed"), "{err}");
     assert_eq!(w.vast.0.borrow().deleted, ["31000001"]);
+    // An instance no read has shown may still appear, so the reservation stays held until the reaper books it.
+    assert_eq!(w.ledger().pods[0].state, PodState::Live);
+    w.with(reap::reap).unwrap();
+    assert_eq!(w.ledger().pods[0].state, PodState::Live);
+    w.clock.advance(SignedDuration::from_mins(9));
+    w.with(reap::reap).unwrap();
+    assert_eq!(w.ledger().pods[0].state, PodState::Terminated);
 }
 
 #[test]

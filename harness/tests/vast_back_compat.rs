@@ -6,7 +6,7 @@ mod support;
 use std::fs;
 use std::path::Path;
 
-use sm120_harness::ledger::{Budget, LedgerStore};
+use sm120_harness::ledger::{Budget, LedgerStore, VastAccount};
 use sm120_harness::spec::{IssueSpec, Provider};
 use sm120_harness::vast::VastOffer;
 use support::repo_with_issue;
@@ -83,9 +83,10 @@ fn the_vast_account_is_recorded_with_the_first_vast_pod_and_holds_after() {
     let repo = repo_with_issue("harness-test-vast", &[]);
     let at = "2026-11-04T17:00:00Z".parse().unwrap();
     let store = |account: Option<&str>| {
+        let vast = account.map_or(VastAccount::Absent, |account| VastAccount::Known(account.into()));
         LedgerStore::new(repo.path(), "harness-test-vast")
             .with_account(Some("org-sm120"))
-            .with_vast_account(account)
+            .with_vast_account(vast)
     };
     store(Some("vast:424242"))
         .update(|ledger| {
@@ -109,6 +110,13 @@ fn the_vast_account_is_recorded_with_the_first_vast_pod_and_holds_after() {
         .update(|ledger| ledger.entry_mut("sm120-harness-test-vast-0a0b0c")?.mark_create_failed())
         .unwrap_err();
     assert!(format!("{err:#}").contains("Vast key belongs to vast:1"), "{err:#}");
+    let unknown = LedgerStore::new(repo.path(), "harness-test-vast")
+        .with_account(Some("org-sm120"))
+        .with_vast_account(VastAccount::Unknown);
+    let err = unknown
+        .update(|ledger| ledger.entry_mut("sm120-harness-test-vast-0a0b0c")?.mark_create_failed())
+        .unwrap_err();
+    assert!(format!("{err:#}").contains("could not be read"), "{err:#}");
     // A command without a Vast key reads nothing on Vast, so it may still write.
     store(None)
         .update(|ledger| ledger.entry_mut("sm120-harness-test-vast-0a0b0c")?.mark_create_failed())
