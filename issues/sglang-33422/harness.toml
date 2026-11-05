@@ -1,26 +1,36 @@
 issue = "sglang-33422"
-# Setup about 10 min (image, 167 GB of weights to container disk, prompts). s1's boot also pays the DeepGEMM
-# precompile (sglang warns 10-20 min), which later boots reuse. Variants run in order of value, so the deadline cuts
-# s4, then s0.
-planned_hours = 1.75
+# Sized for the 11-05 decode pair on a Max-Q box downloading at ~100 MB/s (README.md): up and setup about 47 min
+# (image pull, NCCL probe, 167 GB of weights), d1 36 (its boot pays the DeepGEMM precompile), d2 29, d3 29. d1 and d2
+# end near 1.9 h; d3 runs only when setup ends with 95 min left (README.md's rule), and last. The 10-17 variants
+# below do not fit: run them by name with their own planned_hours (1.75 then).
+planned_hours = 2.25
 
 [pod]
 # The newest release; FlashInfer 0.7.1 serves the DSpark draft's topk=192 without PR #33407 (README.md).
 image = "lmsysorg/sglang:v0.5.22-cu130@sha256:e3a4f06001a29542fc4a8638536d9ffc5eb9c9942b08603c09b19a56eae4a1ae"
 count = 4
 min_cuda = "13.0"
-# The image plus 167 GB of weights, which setup.sh keeps on container disk: /workspace is a FUSE mount on secure
-# pods and read the vllm-56771 checkpoint too slowly to boot.
+# On Vast both sizes make one 280 GB disk: the image, 167 GB of weights, ShareGPT, the prompts, and logs. On RunPod
+# the weights stay on container disk, since /workspace is a FUSE mount on secure pods and read the vllm-56771
+# checkpoint too slowly to boot.
 container_disk_gb = 260
-# HF_HOME's small files, the prompts, and logs.
 volume_gb = 20
 needs_hf_token = false
-# EUR-IS-2's one 4x host reached HF at 15 MB/s on 10-16 (issues/vllm-56771/README.md). US-NC-1 handed out GPUs
-# that a process outside the container already held (70-90 GB used) on two pods in a row on 10-17.
+# The P2P-on arms need a box where P2P can work at all.
+require_p2p = true
+# The image (15.6 GB compressed), the weights (166.9 GB), ShareGPT (0.67 GB), and apt, with a little margin.
+expected_download_gb = 190
+# RunPod's, so no choice below reads it; kept for a RunPod rerun of the 10-17 matrix. EUR-IS-2's one 4x host reached
+# HF at 15 MB/s on 10-16 (issues/vllm-56771/README.md). US-NC-1 handed out GPUs that a process outside the container
+# already held (70-90 GB used) on two pods in a row on 10-17.
 avoid_data_centers = ["EUR-IS-2", "US-NC-1"]
-# The reporter's box is 4x Max-Q Workstation Edition, PCIe only; the Workstation Edition had no 4x stock on 10-16.
+# Vast only for the P2P pair: the one 4x RunPod host that ran on 10-17 hung NCCL with P2P on (below), and RunPod
+# picks the host. The reporter's card first (Max-Q, 300 W), then the 600 W Server and Workstation Editions; free 4x
+# boxes listed at $5.87-8.17/hr on 11-05.
 gpus = [
-  { id = "NVIDIA RTX PRO 6000 Blackwell Server Edition", cloud = "SECURE" },
+  { provider = "vast", id = "RTX PRO 6000 Max-Q", max_usd_hr = 10.0, min_reliability = 0.95 },
+  { provider = "vast", id = "RTX PRO 6000 S", max_usd_hr = 10.0, min_reliability = 0.95 },
+  { provider = "vast", id = "RTX PRO 6000 WS", max_usd_hr = 10.0, min_reliability = 0.95 },
 ]
 
 [server]
@@ -45,11 +55,58 @@ base_flags = [
 port = 30000
 # The last pattern is FlashInfer 0.7.1's own dispatch error, the form #33407's boot crash would take on this stack.
 fail_pattern = "illegal memory access|cudaErrorIllegalAddress|CUDA error: |SM120 sparse-MLA has no decode kernel"
-# Reading 167 GB, the DeepGEMM precompile on the first boot, autotune on s1a, and graph capture.
-boot_timeout_s = 2400
+# Reading 167 GB, the DeepGEMM precompile on the first boot (s1's boot took 474 s on 10-17), and graph capture. s1a's
+# extended autotune pass ran 20 min on 10-17 and its boot reached 1,327 s before the OOM; set 2400 again to rerun s1a.
+boot_timeout_s = 1800
 
-# Every variant sets NCCL_P2P_DISABLE=1, as the vLLM baseline did: on 10-17 a secure 4x host with its GPUs on NUMA
-# nodes 0 and 3 hung s1 right after NCCL init for 15 min (GPUs at 100% with 1 GB used), the split-NUMA P2P hang.
+# 2026-11-05, the decode pair the reporter plans for his own box (README.md): s3-ep4's flags with only NCCL's P2P
+# setting changed, NCCL_DEBUG=INFO so each rank's NCCL log names its channels' transport (pre_launch gives it a file;
+# post_stop condenses the files into nccl_transport.txt), and decode rows in place of the prefill workloads
+# (BENCH_KIND, hooks.sh). They come first
+# because `harness run` and `exec` with no names run every variant in file order; name them anyway (README.md).
+# With COLL left out, NCCL logs when it builds communicators and connections (the warmup), not per collective.
+# P2P on as the reporter runs it, NCCL's defaults. NCCL reads "0" as unset, and setting it keeps an inherited 1 out.
+[variants.d1-ep4-p2p-on]
+flags = [
+  "--moe-runner-backend", "flashinfer_mxfp4", "--chunked-prefill-size", "4096", "--disable-flashinfer-autotune",
+  "--ep-size", "4",
+]
+env = { NCCL_P2P_DISABLE = "0", NCCL_DEBUG = "INFO", NCCL_DEBUG_SUBSYS = "INIT,ENV,GRAPH", BENCH_KIND = "decode" }
+# A P2P path that corrupts data runs at full speed, so the rows need a correctness check beside them (18 s on s3).
+[variants.d1-ep4-p2p-on.quality]
+gsm8k = 20
+
+# P2P off: every pair through host memory (SHM), as every 10-17 variant ran.
+[variants.d2-ep4-p2p-off]
+flags = [
+  "--moe-runner-backend", "flashinfer_mxfp4", "--chunked-prefill-size", "4096", "--disable-flashinfer-autotune",
+  "--ep-size", "4",
+]
+env = { NCCL_P2P_DISABLE = "1", NCCL_DEBUG = "INFO", NCCL_DEBUG_SUBSYS = "INIT,ENV,GRAPH", BENCH_KIND = "decode" }
+[variants.d2-ep4-p2p-off.quality]
+gsm8k = 20
+
+# Run only when d1's nccl_transport.txt shows SHM on some pair. NCCL 2.30.7 defaults to P2P only between GPUs under
+# one PCIe switch (PIX or PXB, src/graph/paths.cc:356; the AMD exception at :361 needs two GPUs or fewer), so where
+# the GPUs meet at a CPU root port, d1 runs d2's transport. SYS allows P2P on every pair whose NVML read and write
+# status is OK. NCCL reads NCCL_P2P_DISABLE before the level (paths.cc:247-253), so an inherited 1 would win; "0"
+# keeps it out.
+[variants.d3-ep4-p2p-sys]
+flags = [
+  "--moe-runner-backend", "flashinfer_mxfp4", "--chunked-prefill-size", "4096", "--disable-flashinfer-autotune",
+  "--ep-size", "4",
+]
+[variants.d3-ep4-p2p-sys.env]
+NCCL_P2P_DISABLE = "0"
+NCCL_P2P_LEVEL = "SYS"
+NCCL_DEBUG = "INFO"
+NCCL_DEBUG_SUBSYS = "INIT,ENV,GRAPH"
+BENCH_KIND = "decode"
+[variants.d3-ep4-p2p-sys.quality]
+gsm8k = 20
+
+# Every 10-17 variant sets NCCL_P2P_DISABLE=1, as the vLLM baseline did: on 10-17 a secure 4x host with its GPUs on
+# NUMA nodes 0 and 3 hung s1 right after NCCL init for 15 min (GPUs at 100% with 1 GB used), the split-NUMA P2P hang.
 # The baseline: the reporter's config without DSpark, first so one number lands even if a later variant fails.
 [variants.s1-base]
 flags = ["--moe-runner-backend", "flashinfer_mxfp4", "--chunked-prefill-size", "4096", "--disable-flashinfer-autotune"]

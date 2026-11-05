@@ -211,7 +211,10 @@ harness down sglang-33422
 | `setup.sh` | Image check, prompts, weights to container disk, page-cache drop, cold-read gate |
 | `build_prompts.py` | The warmup, W1, and W2 prompts, sized by the templated count |
 | `prefill_bench.py` | The workloads against the live server (post_smoke) |
-| `hooks.sh` | post_smoke runs `prefill_bench.py`; post_stop keeps the scheduler's prefill lines |
+| `hooks.sh` | post_smoke runs `prefill_bench.py`, or `decode_bench.py` for `BENCH_KIND=decode`; post_stop keeps the scheduler's prefill lines and, with `NCCL_DEBUG=INFO`, `nccl_transport.txt` |
+| `decode_bench.py` | The 11-05 decode rows: `sglang.bench_serving` per row, `decode_rows.csv` (post_smoke) |
+| `nccl_probe.py` | One allreduce group over all GPUs under one P2P setting, run by setup.sh per decode arm |
+| `nccl_transport.sh` | NCCL's transport lines from a log, for the probe and each decode arm |
 
 `build_prompts.py` and `prefill_bench.py` are copied byte for byte into `issues/sglang-33422-vllm/`, since the
 harness ships only the issue folder to the pod; change both copies together.
@@ -266,3 +269,200 @@ probe correct on every variant, `#cached-token` 0 on every W1/W2 chunk.
 
 Cost: $16.87 of the $20 budget ($1.49 + $0.13 + $15.25, ledger estimates); with the vLLM side, $21.39 for the
 issue. Posted on sglang#33422 (issuecomment-6231294981).
+
+## Decode pair: P2P on vs off (planned 2026-11-05)
+
+### Question
+
+The reporter plans four arms on his 8x RTX PRO 6000 Max-Q box (325 W limit, 300 W default, four NUMA domains, every
+GPU in production) in a maintenance window, and offered a two-arm subset first (issuecomment-6650523367): GPUs 0-3,
+`--tp-size 4 --ep-size 4`, DSpark off, NCCL P2P on vs off (`NCCL_P2P_DISABLE=1`), on `lmsysorg/sglang:dev-dsv41`
+with DeepSeek-V4.1-Flash. His method: `NCCL_DEBUG=INFO` with the per-channel transport lines (P2P vs SHM) quoted, so
+"P2P on" is evidence; W1 = 9 x 90K and W2 = 1 x 238K at c=1 and c=8; `sglang.bench_serving` with a fixed-length
+random dataset, greedy, N >= 8 per row; per row TTFT, median ITL beside mean TPOT, and the per-request decode tok/s
+distribution, since at 9 x 90K and c=8 a request that finished prefill waits on the others' prefill chunks, so mean
+TPOT carries prefill time. We said we would run the same pair on a rented box whose `nvidia-smi topo -p2p r` reads
+OK on every pair and post the rows before his window. The 10-17 run could only run P2P off (the split-NUMA hang
+above).
+
+Our rows use this kit's image and checkpoint, DeepSeek-V4-Flash-0731 on `lmsysorg/sglang:v0.5.22-cu130`, not his
+V4.1-Flash on `dev-dsv41`. Both sides agreed the rows pair only with each other: P2P on against P2P off on one box,
+never against his numbers.
+
+### Arms
+
+Every arm is s3-ep4: `base_flags` (his config, `--disable-custom-all-reduce` included) plus `--moe-runner-backend
+flashinfer_mxfp4 --chunked-prefill-size 4096 --disable-flashinfer-autotune --ep-size 4`, DSpark off, GSM8K 20,
+`NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=INIT,ENV,GRAPH`, and `BENCH_KIND=decode`. Only NCCL's P2P setting differs.
+
+| Variant | NCCL setting | Runs |
+|---|---|---|
+| d1-ep4-p2p-on | `NCCL_P2P_DISABLE=0`, which NCCL reads as unset: its defaults | always, first |
+| d2-ep4-p2p-off | `NCCL_P2P_DISABLE=1` | always, second |
+| d3-ep4-p2p-sys | `NCCL_P2P_DISABLE=0 NCCL_P2P_LEVEL=SYS` | only by the rule under Hours and cost |
+
+Why d3: the image's NCCL is 2.30.7 (`sglang is using nccl==2.30.7` in the 10-17 logs), and NCCL 2.30.7 uses P2P by
+default only up to PXB, between GPUs behind a common PCIe switch (`src/graph/paths.cc:356`; the AMD exception at
+:361 needs two GPUs or fewer, and `DEV` counts GPUs). Between GPUs that meet at a CPU root complex (PHB) or across
+NUMA domains (SYS) it picks SHM whether `NCCL_P2P_DISABLE` is set or not; `ncclGetLevel` maps 1 to LOC and leaves 0
+unset (:244-279). On such a box d1 runs d2's transport, and so would his P2P-on arm if GPUs 0-3 meet at the CPU.
+`NCCL_P2P_LEVEL=SYS` allows P2P on every pair whose NVML P2P read and write status is OK (:383-391); at SYS NCCL
+logs nothing when write is not (:400), so setup prints `nvidia-smi topo -p2p w` beside the read matrix. NCCL reads
+`NCCL_P2P_DISABLE` before the level (:247-253), so d3 sets it to 0 against an inherited 1. sglang sets
+`NCCL_CUMEM_ENABLE=0` (`entrypoints/engine.py:1875` at v0.5.22), so P2P lines read `via P2P/IPC`, SHM lines
+`via SHM/direct`.
+
+`--disable-custom-all-reduce` stays on every arm: it is his flag, and the pair shares it. sglang's custom allreduce,
+which reads peers' buffers through CUDA IPC, is a separate P2P lever this pair does not test.
+
+### Hypotheses
+
+| # | Hypothesis | Confirmed by | Killed by |
+|---|---|---|---|
+| H8 | NCCL's default follows the PXB rule here: P2P inside a PCIe switch, SHM between GPUs that meet at the CPU | d1's `nccl_transport.txt` pairs match `nvidia-smi topo -m` that way | `via P2P` under defaults on a PHB or SYS pair, or `via SHM` on a PIX or PXB pair |
+| H9 | Where NCCL uses P2P it cuts decode ITL at TP4: with TP4 attention and EP4 MoE each of the 43 layers runs at least two allreduces (attention output, MoE combine), so at c=1 a step runs at least 86 of 8 KiB (one token at hidden 4096, bf16), where SHM's copy through host memory costs latency, not bandwidth | the P2P arm (d1 when it reads P2P, else d3) at least 5% under d2 in median ITL at c=1 on W1 and W2 | within 2% of d2 |
+| H10 | When d1 reads SHM on every pair, d1 and d2 are the same run | d1 within 2% of d2 on median ITL and TTFT | d1 more than 5% off d2 |
+| H11 | At c=8, mean TPOT carries the other requests' prefill, if the scheduler runs prefill chunks ahead of decode (no mixed chunk) | on w1-c8 and w2-c8, mean TPOT above 2x median ITL and a wider per-request decode tok/s spread than at c=1, on every arm | mean TPOT within 20% of median ITL |
+
+Setup's probe (below) times one allreduce at 8 KiB and 64 KiB under each setting, so H9 has a per-call number
+beside the per-step one: 86 times the per-call gap between transports is about the least ITL gap to expect (launch
+overhead, which the server's CUDA graphs remove, is common to both transports and drops out of the gap).
+
+### Rows (`decode_bench.py`)
+
+- Client: `python3 -m sglang.bench_serving --backend sglang` against the live server, after GSM8K 20 (18 s on s3-ep4;
+  a P2P path that corrupts data would run at full speed, so the rows need it).
+- Rows, in order: w1-c1 (9 x 90K, c=1), w1-c8 (9 x 90K, c=8), w2-c1 (8 x 238K, c=1), w2-c8 (8 x 238K, c=8). W1 keeps
+  his 9 prompts; W2 sends 8 for N >= 8.
+- KV: the 10-17 boots allocated 6,873,088 full tokens and 687,104 SWA tokens (`DSV4 pool sizes` in s3-ep4's
+  server.log, 96 GB cards, `--mem-fraction-static 0.90`). w2-c8's 8 x 238K is 1.90M tokens, so all 8 run at once and
+  nothing is cut down. The Vast cards are 96 GB too; d1's log has its own pool line to check.
+- `--dataset-name random` (ShareGPT text repeated to length; setup.sh downloads it) with `--random-range-ratio 1`.
+  sglang draws each length from [ratio x target, target] (`benchmark/datasets/common.py:56-64` at v0.5.22), so 1
+  fixes the lengths and 0, the ratio that fixes vLLM's, spreads them from 1 token to the target. His "range ratio 0"
+  in sglang's client would send random lengths; worth telling him before his window.
+- Greedy and `ignore_eos` are the sglang backend's defaults (`benchmark/serving.py:695-697`, `--temperature` default
+  0 at :2514), so every request decodes all 512 tokens.
+- Output 512: 511 gaps per request (over 4,000 per row) hold the median and p99 ITL steady, and at the ~90 tok/s per
+  request the 10-17 decode lines show at 2-7 running requests, a request decodes for about 6 s. 1024 would add about
+  2 min per arm and resolve nothing the gaps do not.
+- `--seed 1` on every row, so every arm sends the same prompts. `--flush-cache`: the client's one warmup sends the
+  row's first prompt (`serving.py:1462-1478`), which would otherwise serve that request's prefill from the radix
+  cache. `--cache-report` records cached tokens per request, which should read 0.
+- `--tokenizer` is the pinned revision's snapshot, which setup.sh links; the model id alone would load main's.
+- Out: `<variant>/decode/<row>.jsonl` (bench_serving's record with `--output-details`: per-request TTFT, inter-token
+  gaps, server prompt tokens) and `<row>.txt`; `<variant>/decode_rows.csv`: variant, shape, input_len, concurrency,
+  prompts, completed, input_tokens (server), output_tokens, cached_tokens, TTFT mean and median, mean TPOT, median
+  and p99 ITL, per-request decode tok/s min, median, and max (a request's gaps over their sum), duration. A row that
+  completes fewer requests than it sent writes its line, then ends the variant as POST_FAIL.
+- NCCL's lines: NCCL 2.30.7 writes INFO to stdout without flushing (`src/debug.cc:376`) and the ranks end on
+  SIGKILL, so in server.log each rank would lose its last lines and the ranks interleave mid-line. `pre_launch`
+  sets `NCCL_DEBUG_FILE=<variant>/nccl.%h.%p.log`, which NCCL line-buffers (`debug.cc:240`); post_stop joins the
+  per-rank files (kept) into `<variant>/nccl.log` and condenses that into `<variant>/nccl_transport.txt`
+  (`nccl_transport.sh`): NCCL version, the NCCL env it read, each communicator's search result (the path type NCCL
+  saw), connections per rank pair and transport, and every channel line deduplicated across processes and
+  communicators.
+- Setup's NCCL probe (`nccl_probe.py`, before the weights): each arm's setting once over all four GPUs with the same
+  debug env, `NCCL_CUMEM_ENABLE=0`, and per-rank debug files, printing allreduce times at 8 KiB, 64 KiB, and 32 MiB
+  and the transport summary into the setup log; logs in `results/sglang-33422/nccl-probe/`. All three run before any
+  verdict, so the log tells the cases apart. Then: any probe that failed -> every GPU must drop under 2 GiB within
+  60 s (`harness/pod/wait_gpu_idle.sh`), since a rank killed in a hang can hold its GPU and fail d1's idle wait after
+  the download; d1's or d2's probe failed or hung -> setup ends, before the 167 GB download; d3's -> d3 is ruled out.
+  On 10-17 P2P on hung a boot for 15 min, and a d1 boot would wait out `boot_timeout_s` (30 min). The base image's
+  `NCCL_VERSION=2.28.3-1` env label is not the NCCL torch loads, so setup leaves it out; the probe's own log names
+  the version.
+- Setup's last lines: per probe arm, the transport each GPU pair used (P2P/IPC or SHM/direct), minutes spent and
+  minutes left to `HARNESS_DEADLINE_EPOCH`, and the d3 verdict with the exec command it implies.
+- Dry run (local, 11-05): `decode_bench.py` against a fake bench_serving that writes v0.5.22's record shape took the
+  argv above, wrote four CSV rows, and on a row one request short wrote its line and exited 1. `nccl_transport.sh`
+  against hand-written NCCL 2.30.7 lines (P2P, SHM, env, pattern, disabled-pair) and against a log with none.
+
+### Box
+
+Vast only, 4x RTX PRO 6000: Max-Q first (his card), then Server, then Workstation Edition, each capped at $10/hr
+with reliability 0.95, and `require_p2p = true`. RunPod is out of this run: its one 4x host that ran on 10-17 hung
+NCCL with P2P on, and RunPod picks the host. `avoid_data_centers` stays for a RunPod rerun of the 10-17 matrix; the
+harness accepts it beside Vast-only choices (`spec.rs:619-625`) and no Vast choice reads it. `harness quote`
+(11-05 20:34Z): Max-Q on machine 57045 (Lithuania), $5.94/hr, reliability 0.991, 2,885 Mbps down, downloads
+$2.67/TB; fallbacks Server Edition at $6.90-7.60 and Workstation at $6.06-7.97. Stock moves within minutes: the
+21:00Z quote had no free Max-Q, and its first choice was a Server Edition on machine 153928 (Minnesota), $6.05/hr,
+900 Mbps down. The search keeps only hosts whose `cuda_max_good` is at least `min_cuda` 13.0.
+
+On Vast the box has one 280 GB disk (`container_disk_gb` + `volume_gb`): the image, the weights (setup.sh keeps them
+in `/root/hf-hub` as before), ShareGPT, the prompts, and logs. `/workspace` is a plain directory there, and nothing
+in the kit reads RunPod's env. `needs_hf_token = false`: the checkpoint is not gated (HF API at the pinned revision)
+and the 10-17 pods downloaded it without a token. `expected_download_gb = 190`: image 15.6 GB compressed, weights
+166.9 GB, ShareGPT 0.67 GB, apt. setup.sh's download floor is 60 MB/s at 3 min (140 on RunPod), and its ceiling 46
+min, checked every 30 s: 166.9 GB at 60 MB/s takes 46 min, the most that still leaves d1 and d2 inside the deadline
+on a Max-Q, and the harness would otherwise wait on setup until the deadline. `/dev/shm` under 2 GiB (Docker's
+default is 64 MB, and the harness's Vast create asks for no size) ends setup before the probe.
+
+### Hours and cost
+
+Minutes on a Max-Q downloading at ~100 MB/s (800 Mbps), the rate this plan assumes for these hosts; the quoted
+host lists 2,885 Mbps, which would make the download about 10 min. The image is 15.62 GB in 69 layers, so the pull
+and its unpacking take several minutes before SSH answers. Rows assume the Max-Q prefills at 0.65x the 10-17 Server
+Edition (W1 6.0K, W2 5.1K tok/s) and decodes at ~80 tok/s, each row with its warmup: w1-c1 3.6, w1-c8 2.9, w2-c1
+8.0, w2-c8 7.2, and 30-60 s per row for bench_serving to load ShareGPT (0.67 GB of JSON) and the tokenizer again,
+about 25 in all; at the 10-17 rates (Server or Workstation Edition) about 18.
+
+| Step | Minutes | Running total |
+|---|---|---|
+| up: create, 15.62 GB / 69-layer image pull and unpack, SSH, apt, watchdog, topology and P2P gates, kit copy | 12 | 12 |
+| setup: image check, P2P matrices, `/dev/shm`, NCCL probe (3 settings), prompts, ShareGPT | 5 | 17 |
+| setup: 166.9 GB at 100 MB/s, cache drop, cold read | 30 | 47 |
+| d1: boot with the DeepGEMM precompile (474 s for s1 on 10-17) 10, GSM8K 1, rows 25 | 36 | 83 |
+| d2: boot (101 s for s3-ep4 on 10-17) 3, GSM8K 1, rows 25 | 29 | 112 |
+| d3, by the rule below | 29 | 141 |
+
+`planned_hours = 2.25` (135 min): d1 and d2 with 23 min to spare. d1, d2, and d3 take about 95 min after setup on a
+Max-Q, so d3 fits only when setup ends early: on the quoted host's listed speed setup ends near 27 min, with 108
+left. Worst case at the $10 cap: 2.25 h x $10 x 1.10 + 190 GB at $20/TB = $24.75 + $3.80 = $28.55. On the quoted
+box: $14.71 + $0.51 = $15.22 worst case; expected about $11.60 for d1 and d2 (1.9 h), and $12.60 with d3 after a
+fast setup (122 min). $16.93 of the
+$20 approved on 10-16 is spent, so a $46 total covers the worst case at the cap.
+
+The d3 rule: run d3 when d1's probe shows SHM on any GPU pair, d3's probe passed, and setup ends with at least 95 min
+left to the deadline; otherwise d1 and d2 only. Setup's last lines (`results/sglang-33422/jobs/setup.log`) give all
+three and the verdict. d3 then goes in the same exec, last, so a deadline cut loses only d3.
+
+```
+# The pod's pulls merge file by file and would overwrite the 10-17 env.txt, jobs/setup.log, and verdicts.jsonl.
+cp -R results/sglang-33422 results/sglang-33422-1017
+harness budget set sglang-33422 46 --note <approval>
+harness up sglang-33422
+# d3 rule met:
+harness exec sglang-33422 d1-ep4-p2p-on d2-ep4-p2p-off d3-ep4-p2p-sys
+# otherwise:
+harness exec sglang-33422 d1-ep4-p2p-on d2-ep4-p2p-off
+harness down sglang-33422
+```
+
+`harness run sglang-33422 d1-ep4-p2p-on d2-ep4-p2p-off` does up, exec, and down in one, with no room for the d3 call.
+Never leave the names out: `run` and `exec` with none run every variant in file order, d1, d2, d3, then the six
+10-17 variants, until the 2.25 h deadline ends the box, all of it billed.
+
+### Stop rules
+
+- `/dev/shm` under 2 GiB -> setup stops before the probe; `harness down`, add the machine to `avoid_machines`, rent
+  again.
+- The probe fails or hangs under d1's or d2's setting, or a failed probe leaves a GPU busy -> setup stops after all
+  three probes; the same.
+- Download under 60 MB/s at 3 min, or still running at 46 min -> setup stops; `harness down`.
+- d1 BOOT_FAIL after a clean probe -> still run d2, and report d1's fault beside the probe's lines.
+- d3 only by the rule above.
+
+### Reporting
+
+Per arm, the `decode_rows.csv` rows as one table (shape, c, N, TTFT mean and median, mean TPOT, median and p99 ITL,
+per-request decode tok/s min, median, and max, output tokens), with the arm's connections-per-pair block from
+`nccl_transport.txt` quoted beside it (the channel lines below it on request), the probe's allreduce times per
+setting, and the box: card, power limit and default, `nvidia-smi topo -m` from env.txt, the `topo -p2p r` matrix
+from `results/sglang-33422/p2p-<pod>.txt`, driver, NCCL 2.30.7. Labeled as V4-Flash-0731 on v0.5.22, paired within
+this box only. The 10-17 variants stay in harness.toml, with P2P off, and are not part of this run; the one shared
+change is `boot_timeout_s` 2400 -> 1800, which still covers a cold read plus the DeepGEMM precompile, and s1a needs
+2400 back for its 20 min autotune pass.
+
+Not verifiable without the box: the size of `/dev/shm` (the probe exercises SHM under d1's and d2's settings);
+whether P2P works past `-p2p r` (the probe again); the decode rates, so every row time above; whether H11's
+scheduler behavior holds; image pull and first-boot time on the host's CPU.

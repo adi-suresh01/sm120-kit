@@ -1,0 +1,36 @@
+# issues/sglang-33422/harness.toml as its 10-17 RunPod run used it (variants left out; the create body never reads
+# them). The issue moved to Vast on 11-05, so the RunPod body with avoid_data_centers is pinned against this copy.
+issue = "sglang-33422"
+planned_hours = 1.75
+
+[pod]
+image = "lmsysorg/sglang:v0.5.22-cu130@sha256:e3a4f06001a29542fc4a8638536d9ffc5eb9c9942b08603c09b19a56eae4a1ae"
+count = 4
+min_cuda = "13.0"
+container_disk_gb = 260
+volume_gb = 20
+needs_hf_token = false
+avoid_data_centers = ["EUR-IS-2", "US-NC-1"]
+gpus = [
+  { id = "NVIDIA RTX PRO 6000 Blackwell Server Edition", cloud = "SECURE" },
+]
+
+[server]
+package = "sglang"
+model = "deepseek-ai/DeepSeek-V4-Flash-0731"
+launch = ["python3", "-m", "sglang.launch_server", "--model-path", "deepseek-ai/DeepSeek-V4-Flash-0731"]
+base_flags = [
+  "--revision", "7872f01b1d1fe23eabc4c98b48bffcef5a386062",
+  "--tp-size", "4",
+  "--trust-remote-code",
+  "--mem-fraction-static", "0.90",
+  "--context-length", "1048576",
+  "--swa-full-tokens-ratio", "0.1",
+  "--max-running-requests", "64",
+  "--cuda-graph-max-bs-decode", "64",
+  "--kv-cache-dtype", "fp8_e4m3",
+  "--disable-custom-all-reduce",
+]
+port = 30000
+fail_pattern = "illegal memory access|cudaErrorIllegalAddress|CUDA error: |SM120 sparse-MLA has no decode kernel"
+boot_timeout_s = 2400

@@ -57,7 +57,8 @@ fn a_plain_issue_sends_the_body_it_always_did() {
 
 #[test]
 fn an_issue_avoiding_data_centers_sends_the_body_it_always_did() {
-    let spec = IssueSpec::load(repo(), "sglang-33422").unwrap();
+    let text = include_str!("fixtures/golden/sglang-33422.toml");
+    let spec = IssueSpec::parse(text, "sglang-33422", |_| true).unwrap();
     let preferred = ["CA-MTL-3".to_string(), "EU-RO-1".to_string()];
     assert_eq!(body(&spec, &preferred), golden("runpod_create_sglang-33422.json"));
 }
