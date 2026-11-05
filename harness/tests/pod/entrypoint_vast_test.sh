@@ -28,7 +28,8 @@ fail() {
 }
 
 mkdir -p "$work/bin"
-# Answers FAKE_CURL_CODE_<METHOD>, else FAKE_CURL_CODE, so a destroy and a stop can be refused apart.
+# Answers FAKE_CURL_CODE_<METHOD>, else FAKE_CURL_CODE, with the body FAKE_CURL_BODY_<METHOD>, else none, so a
+# destroy and a stop can be refused apart, by status or in the body of a 200.
 cat >"$work/bin/curl" <<'EOF'
 #!/usr/bin/env bash
 printf 'curl %s\n' "$*" >>"$FAKE_DIR/calls.log"
@@ -41,6 +42,8 @@ for arg in "$@"; do
 done
 code_var=FAKE_CURL_CODE_$method
 code=${!code_var:-$FAKE_CURL_CODE}
+body_var=FAKE_CURL_BODY_$method
+printf '%s' "${!body_var:-}"
 printf '%s' "${format//%\{http_code\}/$code}"
 EOF
 for tool in apt-get runpodctl sshd ssh-keygen; do
@@ -90,9 +93,12 @@ alive() {
 
 now=$(date +%s)
 past=$((now - 60))
-soon=$((now + 4))
+soon=$((now + 8))
 start_box destroy "$past"
 start_box fallback "$past" FAKE_CURL_CODE_DELETE=403
+start_box refused "$past" FAKE_CURL_BODY_DELETE='{"success": false, "error": "no_such_instance"}'
+start_box refusedboth "$past" FAKE_CURL_BODY_DELETE='{"success":false}' \
+    FAKE_CURL_BODY_PUT=$'{\n  "success" :\tfalse,\n  "msg": "busy"\n}'
 start_box nokey "$past" CONTAINER_API_KEY=
 start_box label "$past" CONTAINER_ID= VAST_CONTAINERLABEL=C.456
 start_box future "$soon"
@@ -122,9 +128,19 @@ log_has destroy 'curl DELETE /api/v0/instances/31000001/: http 200' || fail "the
 ! grep -q '^runpodctl' "$work/destroy/calls.log" || fail "a Vast box ran runpodctl"
 echo "ok: destroys itself through the Vast API at the deadline, every round, and logs it"
 
-(( $(calls fallback '-X PUT .*--data \{"state": "stopped"\} https://console.vast.ai/api/v0/instances/31000001/') >= 1 )) ||
-    fail "a refused destroy did not fall back to a stop"
+stop_url='-X PUT .*--data \{"state": "stopped"\} https://console.vast.ai/api/v0/instances/31000001/'
+(( $(calls fallback "$stop_url") >= 1 )) || fail "a refused destroy did not fall back to a stop"
+(( $(calls destroy "$stop_url") == 0 )) || fail "a destroy that went through was followed by a stop"
 echo "ok: a refused destroy falls back to a stop"
+
+(( $(calls refused "$stop_url") >= 1 )) || fail "a destroy refused in a 200 did not fall back to a stop"
+log_has refused 'curl DELETE /api/v0/instances/31000001/: http 200, not done: {"success": false' ||
+    fail "a destroy refused in a 200 is not logged as not done"
+(( $(calls refusedboth "$delete_url") >= 2 && $(calls refusedboth "$stop_url") >= 2 )) ||
+    fail "a box whose destroy and stop are both refused in a 200 stopped trying"
+log_has refusedboth 'curl PUT /api/v0/instances/31000001/: http 200, not done' ||
+    fail "a stop refused in a 200 is not logged as not done"
+echo "ok: a 200 that says success false is a refusal, for the destroy and for the stop"
 
 (( $(calls nokey '') == 0 )) || fail "curl ran without a key"
 log_has nokey 'VAST SELF-DESTRUCT MISSING' || fail "a missing key is not said out loud"

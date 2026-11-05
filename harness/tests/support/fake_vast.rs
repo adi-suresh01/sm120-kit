@@ -318,12 +318,7 @@ impl VastApi for FakeVast {
         };
         match outcome {
             Create::Made => Ok(self.make(request, offer_id, true)),
-            Create::Taken => Err(CloudError::Http {
-                status: 200,
-                detail: "create refused: no_such_ask".into(),
-                retry_after_s: None,
-            }
-            .vast()),
+            Create::Taken => Err(CloudError::Refused("create: no_such_ask".into()).vast()),
             Create::MadeButReplyLost => {
                 self.make(request, offer_id, true);
                 Err(CloudError::Network("connection reset by peer".into()).vast())

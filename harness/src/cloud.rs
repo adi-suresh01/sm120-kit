@@ -46,6 +46,8 @@ pub enum CloudError {
     Decode(String),
     /// Replies that each decode but together break the protocol, such as a pagination cursor that repeats.
     Protocol(String),
+    /// A reply that arrived whole and says the request was not done, as Vast's `{"success": false}` in a 200.
+    Refused(String),
     /// Any of the above from Vast's API, so the message names the API that answered.
     Vast(Box<CloudError>),
 }
@@ -62,7 +64,7 @@ impl CloudError {
         match self {
             Self::Network(_) => true,
             Self::Http { status, .. } => *status == 429 || *status >= 500,
-            Self::Decode(_) | Self::Protocol(_) => false,
+            Self::Decode(_) | Self::Protocol(_) | Self::Refused(_) => false,
             Self::Vast(inner) => inner.retryable(),
         }
     }
@@ -77,14 +79,14 @@ impl CloudError {
     pub fn status(&self) -> Option<u16> {
         match self {
             Self::Http { status, .. } => Some(*status),
-            Self::Network(_) | Self::Decode(_) | Self::Protocol(_) => None,
+            Self::Network(_) | Self::Decode(_) | Self::Protocol(_) | Self::Refused(_) => None,
             Self::Vast(inner) => inner.status(),
         }
     }
 
     pub fn detail(&self) -> Option<&str> {
         match self {
-            Self::Http { detail, .. } => Some(detail),
+            Self::Http { detail, .. } | Self::Refused(detail) => Some(detail),
             Self::Network(_) | Self::Decode(_) | Self::Protocol(_) => None,
             Self::Vast(inner) => inner.detail(),
         }
@@ -96,6 +98,7 @@ impl CloudError {
         match self {
             Self::Network(_) | Self::Decode(_) | Self::Protocol(_) => true,
             Self::Http { status, .. } => *status >= 500,
+            Self::Refused(_) => false,
             Self::Vast(inner) => inner.create_outcome_unknown(),
         }
     }
@@ -106,6 +109,7 @@ impl CloudError {
             Self::Http { status, detail, .. } => write!(f, "{api} API returned {status}: {detail}"),
             Self::Decode(e) => write!(f, "{api} API response did not decode: {e}"),
             Self::Protocol(e) => write!(f, "{api} API broke its protocol: {e}"),
+            Self::Refused(detail) => write!(f, "{api} API refused the request: {detail}"),
             Self::Vast(inner) => inner.describe("Vast", f),
         }
     }

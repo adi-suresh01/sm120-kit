@@ -250,7 +250,9 @@ The same layers, mapped:
    `/bin/bash -c <text>`. At `HARNESS_DEADLINE_EPOCH` it destroys its own instance with the instance's key
    (`DELETE /api/v0/instances/$CONTAINER_ID/` with `CONTAINER_API_KEY`, which Vast sets in the container), falls back
    to a stop (which ends the GPU charge; the reaper destroys the stopped box), and keeps retrying, each attempt in
-   `/workspace/harness-watchdog.log`. A box whose env lacks the key or the id logs `VAST SELF-DESTRUCT MISSING`. Vast
+   `/workspace/harness-watchdog.log`. A call counts as done only on a 2xx whose body does not say `"success": false`,
+   since that 200 is how Vast refuses a destroy or a stop; `down`'s destroy reads it the same way. A box whose env
+   lacks the key or the id logs `VAST SELF-DESTRUCT MISSING`. Vast
    runs `onstart` beside its own init, so the watchdog is not the container's main process as on RunPod, and a
    process that kills it leaves the box to `down` and the reaper. `up` waits (up to 5 min) until the log shows the
    watchdog armed for the ledger's deadline in a live `/bin/bash -c` process, ready to destroy this instance's id,

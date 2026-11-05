@@ -569,7 +569,8 @@ impl Cloud for VastRest<'_> {
         self.instance(id, false)
     }
 
-    /// Destroy, never stop: a stopped instance keeps billing its disk.
+    /// Destroy, never stop: a stopped instance keeps billing its disk. Vast answers a destroy it will not do with a
+    /// 200 that says `success: false`, which is no destroy.
     fn delete_pod(&self, id: &str) -> Result<(), CloudError> {
         let result = with_retry(&|d| self.sleep(d), CloudError::retryable, MAX_RETRY_AFTER_S, || {
             let response = self
@@ -578,7 +579,13 @@ impl Cloud for VastRest<'_> {
                 .header("Authorization", &self.authorization)
                 .force_send_body()
                 .send_json(json!({}));
-            self.observe(response).map(drop)
+            let body = self.observe(response)?.body_mut().read_to_string().unwrap_or_default();
+            match serde_json::from_str::<Value>(&body) {
+                Ok(reply) if reply["success"] == Value::Bool(false) => {
+                    Err(CloudError::Refused(format!("destroy: {}", vast_detail(&body))))
+                }
+                _ => Ok(()),
+            }
         })
         .map_err(CloudError::vast);
         match result {
@@ -678,12 +685,7 @@ fn created_id(reply: CreateReply) -> Result<String, CloudError> {
             .flatten()
             .collect::<Vec<_>>()
             .join(": ");
-        return Err(CloudError::Http {
-            status: 200,
-            detail: format!("create refused: {detail}"),
-            retry_after_s: None,
-        }
-        .vast());
+        return Err(CloudError::Refused(format!("create: {detail}")).vast());
     }
     match whole(&reply.new_contract) {
         Some(id) => Ok(id.to_string()),

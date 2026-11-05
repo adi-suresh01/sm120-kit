@@ -228,13 +228,29 @@ fn destroy_sends_delete_and_takes_404_as_sent() {
     let api = VastRest::new(&server.base, "k", &clock);
     api.delete_pod("31000001").unwrap();
     api.delete_pod("31000001").unwrap();
-    // A reply without a body still counts: only the status says whether the destroy landed.
+    // A reply without a body still counts as sent: only a body that says so makes a 2xx a refusal.
     api.delete_pod("31000001").unwrap();
     let seen = server.seen();
     assert_eq!(
         (seen[0].method.as_str(), seen[0].target.as_str(), seen[0].body.as_str()),
         ("DELETE", "/api/v0/instances/31000001/", "{}")
     );
+}
+
+#[test]
+fn a_destroy_refused_in_a_200_is_an_error_and_not_retried() {
+    let refused = r#"{"success": false, "error": "no_such_instance", "msg": "Instance not found"}"#;
+    let server = Server::start(vec![(200, refused)]);
+    let clock = clock();
+    let err = VastRest::new(&server.base, "k", &clock)
+        .delete_pod("31000001")
+        .unwrap_err();
+    assert!(!err.retryable() && err.status().is_none(), "{err}");
+    assert_eq!(
+        err.to_string(),
+        "Vast API refused the request: destroy: no_such_instance: Instance not found"
+    );
+    assert_eq!(server.seen().len(), 1);
 }
 
 fn create_request() -> VastCreateRequest {
