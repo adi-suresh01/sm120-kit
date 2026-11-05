@@ -1,6 +1,6 @@
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
+use std::process::{self, Child, ExitCode, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -133,6 +133,22 @@ fn search_interval(text: &str) -> Result<Duration, String> {
 
 /// What `watch` exits with when `--for` runs out without an offer.
 const WATCH_TIMED_OUT: u8 = 3;
+
+/// A Mac asleep holds up the arm check of a box `watch` rents while the box bills; the box's own watchdog still ends
+/// it at its deadline. caffeinate also exits with this process if the watch never gets to end it.
+fn keep_awake() -> Option<Child> {
+    let caffeinate = Path::new("/usr/bin/caffeinate");
+    if !caffeinate.is_file() {
+        return None;
+    }
+    process::Command::new(caffeinate)
+        .args(["-i", "-w", &process::id().to_string()])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()
+}
 
 fn main() -> ExitCode {
     match run(Cli::parse()) {
@@ -296,7 +312,14 @@ fn dispatch(
     let done = match command {
         Command::Reap => reaped,
         Command::Watch { issue, every, limit } => {
-            return Ok(match watch::watch(&ctx, load(repo, &issue)?, every, limit)? {
+            let spec = load(repo, &issue)?;
+            let awake = keep_awake();
+            let watched = watch::watch(&ctx, spec, every, limit);
+            if let Some(mut awake) = awake {
+                let _ = awake.kill();
+                let _ = awake.wait();
+            }
+            return Ok(match watched? {
                 Outcome::Rented(_) | Outcome::Reported => ExitCode::SUCCESS,
                 Outcome::TimedOut => ExitCode::from(WATCH_TIMED_OUT),
             });

@@ -9,12 +9,13 @@ use anyhow::{Result, bail};
 use jiff::SignedDuration;
 use serde_json::json;
 
-use crate::budget;
-use crate::cloud::{CloudError, find_candidates};
+use crate::cloud::{Candidate, CloudError, find_candidates};
 use crate::events::Kind;
-use crate::ledger::{MARGIN, PodState};
-use crate::pod::{self, AfterFailure, Ctx, Interrupted, LivePod, NothingInStock, POLL};
+use crate::ledger::{Ledger, MARGIN, PodEntry, PodState};
+use crate::pod::{self, AfterFailure, Ctx, Interrupted, LivePod, NothingInStock, POLL, StillLive};
 use crate::spec::{IssueSpec, PodSpec, Provider};
+use crate::vast::search_quota_used;
+use crate::{budget, reap};
 
 /// A box that fails a check costs its minutes before the check; past this many in one watch, something about the
 /// choices is wrong, and renting on would only spend the budget on more of the same.
@@ -90,13 +91,21 @@ pub fn watch(ctx: &Ctx, mut spec: IssueSpec, every: Duration, limit: Duration) -
     let mut refused_rounds = 0;
     loop {
         ctx.check_interrupted()?;
+        // What an earlier round left (a box whose destroy was not confirmed, an instance Vast listed late) is ended
+        // now, not at its deadline.
+        if let Err(e) = reap::reap(ctx) {
+            ctx.warn(&issue, format!("reaper failed: {e:#}"));
+        }
         let found = match find_candidates(ctx.cloud, &spec.pod) {
             Ok(found) => found,
-            Err(e) if e.downcast_ref::<CloudError>().is_some() => {
-                ctx.warn(&issue, format!("search failed, watching on: {e:#}"));
-                Vec::new()
-            }
-            Err(e) => return Err(e),
+            Err(e) => match e.downcast_ref::<CloudError>().map(lasting) {
+                Some(Some(why)) => return Err(e.context(why)),
+                Some(None) => {
+                    ctx.warn(&issue, format!("search failed, watching on: {e:#}"));
+                    Vec::new()
+                }
+                None => return Err(e),
+            },
         };
         if !found.is_empty() {
             match mode {
@@ -104,7 +113,7 @@ pub fn watch(ctx: &Ctx, mut spec: IssueSpec, every: Duration, limit: Duration) -
                     budget::emit_quote(ctx, &spec, &found, None)?;
                     return Ok(Outcome::Reported);
                 }
-                Mode::Rent => match rent(ctx, &mut spec)? {
+                Mode::Rent => match rent(ctx, &mut spec, found)? {
                     Rental::Live(live) => return Ok(Outcome::Rented(live)),
                     Rental::Gone => refused_rounds = 0,
                     Rental::Refused(error) => {
@@ -129,10 +138,25 @@ pub fn watch(ctx: &Ctx, mut spec: IssueSpec, every: Duration, limit: Duration) -
                 },
             }
         }
-        if ctx.clock.now().duration_since(started) >= limit {
+        let watched = ctx.clock.now().duration_since(started);
+        if watched >= limit {
             return Ok(Outcome::TimedOut);
         }
-        nap(ctx, every)?;
+        nap(ctx, every.min(Duration::try_from(limit - watched)?))?;
+    }
+}
+
+/// Why a refusal ends the watch: the next round would meet it again, and on Vast each round spends a search from the
+/// daily quota. A rate limit, a 5xx, or a network failure passes, so it returns None.
+fn lasting(error: &CloudError) -> Option<String> {
+    if search_quota_used(error) {
+        return Some("Vast's daily search quota is used up and resets at 00:00 UTC, so the watch stops".into());
+    }
+    match error.status() {
+        Some(status) if (400..500).contains(&status) && status != 429 => Some(format!(
+            "the API refused the request with {status}, as it would every round, so the watch stops"
+        )),
+        _ => None,
     }
 }
 
@@ -150,33 +174,44 @@ fn nap(ctx: &Ctx, every: Duration) -> Result<()> {
 
 enum Rental {
     Live(Box<LivePod>),
-    /// None was left by the time `up` searched, or the search failed.
+    /// None was left by the time `up` created, or a step before the create failed for now.
     Gone,
     /// Every offer was refused at the create, as an offer someone takes first is.
     Refused(anyhow::Error),
-    /// A box failed a check and `up` destroyed it; its machine is avoided for the rest of the watch.
+    /// A box failed a check or its setup and was destroyed; its machine is avoided for the rest of the watch.
     BoxFailed,
 }
 
-/// `up` exactly as `harness up` runs it. What its error means for the watch is read from the ledger, which says
-/// whether anything still bills: a new entry that is live or reserved ends the watch with the error, as `up` would.
-fn rent(ctx: &Ctx, spec: &mut IssueSpec) -> Result<Rental> {
+/// `up` as `harness up` runs it, from the offers this round found. Nobody is there to use or end a box that failed
+/// after its create, so the watch ends it, as `up` ends one that fails before it is usable, Ctrl-C included. What the
+/// failure means for the watch is read from the ledger.
+fn rent(ctx: &Ctx, spec: &mut IssueSpec, found: Vec<Candidate>) -> Result<Rental> {
     let issue = spec.issue.clone();
     let before: HashSet<String> = ctx.ledger(&issue).load()?.pods.into_iter().map(|p| p.name).collect();
-    let error = match pod::up(ctx, spec, true, AfterFailure::KeepPod) {
+    let error = match pod::up_from(ctx, spec, found, true, AfterFailure::CallerEnds) {
         Ok(live) => return Ok(Rental::Live(Box::new(live))),
-        Err(e) if e.downcast_ref::<Interrupted>().is_some() => return Err(e),
         Err(e) => e,
     };
-    let ledger = ctx.ledger(&issue).load()?;
-    let new: Vec<_> = ledger.pods.iter().filter(|p| !before.contains(&p.name)).collect();
-    if new
+    let new =
+        |ledger: Ledger| -> Vec<PodEntry> { ledger.pods.into_iter().filter(|p| !before.contains(&p.name)).collect() };
+    for entry in new(ctx.ledger(&issue).load()?)
         .iter()
-        .any(|p| matches!(p.state, PodState::Live | PodState::Reserved))
+        .filter(|p| p.state == PodState::Live)
     {
+        if let Err(stop) = pod::end_box(ctx, &issue, entry) {
+            return Err(error
+                .context(format!("then destroying {} failed: {stop:#}", entry.name))
+                .context(StillLive::of(&issue, entry)));
+        }
+    }
+    if error.downcast_ref::<Interrupted>().is_some() {
         return Err(error);
     }
-    let ended: Vec<_> = new.iter().filter(|p| p.state == PodState::Terminated).collect();
+    let new = new(ctx.ledger(&issue).load()?);
+    if new.iter().any(|p| p.state == PodState::Reserved) {
+        return Err(error);
+    }
+    let ended: Vec<&PodEntry> = new.iter().filter(|p| p.state == PodState::Terminated).collect();
     if !ended.is_empty() {
         // RunPod picks the host, so avoiding it is not possible, and the next box could fail the same way.
         if ended.iter().any(|p| p.provider == Provider::Runpod) {
@@ -191,10 +226,14 @@ fn rent(ctx: &Ctx, spec: &mut IssueSpec) -> Result<Rental> {
         ctx.warn(
             &issue,
             format!(
-                "a box failed a check and was destroyed; avoiding Vast machine {machines:?} for this watch: {error:#}"
+                "a box failed after its create and was destroyed; avoiding Vast machine {machines:?} for this watch: \
+                 {error:#}"
             ),
         );
         return Ok(Rental::BoxFailed);
+    }
+    if let Some(why) = error.downcast_ref::<CloudError>().and_then(lasting) {
+        return Err(error.context(why));
     }
     if !new.is_empty() {
         ctx.warn(

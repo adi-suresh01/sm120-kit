@@ -302,7 +302,7 @@ fn an_instance_vast_never_shows_is_destroyed_and_booked_only_after_the_adopt_win
     let err = format!("{:#}", w.up().unwrap_err());
     assert!(err.contains("pod 31000001 disappeared while starting"), "{err}");
     assert!(err.contains("its destroy cannot be confirmed"), "{err}");
-    assert_eq!(w.vast.0.borrow().deleted, ["31000001"]);
+    assert_eq!(w.vast.0.borrow().deleted, ["31000001"; 3]);
     // An instance no read has shown may still appear, so the reservation stays held until the reaper books it.
     assert_eq!(w.ledger().pods[0].state, PodState::Live);
     w.with(reap::reap).unwrap();
@@ -428,6 +428,7 @@ impl World {
 fn a_watch_waits_for_an_offer_skips_a_machine_that_failed_and_rents_the_next() {
     let w = World::new();
     w.vast.0.borrow_mut().empty_searches = 1;
+    w.runpod.0.borrow_mut().secure.clear();
     *w.remote.p2p.borrow_mut() = VecDeque::from([p2p_without("NS"), P2P_OK.to_string()]);
     let outcome = w.watch(EVERY, DAY).unwrap();
     assert!(matches!(outcome, Outcome::Rented(_)), "{outcome:?}");
@@ -480,7 +481,7 @@ fn a_watch_that_finds_nothing_ends_when_its_time_runs_out() {
     w.runpod.0.borrow_mut().secure.clear();
     let outcome = w.watch(EVERY, Duration::from_secs(600)).unwrap();
     assert!(matches!(outcome, Outcome::TimedOut), "{outcome:?}");
-    // Searches at 0, 4, 8, and 12 minutes; the last one is past the 10 minutes.
+    // Searches at 0, 4, 8, and 10 minutes: the last nap stops at the limit.
     assert_eq!(w.vast.0.borrow().searches, 4);
     assert!(w.ledger().pods.is_empty());
 }
@@ -522,9 +523,12 @@ fn a_watch_stops_when_every_offer_is_refused_three_rounds_in_a_row() {
 fn ctrl_c_ends_a_watch_between_searches() {
     let w = World::new();
     w.vast.0.borrow_mut().empty_searches = usize::MAX;
-    w.interrupted.store(true, std::sync::atomic::Ordering::SeqCst);
+    w.runpod.0.borrow_mut().secure.clear();
+    // Pressed during the first nap, after the first search.
+    *w.clock.interrupt_on_sleep.borrow_mut() = Some(Rc::clone(&w.interrupted));
     let err = w.watch(EVERY, DAY).unwrap_err();
     assert!(err.downcast_ref::<pod::Interrupted>().is_some(), "{err:#}");
+    assert_eq!(w.vast.0.borrow().searches, 1);
     assert!(w.ledger().pods.is_empty());
 }
 
@@ -588,7 +592,8 @@ fn a_read_that_fails_never_holds_back_the_destroy() {
     w.vast.0.borrow_mut().get_fails = true;
     let err = format!("{:#}", w.up().unwrap_err());
     assert!(err.contains("its destroy cannot be confirmed"), "{err}");
-    assert_eq!(w.vast.0.borrow().deleted, ["31000001"]);
+    // Each of `up`'s attempts sends the destroy again.
+    assert_eq!(w.vast.0.borrow().deleted, ["31000001"; 3]);
     assert!(w.vast.billing_ids().is_empty());
     // Destroyed, but no read agreed, so the ledger still holds it.
     assert_eq!(w.ledger().pods[0].state, PodState::Live);
@@ -768,4 +773,78 @@ fn quote_holds_the_downloads_that_expected_download_gb_names() {
         quote.contains("\"expected_download_gb\":40,\"download_reserved_usd\":0.12"),
         "{quote}"
     );
+}
+
+#[test]
+fn a_watch_searches_once_for_the_offer_it_rents() {
+    let w = World::new();
+    assert!(matches!(w.watch(EVERY, DAY).unwrap(), Outcome::Rented(_)));
+    assert_eq!(w.vast.0.borrow().searches, 1);
+}
+
+#[test]
+fn a_watch_never_naps_past_its_limit() {
+    let w = World::new();
+    w.vast.0.borrow_mut().empty_searches = usize::MAX;
+    w.runpod.0.borrow_mut().secure.clear();
+    let started = w.clock.now();
+    let outcome = w.watch(EVERY, Duration::from_secs(300)).unwrap();
+    assert!(matches!(outcome, Outcome::TimedOut), "{outcome:?}");
+    // Searches at 0, 4, and 5 minutes.
+    assert_eq!(w.vast.0.borrow().searches, 3);
+    assert_eq!(w.clock.now().duration_since(started), SignedDuration::from_mins(5));
+}
+
+#[test]
+fn a_watch_stops_on_a_refusal_every_round_would_meet() {
+    for (status, detail, expected) in [
+        (401, "invalid_api_key", "refused the request with 401"),
+        (
+            429,
+            "search_quota_exceeded: Daily search limit reached.",
+            "daily search quota is used up",
+        ),
+    ] {
+        let w = World::new();
+        w.vast.0.borrow_mut().search_error = Some((status, detail));
+        let err = format!("{:#}", w.watch(EVERY, DAY).unwrap_err());
+        assert!(err.contains(expected), "{status}: {err}");
+        assert_eq!(w.vast.0.borrow().searches, 1, "{status}");
+    }
+    let w = World::new();
+    w.vast.0.borrow_mut().search_error = Some((503, "busy"));
+    w.runpod.0.borrow_mut().secure.clear();
+    let outcome = w.watch(EVERY, Duration::from_secs(600)).unwrap();
+    assert!(matches!(outcome, Outcome::TimedOut), "{outcome:?}");
+    assert_eq!(w.vast.0.borrow().searches, 4);
+    let w = World::new();
+    w.vast.0.borrow_mut().creates = VecDeque::from([Create::Refused(403)]);
+    let err = format!("{:#}", w.watch(EVERY, DAY).unwrap_err());
+    assert!(err.contains("refused the request with 403"), "{err}");
+    assert_eq!(w.vast.0.borrow().requests.len(), 1);
+}
+
+#[test]
+fn a_watch_ends_a_box_whose_setup_failed_and_rents_another_machine() {
+    let w = World::new();
+    w.remote.inner.exits.borrow_mut().push_back(3);
+    let outcome = w.watch(EVERY, DAY).unwrap();
+    assert!(matches!(outcome, Outcome::Rented(_)), "{outcome:?}");
+    assert_eq!(w.machines(), [(PodState::Terminated, 70001), (PodState::Live, 70002)]);
+    assert_eq!(w.vast.0.borrow().deleted, ["31000001"]);
+    assert!(w.events().contains("setup exited 3"), "{}", w.events());
+}
+
+#[test]
+fn a_watch_destroys_what_an_earlier_round_left_before_it_searches_again() {
+    let w = World::new();
+    // A box whose destroy could not be confirmed, which Vast lists only now.
+    w.vast.0.borrow_mut().creates = VecDeque::from([Create::MadeListedLater]);
+    w.up().unwrap_err();
+    w.vast.reveal_unlisted();
+    let outcome = w.watch(EVERY, DAY).unwrap();
+    assert!(matches!(outcome, Outcome::Rented(_)), "{outcome:?}");
+    let states: Vec<PodState> = w.ledger().pods.iter().map(|p| p.state).collect();
+    assert_eq!(states, [PodState::Terminated, PodState::Live]);
+    assert_eq!(w.vast.billing_ids(), ["31000002"]);
 }

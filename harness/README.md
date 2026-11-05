@@ -206,14 +206,21 @@ mode as a `watch` event:
 - `report only`: no budget, or too little. On the first offer it prints the quote and exits 0, renting nothing.
   `harness budget set` is the approval that turns a watch into a rental.
 
-An offer taken before the create keeps it watching, but every offer refused 3 rounds in a row stops it, since a
-create every offer refuses (a bad image, a body Vast rejects) explains that better. `--every` is at least 30s, to
-spare Vast's daily search quota. A box that fails a check is destroyed by `up` as always, and its
-machine avoided for the rest of the watch; after 3 such boxes the watch stops with an error rather than spend more on
-the same failure, and a RunPod pod failing a check stops it at once, since RunPod picks the host. Anything that
-leaves a pod billing (a failed setup, a failed terminate) ends the watch with `up`'s error. Ctrl-C stops it between
-searches, or inside `up` the way it stops `up`. Vast's search has a daily quota; a search refused for it only warns,
-and the watch goes on.
+Each round starts with the reaper, so what an earlier round left (a box whose destroy was not confirmed, an
+instance Vast listed late) is destroyed then, not at its deadline. The offers a round's search finds are the ones `up`
+rents from, so a round spends one search. An offer taken before the create keeps it watching, but every offer
+refused 3 rounds in a row stops it, since a create every offer refuses (a bad image, a body Vast rejects) explains
+that better. A refusal every round would meet stops it at once: Vast's daily search quota used up (it resets at 00:00
+UTC), or any 4xx but a 429 from a search or a create; a 5xx, a 429, or a network failure only warns. `--every` is at
+least 30s, to spare that quota, and the last nap ends at `--for`.
+
+Nobody is there to use or end a box that fails after its create, so the watch destroys it, retrying the destroy,
+whether a check, the setup, or Ctrl-C ended `up`, and avoids its machine for the rest of the watch; after 3 such boxes
+the watch stops with an error rather than spend more on the same failure, and a RunPod pod failing stops it at once,
+since RunPod picks the host. Only a box whose destroy fails every try ends the watch with it billing, and the error
+names it. Ctrl-C stops the watch between searches too. On a Mac the watch runs `caffeinate -i` while it lasts: a
+laptop asleep holds up a new box's arm check while the box bills (the box's own watchdog still ends it at its
+deadline).
 
 ## What keeps a pod from billing past its budget
 

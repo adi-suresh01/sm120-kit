@@ -546,6 +546,28 @@ const NAME_LOOKUPS: usize = 3;
 const GONE_CHECKS: usize = 6;
 
 pub fn up(ctx: &Ctx, spec: &IssueSpec, run_setup: bool, after_failure: AfterFailure) -> Result<LivePod> {
+    up_with(ctx, spec, None, run_setup, after_failure)
+}
+
+/// As `up`, from offers a search just found, so `watch` spends one search, not two, on the offer it rents, and the
+/// offer has less time to be taken.
+pub fn up_from(
+    ctx: &Ctx,
+    spec: &IssueSpec,
+    candidates: Vec<Candidate>,
+    run_setup: bool,
+    after_failure: AfterFailure,
+) -> Result<LivePod> {
+    up_with(ctx, spec, Some(candidates), run_setup, after_failure)
+}
+
+fn up_with(
+    ctx: &Ctx,
+    spec: &IssueSpec,
+    found: Option<Vec<Candidate>>,
+    run_setup: bool,
+    after_failure: AfterFailure,
+) -> Result<LivePod> {
     let issue = spec.issue.as_str();
     let ledger = ctx.ledger(issue).load()?;
     if let Some(active) = ledger.active() {
@@ -557,7 +579,10 @@ pub fn up(ctx: &Ctx, spec: &IssueSpec, run_setup: bool, after_failure: AfterFail
     }
     let remaining = ledger.remaining_usd()?;
     ctx.remote.preflight()?;
-    let candidates = find_candidates(ctx.cloud, &spec.pod)?;
+    let candidates = match found {
+        Some(found) => found,
+        None => find_candidates(ctx.cloud, &spec.pod)?,
+    };
     if candidates.is_empty() {
         return Err(NothingInStock {
             issue: issue.to_string(),
@@ -597,7 +622,7 @@ pub fn up(ctx: &Ctx, spec: &IssueSpec, run_setup: bool, after_failure: AfterFail
                 issue,
                 format!("up failed before the pod was usable: {e:#}; terminating {}", entry.name),
             );
-            return match terminate(ctx, issue, &entry) {
+            return match end_box(ctx, issue, &entry) {
                 Ok(()) => Err(e),
                 Err(stop) => {
                     let e = e.context(format!("then terminating it failed: {stop:#}"));
