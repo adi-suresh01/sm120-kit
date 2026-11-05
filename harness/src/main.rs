@@ -182,11 +182,18 @@ fn run(cli: Cli) -> Result<ExitCode> {
         let _ = writeln!(io::stderr().lock(), "{notice}");
     })
     .context("installing the signal handler")?;
-    let vast_key = vast::configured_key()?;
     let clock = SystemClock;
-    let runpod = RunpodRest::new(API_BASE, &api_key, &clock);
-    let vast = vast_key.map(|key| VastRest::new(vast::API_BASE, &key, &clock));
     let events = Events::new(&repo.join("results"), &clock, true);
+    let runpod = RunpodRest::new(API_BASE, &api_key, &clock);
+    let vast_key = match vast::configured_key() {
+        Ok(key) => key.filter(|_| vast_in_use(&repo, issue.as_deref())),
+        Err(e) => {
+            let detail = format!("Vast is set aside for this command, and its pods are left alone: {e:#}");
+            events.emit(issue.as_deref(), Kind::Warn, json!({ "detail": detail }));
+            None
+        }
+    };
+    let vast = vast_key.map(|key| VastRest::new(vast::API_BASE, &key, &clock));
     let result = dispatch(
         &repo,
         &runpod,
@@ -200,6 +207,21 @@ fn run(cli: Cli) -> Result<ExitCode> {
         pod::report_error(&events, issue.as_deref(), e);
     }
     result
+}
+
+/// Whether this command may touch Vast: some ledger holds a Vast pod, or the command's issue has a Vast choice. Any
+/// other command never calls Vast, so a hung Vast API cannot hold up a RunPod `down` while its pod bills. A ledger
+/// that does not load could hold a Vast pod, so it counts as one.
+fn vast_in_use(repo: &Path, issue: Option<&str>) -> bool {
+    let ledgers = LedgerStore::all(repo).map(|stores| {
+        stores
+            .iter()
+            .any(|store| store.load().map_or(true, |ledger| !ledger.vast.pods.is_empty()))
+    });
+    let spec = issue
+        .and_then(|issue| IssueSpec::load(repo, issue).ok())
+        .is_some_and(|spec| spec.pod.vast_choices().next().is_some());
+    ledgers.unwrap_or(true) || spec
 }
 
 /// The Vast client, once its key's account checks out against every ledger. A command that only ends pods keeps it
@@ -302,6 +324,27 @@ mod tests {
     #[test]
     fn cli_definition_is_consistent() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn vast_is_touched_only_where_a_ledger_or_the_issue_uses_it() {
+        let repo = std::env::temp_dir().join(format!("sm120-vast-in-use-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&repo);
+        let issue = |name: &str| repo.join("issues").join(name);
+        std::fs::create_dir_all(issue("rp-1")).unwrap();
+        let runpod_ledger = r#"{"issue": "rp-1", "budget": null, "pods": []}"#;
+        std::fs::write(issue("rp-1").join("harness-ledger.json"), runpod_ledger).unwrap();
+        assert!(!vast_in_use(&repo, Some("rp-1")) && !vast_in_use(&repo, None));
+        let real = Path::new(env!("CARGO_MANIFEST_DIR")).join("../issues/harness-test-vast/harness.toml");
+        std::fs::create_dir_all(issue("harness-test-vast")).unwrap();
+        std::fs::copy(real, issue("harness-test-vast").join("harness.toml")).unwrap();
+        assert!(vast_in_use(&repo, Some("harness-test-vast")) && !vast_in_use(&repo, Some("rp-1")));
+        std::fs::write(issue("rp-1").join("harness-ledger.json"), "{not json").unwrap();
+        assert!(
+            vast_in_use(&repo, None),
+            "a ledger that does not load could hold a Vast pod"
+        );
+        std::fs::remove_dir_all(repo).unwrap();
     }
 
     #[test]

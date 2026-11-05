@@ -252,10 +252,14 @@ The same layers, mapped:
    runs `onstart` beside its own init, so the watchdog is not the container's main process as on RunPod, and a
    process that kills it leaves the box to `down` and the reaper. `up` waits (up to 5 min) until the log shows the
    watchdog armed for the ledger's deadline in a live `/bin/bash -c` process, ready to destroy this instance's id,
-   and (up to 15 min more) apt done, since Vast's own sshd answers first; otherwise it destroys the box. It also
-   warns when the box's key could not read its own instance, the one sign before the deadline that the destroy can
-   work.
-3. **Reaper.** Lists Vast's instances (all pages, or an error) beside RunPod's, whenever a Vast key is set. Each
+   and (up to 15 min more) apt done, since Vast's own sshd answers first; otherwise it destroys the box. curl is
+   the box's only way to destroy itself, so a box where it is missing after apt, or whose own key Vast rejects (401
+   or 403) when the box reads its own instance, is destroyed at once; a read that fails any other way only warns.
+   The read is the one sign before the deadline that the destroy can work, not proof that it does.
+3. **Reaper.** Lists Vast's instances (all pages, or an error) beside RunPod's, whenever a Vast key is set and some
+   ledger holds a Vast pod or the command's issue has a Vast choice; other commands never call Vast, so a hung Vast
+   API cannot hold up a RunPod `down`. A pod missing from the list within 10 min of its reservation is left alone,
+   since Vast can be slow to show a new instance. Each
    provider's entries are settled against that provider's own list only, so neither list books, releases, or ends a
    pod on the other. Only instances a ledger tracks are ever ended; others named `sm120-*` get a warning, and every
    other instance on the account is left alone.
@@ -267,9 +271,9 @@ The same layers, mapped:
 
 Vast answers a key that cannot see an instance as if it were gone, so the ledger records the Vast account
 (`vast:<user id>`, from `GET /api/v0/users/current/`) with its first Vast pod, and a Vast key of another account is
-refused before anything reads a Vast pod as gone. A RunPod key is never checked against a Vast pod, or the reverse.
-Any command but `down` and `reap` whose Vast account check fails sets Vast aside with a warning, so a Vast outage
-never stops a RunPod-only command.
+refused before anything reads a Vast pod as gone, as is a key whose account cannot be read. A RunPod key is never
+checked against a Vast pod, or the reverse. Any command but `down` and `reap` whose Vast account check fails sets Vast
+aside with a warning, as does a key file that cannot be read, so neither stops a RunPod-only command.
 
 Taken from the vastai 1.10 CLI and still to confirm on the first live box: the env names `CONTAINER_ID` and
 `CONTAINER_API_KEY` (with `VAST_CONTAINERLABEL`, `C.<id>`, as a fallback for the id), that the instance key may
