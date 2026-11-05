@@ -137,8 +137,12 @@ pub struct OfferQuery {
     pub max_usd_hr: f64,
     pub min_reliability: f64,
     pub min_inet_down_mbps: f64,
+    pub max_download_usd_tb: f64,
     pub min_cuda: f64,
 }
+
+/// Vast prices downloads per GB in `inet_down_cost` and reports `internet_down_cost_per_tb` as 1024 times that.
+const GB_PER_TB: f64 = 1024.0;
 
 impl OfferQuery {
     pub fn new(choice: &VastChoice, pod: &PodSpec) -> Self {
@@ -149,6 +153,7 @@ impl OfferQuery {
             max_usd_hr: choice.max_usd_hr,
             min_reliability: choice.min_reliability,
             min_inet_down_mbps: choice.min_inet_down_mbps,
+            max_download_usd_tb: choice.max_download_usd_tb,
             // The spec validates min_cuda as major.minor, which parses as a float.
             min_cuda: pod.min_cuda.parse().unwrap_or(f64::INFINITY),
         }
@@ -168,6 +173,7 @@ impl OfferQuery {
             "dph_total": {"lte": self.max_usd_hr},
             "reliability": {"gte": self.min_reliability},
             "inet_down": {"gte": self.min_inet_down_mbps},
+            "inet_down_cost": {"lte": self.max_download_usd_tb / GB_PER_TB},
             "cuda_max_good": {"gte": self.min_cuda},
             "order": [["dph_total", "asc"]],
             "type": "on-demand",
@@ -187,6 +193,9 @@ impl OfferQuery {
             && offer.rate_usd_hr <= self.max_usd_hr
             && offer.reliability().is_some_and(|r| r >= self.min_reliability)
             && offer.inet_down >= self.min_inet_down_mbps
+            && offer
+                .internet_down_cost_per_tb
+                .is_some_and(|per_tb| per_tb <= self.max_download_usd_tb + 1e-9)
             && offer.disk_space >= f64::from(self.disk_gb)
             && offer.cuda_max_good.is_some_and(|cuda| cuda + 1e-9 >= self.min_cuda)
             && !avoid_machines.contains(&offer.machine_id)
@@ -723,6 +732,7 @@ mod tests {
             max_usd_hr,
             min_reliability: 0.95,
             min_inet_down_mbps: 500.0,
+            max_download_usd_tb: 50.0,
             min_cuda: 13.0,
         }
     }
@@ -767,6 +777,11 @@ mod tests {
         let mut lax = query(8, 22.0);
         lax.min_reliability = 0.5;
         assert_eq!(pick(&lax, maxq(), &[]).len(), 1);
+        // 9100000 charges $30.62 per TB downloaded, 9100002 $12.
+        let mut thrifty = query(1, 2.0);
+        thrifty.max_download_usd_tb = 20.0;
+        let ids: Vec<u64> = pick(&thrifty, maxq(), &[]).iter().map(|o| o.offer_id).collect();
+        assert_eq!(ids, [9100002]);
     }
 
     #[test]
@@ -782,6 +797,7 @@ mod tests {
             max_usd_hr: 0.25,
             min_reliability: 0.95,
             min_inet_down_mbps: 500.0,
+            max_download_usd_tb: 50.0,
             min_cuda: 12.8,
         };
         assert_eq!(pick(&query("GTX 1650"), cheap.clone(), &[]).len(), 1);
@@ -794,7 +810,8 @@ mod tests {
         let q = query(1, 2.0);
         let base = maxq().remove(0);
         assert!(q.admits(&base, &[]));
-        let variants: [fn(&mut VastOffer); 7] = [
+        let variants: [fn(&mut VastOffer); 8] = [
+            |o| o.internet_down_cost_per_tb = None,
             |o| o.rented = None,
             |o| o.rentable = Some(false),
             |o| o.cuda_max_good = None,
@@ -829,6 +846,8 @@ mod tests {
             (json!(true), json!(false))
         );
         assert_eq!(body["type"], "on-demand");
+        // $50 per TB is $0.0488 per GB, the unit Vast's filter takes.
+        assert_eq!(body["inet_down_cost"], json!({"lte": 50.0 / 1024.0}));
     }
 
     #[test]

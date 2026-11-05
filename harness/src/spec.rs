@@ -178,11 +178,15 @@ pub struct VastChoice {
     pub max_usd_hr: f64,
     pub min_reliability: f64,
     pub min_inet_down_mbps: f64,
+    /// The most a host may charge per TB downloaded, which bills on top of `max_usd_hr` and outside the reservation.
+    pub max_download_usd_tb: f64,
 }
 
 const DEFAULT_MIN_RELIABILITY: f64 = 0.95;
 /// Setup downloads the weights on every box, and a slow link bills GPU hours while it waits.
 const DEFAULT_MIN_INET_DOWN_MBPS: f64 = 500.0;
+/// Hosts charge from nothing to $40 per TB, and a big checkpoint is most of a TB: at this cap 600 GB costs $12.
+const DEFAULT_MAX_DOWNLOAD_USD_TB: f64 = 20.0;
 
 /// One entry of `pod.gpus`.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -212,6 +216,7 @@ struct RawChoice {
     max_usd_hr: Option<f64>,
     min_reliability: Option<f64>,
     min_inet_down_mbps: Option<f64>,
+    max_download_usd_tb: Option<f64>,
 }
 
 impl TryFrom<RawChoice> for Choice {
@@ -224,6 +229,7 @@ impl TryFrom<RawChoice> for Choice {
                     ("max_usd_hr", raw.max_usd_hr.is_some()),
                     ("min_reliability", raw.min_reliability.is_some()),
                     ("min_inet_down_mbps", raw.min_inet_down_mbps.is_some()),
+                    ("max_download_usd_tb", raw.max_download_usd_tb.is_some()),
                 ];
                 if let Some((key, _)) = vast_keys.iter().find(|(_, set)| *set) {
                     return Err(format!(
@@ -245,6 +251,7 @@ impl TryFrom<RawChoice> for Choice {
                     max_usd_hr,
                     min_reliability: raw.min_reliability.unwrap_or(DEFAULT_MIN_RELIABILITY),
                     min_inet_down_mbps: raw.min_inet_down_mbps.unwrap_or(DEFAULT_MIN_INET_DOWN_MBPS),
+                    max_download_usd_tb: raw.max_download_usd_tb.unwrap_or(DEFAULT_MAX_DOWNLOAD_USD_TB),
                 }))
             }
         }
@@ -526,6 +533,10 @@ impl PodSpec {
             ensure!(
                 choice.min_inet_down_mbps.is_finite() && choice.min_inet_down_mbps >= 0.0,
                 "Vast choice {id:?}: min_inet_down_mbps must not be negative"
+            );
+            ensure!(
+                choice.max_download_usd_tb.is_finite() && choice.max_download_usd_tb >= 0.0,
+                "Vast choice {id:?}: max_download_usd_tb must not be negative"
             );
         }
         let has_vast = self.vast_choices().next().is_some();
@@ -1042,6 +1053,7 @@ smoke_concurrency = 13
                 max_usd_hr: 17.0,
                 min_reliability: 0.97,
                 min_inet_down_mbps: 500.0,
+                max_download_usd_tb: 20.0,
             }
         );
         assert_eq!((vast[1].min_reliability, vast[1].max_usd_hr), (0.95, 9.5));
@@ -1060,6 +1072,8 @@ smoke_concurrency = 13
         assert!(error_of(&with_choices(runpod)).contains("max_usd_hr is for provider = \"vast\" choices"));
         let runpod = "  { id = \"NVIDIA GeForce RTX 5090\" },\n";
         assert!(error_of(&with_choices(runpod)).contains("missing field `cloud`"));
+        let runpod = "  { id = \"NVIDIA GeForce RTX 5090\", cloud = \"SECURE\", max_download_usd_tb = 9.0 },\n";
+        assert!(error_of(&with_choices(runpod)).contains("max_download_usd_tb is for provider = \"vast\""));
         let other = "  { provider = \"verda\", id = \"RTX 5090\", max_usd_hr = 9.5 },\n";
         assert!(error_of(&with_choices(other)).contains("unknown variant `verda`"));
         let typo = "  { provider = \"vast\", id = \"RTX 5090\", max_usd_hr = 9.5, min_reliabilty = 0.9 },\n";
@@ -1078,6 +1092,10 @@ smoke_concurrency = 13
             (
                 "max_usd_hr = 9.5, min_inet_down_mbps = -1.0",
                 "min_inet_down_mbps must not be negative",
+            ),
+            (
+                "max_usd_hr = 9.5, max_download_usd_tb = -1.0",
+                "max_download_usd_tb must not be negative",
             ),
         ] {
             let choice = format!("  {{ provider = \"vast\", id = \"RTX 5090\", {bad} }},\n");

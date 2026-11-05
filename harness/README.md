@@ -92,7 +92,8 @@ avoid_machines = [156482]       # Vast machine ids; needs a Vast choice
 
 - `id` is Vast's `gpu_name`, matched exactly (`vastai search offers` prints it). A Vast choice takes no `cloud`.
 - `max_usd_hr` (required) caps the whole box per hour: every GPU and the disk, Vast's `dph_total`. Downloads bill
-  on top at the host's own rate; `quote` prints it as `download_usd_tb`, and the reservation does not cover it.
+  on top at the host's own rate, which the reservation does not cover: `max_download_usd_tb` (default 20, so 600 GB
+  of weights costs at most $12) caps it, and `quote` prints it as `download_usd_tb`.
 - `min_reliability` (default 0.95) and `min_inet_down_mbps` (default 500, since setup downloads the weights on every
   box) are floors. The host's driver must also support `min_cuda`.
 - Vast has no separate volume: the box gets one disk of `container_disk_gb + volume_gb`, and a host with less free
@@ -240,7 +241,8 @@ The same layers, mapped:
 1. **Ledger.** The reservation is made before the create, at the offer's `dph_total` (every GPU and the disk at the
    size the create asks for) with the same 10% margin and `planned_hours` deadline. The ledger's `vast` section names
    each Vast pod with its offer, machine, and host; an entry's `cloud` there is Vast's own split, `SECURE` for a
-   datacenter host. Downloads bill on top of `dph_total` and are not reserved: `quote` shows the host's price per TB.
+   datacenter host. Downloads bill on top of `dph_total` and are not reserved; `max_download_usd_tb` caps their
+   price, and `quote` shows it.
 2. **Watchdog on the box.** The create sends `entrypoint.sh` with `entrypoint_vast.sh` spliced in before its last
    line, base64 in `HARNESS_ENTRYPOINT_B64`, and a short `onstart` that decodes it and starts it as
    `/bin/bash -c <text>`. At `HARNESS_DEADLINE_EPOCH` it destroys its own instance with the instance's key

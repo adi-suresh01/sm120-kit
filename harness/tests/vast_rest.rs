@@ -123,6 +123,7 @@ fn query() -> OfferQuery {
         max_usd_hr: 2.0,
         min_reliability: 0.95,
         min_inet_down_mbps: 500.0,
+        max_download_usd_tb: 50.0,
         min_cuda: 12.8,
     }
 }
