@@ -201,7 +201,9 @@ mode as a `watch` event:
 - `report only`: no budget, or too little. On the first offer it prints the quote and exits 0, renting nothing.
   `harness budget set` is the approval that turns a watch into a rental.
 
-An offer taken before the create keeps it watching. A box that fails a check is destroyed by `up` as always, and its
+An offer taken before the create keeps it watching, but every offer refused 3 rounds in a row stops it, since a
+create every offer refuses (a bad image, a body Vast rejects) explains that better. `--every` is at least 30s, to
+spare Vast's daily search quota. A box that fails a check is destroyed by `up` as always, and its
 machine avoided for the rest of the watch; after 3 such boxes the watch stops with an error rather than spend more on
 the same failure, and a RunPod pod failing a check stops it at once, since RunPod picks the host. Anything that
 leaves a pod billing (a failed setup, a failed terminate) ends the watch with `up`'s error. Ctrl-C stops it between

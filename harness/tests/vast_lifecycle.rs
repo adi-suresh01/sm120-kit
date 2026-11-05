@@ -715,6 +715,19 @@ fn a_watch_stops_renting_after_three_boxes_fail_their_checks() {
 }
 
 #[test]
+fn a_watch_stops_when_every_offer_is_refused_three_rounds_in_a_row() {
+    let w = World::new();
+    w.runpod.0.borrow_mut().secure.clear();
+    w.vast.0.borrow_mut().creates = (0..20).map(|_| Create::Taken).collect();
+    let err = format!("{:#}", w.watch(EVERY, DAY).unwrap_err());
+    assert!(err.contains("refused at the create 3 rounds in a row"), "{err}");
+    assert!(err.contains("no_such_ask"), "{err}");
+    // Two offers a round, each tried once.
+    assert_eq!(w.vast.0.borrow().requests.len(), 6);
+    assert!(w.ledger().pods.iter().all(|p| p.state == PodState::CreateFailed));
+}
+
+#[test]
 fn ctrl_c_ends_a_watch_between_searches() {
     let w = World::new();
     w.vast.0.borrow_mut().empty_searches = usize::MAX;

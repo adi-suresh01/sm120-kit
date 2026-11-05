@@ -19,6 +19,11 @@ use crate::spec::{IssueSpec, PodSpec, Provider};
 /// A box that fails a check costs its minutes before the check; past this many in one watch, something about the
 /// choices is wrong, and renting on would only spend the budget on more of the same.
 pub const MAX_FAILED_BOXES: usize = 3;
+/// A free box is rare enough that someone else taking every offer first, round after round, is not the likely
+/// story; a create every offer refuses (a bad image, a body Vast rejects) is, and each round adds ledger entries.
+pub const MAX_REFUSED_ROUNDS: usize = 3;
+/// Vast's search has a daily quota, which a tighter schedule spends for little: a free box stays free for minutes.
+pub const MIN_EVERY: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -72,6 +77,7 @@ pub fn watch(ctx: &Ctx, mut spec: IssueSpec, every: Duration, limit: Duration) -
     let started = ctx.clock.now();
     let limit = SignedDuration::try_from(limit)?;
     let mut failed_boxes = 0;
+    let mut refused_rounds = 0;
     loop {
         ctx.check_interrupted()?;
         let found = match find_candidates(ctx.cloud, &spec.pod) {
@@ -90,8 +96,18 @@ pub fn watch(ctx: &Ctx, mut spec: IssueSpec, every: Duration, limit: Duration) -
                 }
                 Mode::Rent => match rent(ctx, &mut spec)? {
                     Rental::Live(live) => return Ok(Outcome::Rented(live)),
-                    Rental::Gone => {}
+                    Rental::Gone => refused_rounds = 0,
+                    Rental::Refused(error) => {
+                        refused_rounds += 1;
+                        if refused_rounds >= MAX_REFUSED_ROUNDS {
+                            return Err(error.context(format!(
+                                "every offer was refused at the create {refused_rounds} rounds in a row, which a \
+                                 request every offer refuses explains better than offers taken first"
+                            )));
+                        }
+                    }
                     Rental::BoxFailed => {
+                        refused_rounds = 0;
                         failed_boxes += 1;
                         if failed_boxes >= MAX_FAILED_BOXES {
                             bail!(
@@ -124,8 +140,10 @@ fn nap(ctx: &Ctx, every: Duration) -> Result<()> {
 
 enum Rental {
     Live(Box<LivePod>),
-    /// Every offer was taken before the create, or none was left by the time `up` searched.
+    /// None was left by the time `up` searched, or the search failed.
     Gone,
+    /// Every offer was refused at the create, as an offer someone takes first is.
+    Refused(anyhow::Error),
     /// A box failed a check and `up` destroyed it; its machine is avoided for the rest of the watch.
     BoxFailed,
 }
@@ -171,9 +189,9 @@ fn rent(ctx: &Ctx, spec: &mut IssueSpec) -> Result<Rental> {
     if !new.is_empty() {
         ctx.warn(
             &issue,
-            format!("every offer was taken before the create, watching on: {error:#}"),
+            format!("every offer was refused at the create, watching on: {error:#}"),
         );
-        return Ok(Rental::Gone);
+        return Ok(Rental::Refused(error));
     }
     if error.downcast_ref::<NothingInStock>().is_some() {
         return Ok(Rental::Gone);

@@ -62,8 +62,8 @@ enum Command {
     /// Search for an offer every few minutes; rent it as `up` would when the budget is set, else report it
     Watch {
         issue: String,
-        /// Time between searches, such as 4m or 90s
-        #[arg(long, default_value = "4m", value_parser = duration)]
+        /// Time between searches, such as 4m or 90s; at least 30s
+        #[arg(long, default_value = "4m", value_parser = search_interval)]
         every: Duration,
         /// How long to keep searching; exit status 3 when it runs out
         #[arg(long = "for", default_value = "24h", value_parser = duration)]
@@ -118,6 +118,17 @@ fn duration(text: &str) -> Result<Duration, String> {
         .ok()
         .filter(|d| !d.is_zero())
         .ok_or_else(|| format!("{text:?} must be longer than zero"))
+}
+
+fn search_interval(text: &str) -> Result<Duration, String> {
+    let every = duration(text)?;
+    if every < watch::MIN_EVERY {
+        return Err(format!(
+            "{text:?} would spend Vast's daily search quota; search no more often than every {}s",
+            watch::MIN_EVERY.as_secs()
+        ));
+    }
+    Ok(every)
 }
 
 /// What `watch` exits with when `--for` runs out without an offer.
@@ -361,7 +372,7 @@ mod tests {
         );
         let (_, every, limit) = parse(&["harness", "watch", "x-1", "--every", "90s", "--for", "1h 30m"]).unwrap();
         assert_eq!((every, limit), (Duration::from_secs(90), Duration::from_secs(5400)));
-        for bad in ["0s", "-4m", "soon"] {
+        for bad in ["0s", "-4m", "soon", "10s"] {
             assert!(parse(&["harness", "watch", "x-1", "--every", bad]).is_err(), "{bad}");
         }
         let cli = Cli::try_parse_from(["harness", "watch", "x-1"]).unwrap();
