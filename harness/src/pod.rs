@@ -24,7 +24,9 @@ use crate::ledger::{
 use crate::session::{Remote, TRANSFER_LIMIT, Target, Watch, start_job, wait_job};
 use crate::spec::{IssueSpec, Provider};
 use crate::vast::{VastApi, VastOffer};
-use crate::vast_box::{VAST_FIRST_READ, base64, vast_create_request, vast_entrypoint, wait_vast_watchdog};
+use crate::vast_box::{
+    VAST_FIRST_READ, base64, vast_create_request, vast_entrypoint, wait_vast_watchdog, watchdog_gone,
+};
 
 pub const ENTRYPOINT: &str = include_str!("../pod/entrypoint.sh");
 /// sshd, the watchdog's curl, procps (pkill, free) for the pod scripts, and patch for patch_pkg.sh, whatever
@@ -157,6 +159,27 @@ impl fmt::Display for StillLive {
         )
     }
 }
+
+/// The harness destroyed a pod whose watchdog was gone, so the pod no longer bills and no error after it should say
+/// it does.
+#[derive(Debug)]
+pub struct WatchdogGone {
+    pub pod: String,
+    pub seen: String,
+}
+
+impl fmt::Display for WatchdogGone {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "pod {}'s watchdog is gone, so nothing on it would have ended it at its deadline; it was destroyed. The \
+             check printed: {:?}",
+            self.pod, self.seen
+        )
+    }
+}
+
+impl std::error::Error for WatchdogGone {}
 
 /// Records a command's error as an event, with the live pod's facts when the error carries them, so a monitor
 /// tailing events.jsonl sees every failure without reading stderr.
@@ -584,7 +607,9 @@ pub fn up(ctx: &Ctx, spec: &IssueSpec, run_setup: bool, after_failure: AfterFail
     );
     match setup(ctx, spec, &entry, &target, run_setup) {
         Ok(()) => Ok(LivePod { entry, target }),
-        Err(e) if after_failure == AfterFailure::KeepPod => Err(e.context(StillLive::of(issue, &entry))),
+        Err(e) if after_failure == AfterFailure::KeepPod && e.downcast_ref::<WatchdogGone>().is_none() => {
+            Err(e.context(StillLive::of(issue, &entry)))
+        }
         Err(e) => Err(e),
     }
 }
@@ -1144,6 +1169,48 @@ pub fn down(ctx: &Ctx, issue: &str) -> Result<()> {
         ctx.warn(issue, format!("pull before terminate failed: {e:#}"));
     }
     terminate(ctx, issue, &entry).map_err(|e| e.context(StillLive::of(issue, &entry)))
+}
+
+/// RunPod's watchdog is the container's main process, so it cannot die and leave the pod up. Vast's runs beside the
+/// box's own init, so a box in use is checked again, and one whose watchdog is gone is destroyed.
+pub fn check_watchdog_alive(ctx: &Ctx, issue: &str, entry: &PodEntry, target: &Target) -> Result<()> {
+    if entry.provider != Provider::Vast {
+        return Ok(());
+    }
+    let Some(seen) = watchdog_gone(ctx, issue, entry, target) else {
+        return Ok(());
+    };
+    end_box(ctx, issue, entry).map_err(|e| {
+        e.context(format!(
+            "pod {}'s watchdog is gone ({seen:?}), and destroying the box failed",
+            entry.name
+        ))
+    })?;
+    Err(WatchdogGone {
+        pod: entry.name.clone(),
+        seen,
+    }
+    .into())
+}
+
+/// How often a box nobody will use is destroyed before the harness gives up and leaves it to the reaper.
+const END_ATTEMPTS: usize = 3;
+
+/// A box nobody will use any more bills until it is gone, so its destroy is tried more than once.
+pub fn end_box(ctx: &Ctx, issue: &str, entry: &PodEntry) -> Result<()> {
+    let mut attempt = 1;
+    loop {
+        match terminate(ctx, issue, entry) {
+            Ok(()) => return Ok(()),
+            Err(e) if attempt >= END_ATTEMPTS => return Err(e),
+            Err(e) => ctx.warn(
+                issue,
+                format!("destroying pod {} failed, trying again: {e:#}", entry.name),
+            ),
+        }
+        attempt += 1;
+        ctx.clock.sleep(POLL);
+    }
 }
 
 /// Deletes the pod (on Vast, destroys it: never a stop, which keeps billing the disk), waits until its provider no

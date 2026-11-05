@@ -263,7 +263,9 @@ The same layers, mapped:
    an `"id"` key), since Vast answers a key that cannot act on the instance with a 200 and no instance. `up` destroys
    a box whose latest read lacks that line, naming a rejected key (401 or 403) when that is why. The read is the one
    sign before the deadline that the destroy can work, not proof that it does. The same check reads the box's clock,
-   which the watchdog compares the deadline with, and a box more than 2 min off the laptop's is destroyed.
+   which the watchdog compares the deadline with, and a box more than 2 min off the laptop's is destroyed. Since
+   nothing ties the box's life to the watchdog's, the check runs again before each variant and after any failed
+   poll, and a box whose watchdog is gone is destroyed then; a check that cannot run only warns.
 3. **Reaper.** Lists Vast's instances (all pages, or an error) beside RunPod's, whenever a Vast key is set and some
    ledger holds a Vast pod or the command's issue has a Vast choice; other commands never call Vast, so a hung Vast
    API cannot hold up a RunPod `down`. A pod missing from the list within 10 min of its reservation is left alone,

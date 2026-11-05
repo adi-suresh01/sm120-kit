@@ -181,6 +181,30 @@ pub fn wait_vast_watchdog(ctx: &Ctx, entry: &PodEntry, target: &Target) -> Resul
     }
 }
 
+/// The arm check again, on a box already in use: Some(what it printed) once the watchdog is gone or cannot destroy
+/// the box, so nothing on the box would end it at its deadline. A check that cannot run proves nothing either way and
+/// only warns.
+pub fn watchdog_gone(ctx: &Ctx, issue: &str, entry: &PodEntry, target: &Target) -> Option<String> {
+    let id = entry.id.as_deref()?;
+    let script = vast_watchdog_check_script(entry.deadline, id, WATCHDOG_LOG, "/proc");
+    let unchecked = |why: String| ctx.warn(issue, format!("pod {}'s watchdog went unchecked: {why}", entry.name));
+    let reply = match ctx.remote.run(target, &script) {
+        Ok(reply) => reply,
+        Err(e) => {
+            unchecked(format!("{e:#}"));
+            return None;
+        }
+    };
+    match reply.lines().next().unwrap_or("") {
+        "WATCHDOG_MISSING" | "SELF_DESTRUCT_MISSING" => Some(reply.trim().to_string()),
+        "WATCHDOG_ARMED" => None,
+        other => {
+            unchecked(format!("the check printed {other:?}"));
+            None
+        }
+    }
+}
+
 /// The box's read of its own instance with its own key, the one sign before the deadline that the destroy can work.
 /// Vast answers a key that cannot act on the instance with a 200 that names no instance, so only the line the box logs
 /// once the reply named this very id counts, and only when no later read logged since. Anything else ends the box.

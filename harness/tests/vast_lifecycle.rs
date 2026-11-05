@@ -14,7 +14,6 @@ use std::time::Duration;
 use anyhow::Result;
 use fake_vast::{Create, FakeVast, P2P_OK, VastBox, WatchClock, offer, p2p_without};
 use jiff::SignedDuration;
-use sm120_harness::budget;
 use sm120_harness::clock::Clock;
 use sm120_harness::cloud::{Clouds, Providers};
 use sm120_harness::events::Events;
@@ -23,6 +22,7 @@ use sm120_harness::pod::{self, AfterFailure, Ctx};
 use sm120_harness::reap;
 use sm120_harness::spec::IssueSpec;
 use sm120_harness::watch::{self, Outcome};
+use sm120_harness::{budget, exec};
 use support::fake_cloud::FakeCloud;
 use support::{TempDir, repo_with_issue};
 
@@ -656,4 +656,54 @@ fn a_box_vast_lists_only_after_its_destroy_is_destroyed_on_sight() {
     w.with(reap::reap).unwrap();
     assert!(w.vast.billing_ids().is_empty());
     assert_eq!(w.ledger().pods[0].state, PodState::Terminated);
+}
+
+const WATCHDOG_GONE: &str = "WATCHDOG_MISSING\n2026-11-04T17:01:00Z watchdog armed for epoch 1 in pid 812\n";
+
+#[test]
+fn a_box_whose_watchdog_died_is_ended_before_the_next_variant() {
+    let w = World::new();
+    let live = w.up().unwrap();
+    w.remote.arm_check_prints(WATCHDOG_GONE);
+    let spec = w.spec();
+    let names = vec!["baseline".to_string()];
+    let err = format!("{:#}", w.with(|ctx| exec::exec(ctx, &spec, &live, &names)).unwrap_err());
+    assert!(err.contains("watchdog is gone") && !err.contains("still up"), "{err}");
+    assert!(
+        w.remote
+            .inner
+            .jobs
+            .borrow()
+            .iter()
+            .all(|job| !job.contains("serve_variant.sh"))
+    );
+    assert_eq!(w.vast.0.borrow().deleted, ["31000001"]);
+    assert_eq!(w.ledger().pods[0].state, PodState::Terminated);
+}
+
+#[test]
+fn a_failed_poll_on_vast_checks_the_watchdog_again() {
+    let w = World::new();
+    let live = w.up().unwrap();
+    // Armed before the variant, gone by the time a poll fails.
+    *w.remote.watchdog.borrow_mut() = VecDeque::from([fake_vast::ARMED.to_string(), WATCHDOG_GONE.to_string()]);
+    w.remote.inner.die_after(0);
+    let spec = w.spec();
+    let names = vec!["baseline".to_string()];
+    let err = format!("{:#}", w.with(|ctx| exec::exec(ctx, &spec, &live, &names)).unwrap_err());
+    assert!(err.contains("watchdog is gone"), "{err}");
+    assert_eq!(w.vast.0.borrow().deleted, ["31000001"]);
+    assert_eq!(w.ledger().pods[0].state, PodState::Terminated);
+}
+
+#[test]
+fn a_watchdog_check_that_cannot_run_ends_nothing() {
+    let w = World::new();
+    let live = w.up().unwrap();
+    w.remote.arm_check_prints("");
+    let spec = w.spec();
+    let names = vec!["baseline".to_string()];
+    w.with(|ctx| exec::exec(ctx, &spec, &live, &names)).unwrap();
+    assert!(w.vast.0.borrow().deleted.is_empty());
+    assert!(w.events().contains("went unchecked"), "{}", w.events());
 }

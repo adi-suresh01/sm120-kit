@@ -11,7 +11,7 @@ use anyhow::{Context, Result, anyhow, bail, ensure};
 
 use crate::cloud::PodStatus;
 use crate::ledger::PodEntry;
-use crate::pod::{Ctx, POLL};
+use crate::pod::{self, Ctx, POLL};
 
 pub const KIT_DIR: &str = "/workspace/sm120-kit";
 const UPLOAD_EXCLUDES: [&str; 3] = [".DS_Store", "harness-ledger.json*", ".harness-ledger.lock"];
@@ -561,7 +561,7 @@ pub fn wait_job(
             }
             Err(e) => {
                 failures += 1;
-                check_pod_up(ctx, issue, entry, job)?;
+                check_pod_up(ctx, issue, entry, target, job)?;
                 if failures >= POLL_FAILURES {
                     return Err(e).context(format!("lost contact with the pod while {job} ran"));
                 }
@@ -577,7 +577,7 @@ pub fn wait_job(
 /// either way. The GET is one attempt without retries, since one that retried for minutes on every failed poll would
 /// hold up the failure limit and Ctrl-C. Only a 404 leads on to the pod list, which keeps its retries: it is rare, and
 /// it decides whether the run ends.
-fn check_pod_up(ctx: &Ctx, issue: &str, entry: &PodEntry, job: &str) -> Result<()> {
+fn check_pod_up(ctx: &Ctx, issue: &str, entry: &PodEntry, target: &Target, job: &str) -> Result<()> {
     let Some(id) = entry.id.as_deref() else {
         return Ok(());
     };
@@ -601,7 +601,8 @@ fn check_pod_up(ctx: &Ctx, issue: &str, entry: &PodEntry, job: &str) -> Result<(
         Ok(Some(pod)) if matches!(pod.status, PodStatus::Exited | PodStatus::Error | PodStatus::Terminated) => {
             format!("{provider} reports pod {} (id {id}) {:?}", entry.name, pod.status)
         }
-        Ok(Some(_)) => return Ok(()),
+        // Up, but a failed poll is also when a box whose watchdog died would go unnoticed.
+        Ok(Some(_)) => return pod::check_watchdog_alive(ctx, issue, entry, target),
         Ok(None) => format!("{provider} no longer lists pod {} (id {id})", entry.name),
         Err(e) => {
             ctx.warn(

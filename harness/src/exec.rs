@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
 
 use crate::events::Kind;
-use crate::pod::{self, AfterFailure, Ctx, LivePod, StillLive};
+use crate::pod::{self, AfterFailure, Ctx, LivePod, StillLive, WatchdogGone};
 use crate::reap;
 use crate::session::{TRANSFER_LIMIT, Watch, shell_quote, start_job, wait_job};
 use crate::spec::{IssueSpec, Variant};
@@ -120,12 +120,16 @@ pub fn exec(ctx: &Ctx, spec: &IssueSpec, live: &LivePod, names: &[String]) -> Re
         ctx.remote.upload(&live.target, ctx.repo, &[&issue_dir])?;
         run_planned(ctx, spec, live, &planned)
     };
-    run().map_err(|e| e.context(StillLive::of(&spec.issue, &live.entry)))
+    run().map_err(|e| match e.downcast_ref::<WatchdogGone>() {
+        Some(_) => e,
+        None => e.context(StillLive::of(&spec.issue, &live.entry)),
+    })
 }
 
 fn run_planned(ctx: &Ctx, spec: &IssueSpec, live: &LivePod, planned: &[Planned]) -> Result<()> {
     for variant in planned {
         ctx.check_interrupted()?;
+        pod::check_watchdog_alive(ctx, &spec.issue, &live.entry, &live.target)?;
         run_variant(ctx, spec, live, variant)?;
     }
     Ok(())
