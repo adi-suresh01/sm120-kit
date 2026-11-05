@@ -1,0 +1,9 @@
+{
+  "issue": "pcie-tp8-allreduce",
+  "budget": {
+    "usd": 25.0,
+    "approved_at": "2026-11-05T20:49:01Z",
+    "note": "Approved by Aditya 2026-11-05: Vast 8x RTX PRO 6000 (Max-Q/S/WS, S quoted $13.35/hr, cap $17/hr), 1.25 h stage-1 allreduce microbench, unattended via harness watch; worst case $23.62"
+  },
+  "pods": []
+}

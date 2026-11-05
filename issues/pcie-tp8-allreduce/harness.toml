@@ -1,0 +1,38 @@
+# Stage 1 of the TP8 decode all-reduce study on 8 PCIe-only GPUs: a communication microbenchmark, no model weights.
+# Everything runs in setup.sh, so `harness watch` rents, measures, and pulls, and `harness down` ends the box; there
+# are no variants. About 10 min for the image, 5 min of harness gates, and 25-35 min of setup (README.md). setup.sh
+# starts no measurement that could run past 10 min before the deadline, so a slow pull costs arms, not the box.
+issue = "pcie-tp8-allreduce"
+planned_hours = 1.25
+
+[pod]
+# The newest release (2026-11-02). Its custom all-reduce, pynccl, and the opt-in FlashInfer PCIe IPC backend
+# (vllm#53576) are what main ships. CUDA 13.0.3 with nvcc, torch 2.14.0, NCCL 2.31.2, FlashInfer 0.7.2.post1
+# (docker/Dockerfile and requirements/cuda.txt at the tag); env_extra.txt records what the box actually loads.
+image = "vllm/vllm-openai:v0.33.0@sha256:d825baf9ce4b1b6bfc5ecc7b79880c7e6748c65a72d697ce3d47607aafa84c6e"
+count = 8
+min_cuda = "13.0"
+# The image unpacks to roughly 30 GB; the nccl-tests build and the logs need under 1 GB.
+container_disk_gb = 50
+volume_gb = 10
+needs_hf_token = false
+# Custom all-reduce and FlashInfer's PCIe IPC kernels read and write peer memory directly, so a box where any pair
+# lacks P2P cannot answer the question.
+require_p2p = true
+# The image (9.7 GB compressed for amd64), plus g++, make, and NCCL headers if the image lacks them.
+expected_download_gb = 12
+# Max-Q is the target hardware; the Server and Workstation Editions share sm_120 and the PCIe question.
+gpus = [
+  { provider = "vast", id = "RTX PRO 6000 Max-Q", max_usd_hr = 17.0, min_reliability = 0.95 },
+  { provider = "vast", id = "RTX PRO 6000 S", max_usd_hr = 17.0, min_reliability = 0.95 },
+  { provider = "vast", id = "RTX PRO 6000 WS", max_usd_hr = 17.0, min_reliability = 0.95 },
+]
+
+# No server runs here; [server] only satisfies the schema.
+[server]
+package = "vllm"
+model = "none"
+launch = ["true"]
+port = 8000
+fail_pattern = "never-matches"
+boot_timeout_s = 60
