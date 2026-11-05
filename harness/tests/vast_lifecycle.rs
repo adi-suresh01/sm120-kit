@@ -527,3 +527,25 @@ fn a_destroyed_instance_still_listed_for_a_while_is_waited_out_then_booked() {
     assert_eq!(w.clock.slept.borrow().len() - slept_before, 3);
     assert!(w.vast.billing_ids().is_empty());
 }
+
+#[test]
+fn a_read_that_fails_never_holds_back_the_destroy() {
+    let w = World::new();
+    w.vast.0.borrow_mut().get_fails = true;
+    let err = format!("{:#}", w.up().unwrap_err());
+    assert!(err.contains("its destroy cannot be confirmed"), "{err}");
+    assert_eq!(w.vast.0.borrow().deleted, ["31000001"]);
+    assert!(w.vast.billing_ids().is_empty());
+    // Destroyed, but no read agreed, so the ledger still holds it.
+    assert_eq!(w.ledger().pods[0].state, PodState::Live);
+}
+
+#[test]
+fn a_watch_whose_reads_fail_destroys_the_box_before_it_stops() {
+    let w = World::new();
+    w.vast.0.borrow_mut().get_fails = true;
+    let err = format!("{:#}", w.watch(EVERY, DAY).unwrap_err());
+    assert!(err.contains("its destroy cannot be confirmed"), "{err}");
+    assert_eq!(w.vast.0.borrow().deleted.first().map(String::as_str), Some("31000001"));
+    assert!(w.vast.billing_ids().is_empty());
+}

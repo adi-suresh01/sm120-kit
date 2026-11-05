@@ -1133,13 +1133,16 @@ fn end_pod(ctx: &Ctx, issue: &str, entry: &PodEntry, overdue: bool) -> Result<()
         .as_deref()
         .with_context(|| format!("pod {} has no id to terminate", entry.name))?;
     let cloud = ctx.cloud_on(provider)?;
-    // A Vast instance no read has shown yet may still appear, so after its destroy, absence would prove nothing.
-    let unseen = provider == Provider::Vast && entry.may_be_unlisted(ctx.clock.now()) && cloud.get_pod(id)?.is_none();
+    // A Vast instance no read has shown yet may still appear, so after its destroy, absence would prove nothing. The
+    // read only decides what the ledger may book: a failed one must never hold back the destroy itself.
+    let unseen = provider == Provider::Vast
+        && entry.may_be_unlisted(ctx.clock.now())
+        && !matches!(cloud.get_pod(id), Ok(Some(_)));
     cloud.delete_pod(id)?;
     ensure!(
         !unseen,
-        "Vast does not show instance {id} yet, so its destroy cannot be confirmed; it stays live in the ledger, and \
-         the reaper books it once Vast has had {} min to show it",
+        "Vast did not show instance {id} before its destroy, so its destroy cannot be confirmed; it stays live in \
+         the ledger, and the reaper books it once Vast has had {} min to show it",
         ADOPT_WINDOW.as_mins()
     );
     confirm_gone(ctx, cloud, id)?;
