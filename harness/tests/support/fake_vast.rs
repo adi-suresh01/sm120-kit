@@ -54,6 +54,8 @@ pub enum Create {
     MadeButReplyLost,
     /// The reply is lost, and no read shows the instance until `reveal_unlisted`.
     MadeButListedLater,
+    /// The reply names the instance, and no read shows it until `reveal_unlisted`.
+    MadeListedLater,
     Refused(u16),
 }
 
@@ -63,6 +65,8 @@ pub struct VastState {
     pub requests: Vec<(u64, VastCreateRequest)>,
     pub instances: Vec<(Pod, u64)>,
     pub unlisted: Vec<(Pod, u64)>,
+    /// The unlisted instances show from this many list calls on.
+    pub reveal_after_lists: Option<usize>,
     pub searches: usize,
     /// Searches that find nothing before the offers show up, as while a watch waits.
     pub empty_searches: usize,
@@ -95,6 +99,7 @@ impl Default for FakeVast {
             requests: Vec::new(),
             instances: Vec::new(),
             unlisted: Vec::new(),
+            reveal_after_lists: None,
             searches: 0,
             empty_searches: 0,
             search_error: None,
@@ -197,6 +202,15 @@ impl Cloud for FakeVast {
 
     fn list_pods(&self) -> Result<Vec<Pod>, CloudError> {
         let lingering = self.lingering();
+        let due = {
+            let mut state = self.0.borrow_mut();
+            let due = state.reveal_after_lists.map(|left| left.saturating_sub(1));
+            state.reveal_after_lists = due;
+            due == Some(0)
+        };
+        if due {
+            self.reveal_unlisted();
+        }
         let mut state = self.0.borrow_mut();
         state.list_calls += 1;
         if let Some(status) = state.list_error {
@@ -251,7 +265,6 @@ impl Cloud for FakeVast {
         let gone: Vec<Pod> = state
             .instances
             .iter()
-            .chain(&state.unlisted)
             .filter(|(pod, _)| pod.id == id)
             .map(|(pod, _)| Pod {
                 status: PodStatus::Exited,
@@ -261,8 +274,8 @@ impl Cloud for FakeVast {
         if state.linger_reads > 0 {
             state.lingering.extend(gone);
         }
+        // Vast answers 404 for an instance it does not list yet, so the destroy leaves an unlisted one billing.
         state.instances.retain(|(pod, _)| pod.id != id);
-        state.unlisted.retain(|(pod, _)| pod.id != id);
         Ok(())
     }
 
@@ -319,6 +332,7 @@ impl VastApi for FakeVast {
                 self.make(request, offer_id, false);
                 Err(CloudError::Network("timed out".into()).vast())
             }
+            Create::MadeListedLater => Ok(self.make(request, offer_id, false)),
             Create::Refused(status) => Err(http(status, "fake create refusal")),
         }
     }

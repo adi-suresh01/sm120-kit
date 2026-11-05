@@ -293,6 +293,7 @@ fn exec_runs_rendered_variants_through_serve_variant_and_reads_every_line() {
             cost_usd: None,
             cost_source: None,
             placement: None,
+            abandoned: false,
         },
         target: Target {
             host: "127.0.0.1".into(),

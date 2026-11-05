@@ -31,6 +31,7 @@ fn entry(spec: &IssueSpec) -> PodEntry {
         cost_usd: None,
         cost_source: None,
         placement: None,
+        abandoned: false,
     }
 }
 

@@ -174,6 +174,10 @@ pub struct PodEntry {
     /// Where a Vast pod was rented; RunPod places its own pods, so its entries have none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placement: Option<VastPlacement>,
+    /// The harness gave up on this Vast pod while it may still bill: a destroy that could not be confirmed, or a
+    /// create whose instance never showed. The reaper destroys it as soon as Vast lists it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub abandoned: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -293,14 +297,17 @@ impl Ledger {
         })
     }
 
-    /// As `tracks`, among this ledger's pods on `provider` only: the two providers' ids share no namespace.
+    /// As `tracks`, among this ledger's pods on `provider` only: the two providers' ids share no namespace. A Vast
+    /// instance carrying a failed create's label is tracked too, since Vast can list one after the create failed, and
+    /// the reaper destroys it.
     pub fn tracks_on(&self, provider: Provider, id: &str, name: &str) -> bool {
         self.pods.iter().any(|entry| {
             entry.provider == provider
                 && match entry.state {
                     PodState::Live => entry.id.as_deref() == Some(id),
                     PodState::Reserved => entry.name == name,
-                    PodState::Terminated | PodState::CreateFailed => false,
+                    PodState::CreateFailed => provider == Provider::Vast && entry.name == name,
+                    PodState::Terminated => false,
                 }
         })
     }
@@ -392,6 +399,7 @@ impl Ledger {
             cost_usd: None,
             cost_source: None,
             placement: terms.placement,
+            abandoned: false,
         };
         self.pods.push(entry.clone());
         Ok(entry)
@@ -427,6 +435,11 @@ impl Ledger {
                 pod.name,
                 pod.provider,
                 if pod.placement.is_some() { "a" } else { "no" }
+            );
+            ensure!(
+                !pod.abandoned || (pod.provider == Provider::Vast && pod.state != PodState::Terminated),
+                "pod {} is marked abandoned, which only a Vast pod that may still bill can be",
+                pod.name
             );
         }
         ensure!(
@@ -505,6 +518,7 @@ impl PodEntry {
                 self.terminated_at = Some(at);
                 self.cost_usd = Some(self.estimate_usd(at));
                 self.cost_source = Some(CostSource::Estimate);
+                self.abandoned = false;
                 Ok(())
             }
             PodState::Reserved | PodState::Terminated | PodState::CreateFailed => {
@@ -515,6 +529,20 @@ impl PodEntry {
                 )
             }
         }
+    }
+
+    /// A failed create's instance that Vast listed after all, now destroyed and gone: it billed from the
+    /// reservation on, though the reservation no longer held budget for it.
+    pub fn book_late_instance(&mut self, id: &str, at: Timestamp) -> Result<()> {
+        ensure!(
+            self.state == PodState::CreateFailed,
+            "pod {} is {:?}; only a failed create can have its instance booked late",
+            self.name,
+            self.state
+        );
+        self.id = Some(id.to_string());
+        self.state = PodState::Live;
+        self.mark_terminated(at)
     }
 
     /// Within the adopt window of its reservation, a provider may still leave a new pod out of every read, so its
@@ -918,6 +946,56 @@ mod tests {
         lost_placement.pods[0].placement = None;
         let err = lost_placement.check().unwrap_err().to_string();
         assert!(err.contains("pod a is on Vast but names no Vast placement"), "{err}");
+    }
+
+    #[test]
+    fn the_abandoned_mark_is_vasts_written_only_when_set_and_gone_once_booked() {
+        let mut ledger = funded(50.0);
+        ledger
+            .reserve_vast("a", &sample_offer(16.0), 1.0, at("2026-10-16T17:00:00Z"))
+            .unwrap();
+        assert!(
+            serde_json::to_value(&ledger).unwrap()["pods"][0]
+                .get("abandoned")
+                .is_none()
+        );
+        let entry = &mut ledger.pods[0];
+        entry.mark_live("31000001").unwrap();
+        entry.abandoned = true;
+        ledger.check().unwrap();
+        assert_eq!(serde_json::to_value(&ledger).unwrap()["pods"][0]["abandoned"], true);
+        ledger.pods[0].mark_terminated(at("2026-10-16T17:30:00Z")).unwrap();
+        assert!(!ledger.pods[0].abandoned);
+        let mut runpod = funded(20.0);
+        runpod
+            .reserve("b", &offer(2.0), 1.0, at("2026-10-16T17:00:00Z"))
+            .unwrap();
+        runpod.pods[0].abandoned = true;
+        assert!(runpod.check().unwrap_err().to_string().contains("marked abandoned"));
+    }
+
+    #[test]
+    fn a_failed_creates_late_instance_is_booked_from_its_reservation() {
+        let mut ledger = funded(50.0);
+        ledger
+            .reserve_vast("a", &sample_offer(16.0), 1.0, at("2026-10-16T17:00:00Z"))
+            .unwrap();
+        let entry = &mut ledger.pods[0];
+        assert!(
+            entry
+                .book_late_instance("31000001", at("2026-10-16T17:20:00Z"))
+                .is_err()
+        );
+        entry.mark_create_failed().unwrap();
+        entry.abandoned = true;
+        entry
+            .book_late_instance("31000001", at("2026-10-16T17:30:00Z"))
+            .unwrap();
+        assert_eq!(
+            (entry.state, entry.id.as_deref(), entry.cost_usd, entry.abandoned),
+            (PodState::Terminated, Some("31000001"), Some(8.0), false)
+        );
+        ledger.check().unwrap();
     }
 
     #[test]

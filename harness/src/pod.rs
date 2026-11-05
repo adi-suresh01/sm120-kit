@@ -771,8 +771,17 @@ fn adopt_by_name(
         ),
     );
     let mut last_error = None;
-    for attempt in 0..NAME_LOOKUPS {
+    for attempt in 0.. {
+        // Vast can take minutes to list a new instance, so on Vast the lookup runs to the end of the adopt window.
+        let more = match entry.provider {
+            Provider::Runpod => attempt < NAME_LOOKUPS,
+            Provider::Vast => attempt == 0 || entry.may_be_unlisted(ctx.clock.now()),
+        };
+        if !more {
+            break;
+        }
         if attempt > 0 {
+            ctx.check_interrupted()?;
             ctx.clock.sleep(POLL);
         }
         match cloud.list_pods() {
@@ -791,6 +800,20 @@ fn adopt_by_name(
         }
     }
     let lookup = last_error.map_or_else(String::new, |e| format!(" (last lookup: {e})"));
+    if entry.provider == Provider::Vast {
+        store.update(|ledger| {
+            let entry = ledger.entry_mut(&entry.name)?;
+            entry.mark_create_failed()?;
+            entry.abandoned = true;
+            Ok(())
+        })?;
+        return Err(anyhow!(error)).context(format!(
+            "creating {} failed and no instance with that label was listed within {} min{lookup}; it is booked as a \
+             failed create and marked abandoned, so the reaper destroys it if Vast lists it later",
+            entry.name,
+            ADOPT_WINDOW.as_mins()
+        ));
+    }
     Err(anyhow!(error)).context(format!(
         "creating {} failed and no pod by that name is listed{lookup}; the reservation stays until the reaper adopts \
          or releases it",
@@ -1138,14 +1161,22 @@ fn end_pod(ctx: &Ctx, issue: &str, entry: &PodEntry, overdue: bool) -> Result<()
     let unseen = provider == Provider::Vast
         && entry.may_be_unlisted(ctx.clock.now())
         && !matches!(cloud.get_pod(id), Ok(Some(_)));
-    cloud.delete_pod(id)?;
-    ensure!(
-        !unseen,
-        "Vast did not show instance {id} before its destroy, so its destroy cannot be confirmed; it stays live in \
-         the ledger, and the reaper books it once Vast has had {} min to show it",
-        ADOPT_WINDOW.as_mins()
-    );
-    confirm_gone(ctx, cloud, id)?;
+    let destroyed = cloud.delete_pod(id).map_err(anyhow::Error::from).and_then(|()| {
+        ensure!(
+            !unseen,
+            "Vast did not show instance {id} before its destroy, so its destroy cannot be confirmed; it stays live in \
+             the ledger, marked abandoned: the reaper destroys it once Vast lists it, or books it once Vast has had {} \
+             min to show it",
+            ADOPT_WINDOW.as_mins()
+        );
+        confirm_gone(ctx, cloud, id)
+    });
+    if let Err(e) = destroyed {
+        if provider == Provider::Vast {
+            abandon(ctx, issue, &entry.name);
+        }
+        return Err(e);
+    }
     let at = ctx.clock.now();
     let entry = ctx.ledger(issue).update(|ledger| {
         let entry = ledger.entry_mut(&entry.name)?;
@@ -1162,6 +1193,45 @@ fn end_pod(ctx: &Ctx, issue: &str, entry: &PodEntry, overdue: bool) -> Result<()
         Some(issue),
         Kind::Terminate,
         json!({"pod": entry.name, "id": id, "cost_usd": entry.cost_usd.map(cents), "cost_source": entry.cost_source}),
+    );
+    Ok(())
+}
+
+/// Marks a Vast pod the harness tried and failed to end, so that the reaper destroys it as soon as Vast lists it
+/// instead of at its deadline. A failed mark only warns: the error that led here says more.
+fn abandon(ctx: &Ctx, issue: &str, name: &str) {
+    let marked = ctx.ledger(issue).update(|ledger| {
+        let entry = ledger.entry_mut(name)?;
+        if entry.state != PodState::Terminated {
+            entry.abandoned = true;
+        }
+        Ok(())
+    });
+    if let Err(e) = marked {
+        ctx.warn(issue, format!("marking pod {name} abandoned failed: {e:#}"));
+    }
+}
+
+/// The reaper's path for an instance Vast listed under a failed create's label: nothing uses it, so it is destroyed
+/// at once and booked from its reservation on.
+pub fn destroy_late_instance(ctx: &Ctx, issue: &str, name: &str, id: &str) -> Result<()> {
+    let cloud = ctx.cloud_on(Provider::Vast)?;
+    cloud.delete_pod(id)?;
+    confirm_gone(ctx, cloud, id)?;
+    let at = ctx.clock.now();
+    let entry = ctx.ledger(issue).update(|ledger| {
+        let entry = ledger.entry_mut(name)?;
+        if entry.state == PodState::CreateFailed {
+            entry.book_late_instance(id, at)?;
+        }
+        Ok(entry.clone())
+    })?;
+    let entry = record_billing(ctx, cloud, issue, entry);
+    ctx.events.emit(
+        Some(issue),
+        Kind::Terminate,
+        json!({"pod": name, "id": id, "detail": "listed after its create failed",
+               "cost_usd": entry.cost_usd.map(cents), "cost_source": entry.cost_source}),
     );
     Ok(())
 }

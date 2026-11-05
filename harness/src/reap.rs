@@ -33,6 +33,13 @@ pub enum Action {
         issue: String,
         name: String,
     },
+    /// Destroy at once, whatever the deadline: the harness gave up on this pod, or Vast listed it after its create
+    /// failed, so nothing uses it.
+    Destroy {
+        issue: String,
+        name: String,
+        id: String,
+    },
     WarnUntracked {
         name: String,
         id: String,
@@ -59,6 +66,7 @@ fn live_action(
         // Vast can leave a new instance out of its list for a while; another command's `up` may have just made it.
         None if provider == Provider::Vast && entry.may_be_unlisted(now) => None,
         None => Some(Action::MarkGone { issue, name }),
+        Some(_) if entry.abandoned => Some(Action::Destroy { issue, name, id }),
         Some(pod) if overdue => Some(Action::Terminate {
             issue,
             name,
@@ -99,6 +107,18 @@ pub fn decide_on(provider: Provider, ledgers: &[Ledger], pods: &[Pod], now: Time
                     }),
                     None => {}
                 },
+                (PodState::CreateFailed, _) if provider == Provider::Vast => {
+                    let late = pods
+                        .iter()
+                        .find(|pod| pod.name == entry.name && pod.status != PodStatus::Terminated);
+                    if let Some(pod) = late {
+                        actions.push(Action::Destroy {
+                            issue: issue.to_string(),
+                            name: entry.name.clone(),
+                            id: pod.id.clone(),
+                        });
+                    }
+                }
                 (PodState::Live, None) | (PodState::Terminated | PodState::CreateFailed, _) => {}
             }
         }
@@ -189,7 +209,8 @@ fn action_issue<'a>(ctx: &Ctx, action: &'a Action) -> Option<&'a str> {
         Action::Terminate { issue, .. }
         | Action::MarkGone { issue, .. }
         | Action::Adopt { issue, .. }
-        | Action::Release { issue, .. } => Some(issue),
+        | Action::Release { issue, .. }
+        | Action::Destroy { issue, .. } => Some(issue),
         Action::WarnUntracked { name, .. } => name
             .strip_prefix("sm120-")
             .and_then(|rest| rest.rsplit_once('-'))
@@ -248,6 +269,24 @@ fn apply(ctx: &Ctx, provider: Provider, action: &Action) -> Result<()> {
             })?;
             ctx.events
                 .emit(Some(issue), Kind::Reap, json!({"pod": name, "action": "release"}));
+        }
+        Action::Destroy { issue, name, id } => {
+            let ledger = ctx.ledger(issue).load()?;
+            let Some(entry) = ledger.pods.iter().find(|e| &e.name == name) else {
+                return Ok(());
+            };
+            let event = json!({"pod": name, "id": id, "action": "destroy", "state": entry.state});
+            match entry.state {
+                PodState::Live if entry.id.as_deref() == Some(id.as_str()) => {
+                    ctx.events.emit(Some(issue), Kind::Reap, event);
+                    pod::terminate(ctx, issue, entry)?;
+                }
+                PodState::CreateFailed => {
+                    ctx.events.emit(Some(issue), Kind::Reap, event);
+                    pod::destroy_late_instance(ctx, issue, name, id)?;
+                }
+                PodState::Live | PodState::Reserved | PodState::Terminated => {}
+            }
         }
         Action::WarnUntracked { name, id } => {
             let detail = match provider {
@@ -511,6 +550,50 @@ mod tests {
             decide_on(Provider::Vast, &ledgers, &listed, at("2026-10-16T17:05:00Z")),
             [adopt]
         );
+    }
+
+    #[test]
+    fn a_vast_pod_the_harness_gave_up_on_is_destroyed_as_soon_as_it_is_listed() {
+        let mut ledger = vast_ledger_with(PodState::Live);
+        ledger.pods[0].abandoned = true;
+        let ledgers = [ledger];
+        let destroy = Action::Destroy {
+            issue: VAST_ISSUE.into(),
+            name: VAST_NAME.into(),
+            id: "31000001".into(),
+        };
+        let listed = [pod("31000001", VAST_NAME, PodStatus::Running)];
+        assert_eq!(
+            decide_on(Provider::Vast, &ledgers, &listed, at("2026-10-16T17:05:00Z")),
+            std::slice::from_ref(&destroy)
+        );
+        // Unlisted, it is booked gone once the adopt window has passed, as any Vast pod is.
+        assert!(decide_on(Provider::Vast, &ledgers, &[], at("2026-10-16T17:05:00Z")).is_empty());
+        let mut failed = vast_ledger_with(PodState::Reserved);
+        failed.pods[0].mark_create_failed().unwrap();
+        let failed = [failed];
+        assert!(decide_on(Provider::Vast, &failed, &[], at("2026-10-16T17:30:00Z")).is_empty());
+        assert_eq!(
+            decide_on(Provider::Vast, &failed, &listed, at("2026-10-16T17:30:00Z")),
+            [destroy]
+        );
+        let stopped = [pod("31000001", VAST_NAME, PodStatus::Terminated)];
+        assert!(decide_on(Provider::Vast, &failed, &stopped, at("2026-10-16T17:30:00Z")).is_empty());
+    }
+
+    #[test]
+    fn a_runpod_pod_listed_under_a_failed_create_only_warns() {
+        let pods = [pod("p1", NAME, PodStatus::Running)];
+        let actions = decide(
+            &[ledger_with(PodState::CreateFailed)],
+            &pods,
+            at("2026-10-16T17:30:00Z"),
+        );
+        let warn = Action::WarnUntracked {
+            name: NAME.into(),
+            id: "p1".into(),
+        };
+        assert_eq!(actions, [warn]);
     }
 
     #[test]

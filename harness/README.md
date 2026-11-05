@@ -261,15 +261,19 @@ The same layers, mapped:
 3. **Reaper.** Lists Vast's instances (all pages, or an error) beside RunPod's, whenever a Vast key is set and some
    ledger holds a Vast pod or the command's issue has a Vast choice; other commands never call Vast, so a hung Vast
    API cannot hold up a RunPod `down`. A pod missing from the list within 10 min of its reservation is left alone,
-   since Vast can be slow to show a new instance. Each
-   provider's entries are settled against that provider's own list only, so neither list books, releases, or ends a
-   pod on the other. Only instances a ledger tracks are ever ended; others named `sm120-*` get a warning, and every
-   other instance on the account is left alone.
+   since Vast can be slow to show a new instance. Each provider's entries are settled against that provider's own
+   list only, so neither list books, releases, or ends a pod on the other. Only instances a ledger tracks are ever
+   ended; others named `sm120-*` get a warning, and every other instance on the account is left alone.
 4. **Destroy, never stop.** `down` and the reaper destroy, then wait until neither a GET nor the list shows the
-   instance before the ledger books it: a stopped instance still bills its disk.
-5. **Cost.** From Vast's charges for the instance (`cost_source: billing`) when they list it, else `dph_total` x the
+   instance before the ledger books it: a stopped instance still bills its disk. A read that fails never holds back
+   the destroy; it only keeps the ledger from booking the pod gone.
+5. **Abandoned pods.** A Vast pod the harness gave up on is marked `abandoned` in the ledger: a destroy it could
+   not confirm, or a create whose outcome is unknown and whose label Vast did not list in the 10 min `up` looks for
+   it (that reservation is then booked as a failed create). The reaper destroys an abandoned pod as soon as Vast
+   lists it, whatever its deadline, and does the same for any instance listed under a failed create's label.
+6. **Cost.** From Vast's charges for the instance (`cost_source: billing`) when they list it, else `dph_total` x the
    time from reservation to end (`estimate`), under the same rules as RunPod's billing.
-6. **Prepaid Vast credit** is the ceiling under all of these.
+7. **Prepaid Vast credit** is the ceiling under all of these.
 
 Vast answers a key that cannot see an instance as if it were gone, so the ledger records the Vast account
 (`vast:<user id>`, from `GET /api/v0/users/current/`) with its first Vast pod, and a Vast key of another account is

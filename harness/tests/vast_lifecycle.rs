@@ -549,3 +549,61 @@ fn a_watch_whose_reads_fail_destroys_the_box_before_it_stops() {
     assert_eq!(w.vast.0.borrow().deleted.first().map(String::as_str), Some("31000001"));
     assert!(w.vast.billing_ids().is_empty());
 }
+
+#[test]
+fn a_create_vast_lists_minutes_late_is_still_adopted_by_its_label() {
+    let w = World::new();
+    {
+        let mut vast = w.vast.0.borrow_mut();
+        vast.creates = VecDeque::from([Create::MadeButListedLater]);
+        vast.reveal_after_lists = Some(18);
+    }
+    w.up().unwrap();
+    let ledger = w.ledger();
+    assert_eq!(ledger.pods.len(), 1);
+    assert_eq!(
+        (ledger.pods[0].state, ledger.pods[0].id.as_deref()),
+        (PodState::Live, Some("31000001"))
+    );
+    assert!(w.events().contains("\"adopted\":true"));
+}
+
+#[test]
+fn a_create_vast_never_lists_is_given_up_then_destroyed_when_it_shows() {
+    let w = World::new();
+    w.vast.0.borrow_mut().creates = VecDeque::from([Create::MadeButListedLater]);
+    let reserved_at = w.clock.now();
+    let err = format!("{:#}", w.up().unwrap_err());
+    assert!(err.contains("marked abandoned"), "{err}");
+    assert!(w.clock.now().duration_since(reserved_at) >= SignedDuration::from_mins(10));
+    let entry = w.ledger().pods[0].clone();
+    assert_eq!((entry.state, entry.abandoned), (PodState::CreateFailed, true));
+    // Vast lists it at last: the next reaper pass destroys it at once and books it.
+    w.vast.reveal_unlisted();
+    w.with(reap::reap).unwrap();
+    assert_eq!(w.vast.0.borrow().deleted, ["31000001"]);
+    assert!(w.vast.billing_ids().is_empty());
+    let entry = &w.ledger().pods[0];
+    assert_eq!(
+        (entry.state, entry.id.as_deref(), entry.abandoned),
+        (PodState::Terminated, Some("31000001"), false)
+    );
+    assert_eq!(entry.cost_source, Some(CostSource::Estimate));
+}
+
+#[test]
+fn a_box_vast_lists_only_after_its_destroy_is_destroyed_on_sight() {
+    let w = World::new();
+    w.vast.0.borrow_mut().creates = VecDeque::from([Create::MadeListedLater]);
+    let err = format!("{:#}", w.up().unwrap_err());
+    assert!(err.contains("its destroy cannot be confirmed"), "{err}");
+    let entry = w.ledger().pods[0].clone();
+    assert_eq!((entry.state, entry.abandoned), (PodState::Live, true));
+    assert_eq!(w.vast.billing_ids(), ["31000001"]);
+    w.vast.reveal_unlisted();
+    // Long before its deadline, which is when the reaper would end a box it had not given up on.
+    assert!(w.clock.now() < entry.deadline);
+    w.with(reap::reap).unwrap();
+    assert!(w.vast.billing_ids().is_empty());
+    assert_eq!(w.ledger().pods[0].state, PodState::Terminated);
+}

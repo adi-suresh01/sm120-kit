@@ -246,6 +246,7 @@ mod tests {
             cost_usd: None,
             cost_source: None,
             placement: Some(crate::vast::sample_offer(0.05).placement()),
+            abandoned: false,
         }
     }
 
