@@ -8,6 +8,29 @@ use serde::de::value::MapAccessDeserializer;
 use serde::de::{self, Deserializer, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
 
+/// Who rents the pod. A choice names RunPod unless it says otherwise, so every issue written before Vast reads as it
+/// always did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Provider {
+    #[default]
+    Runpod,
+    Vast,
+}
+
+impl Provider {
+    pub const ALL: [Self; 2] = [Self::Runpod, Self::Vast];
+}
+
+impl fmt::Display for Provider {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str(match self {
+            Self::Runpod => "RunPod",
+            Self::Vast => "Vast",
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum CloudTier {
@@ -63,7 +86,7 @@ struct RawSpec {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(from = "RawPod")]
 pub struct PodSpec {
     pub image: String,
     pub count: u32,
@@ -71,22 +94,161 @@ pub struct PodSpec {
     pub container_disk_gb: u32,
     pub volume_gb: u32,
     require_pcie: Option<bool>,
-    #[serde(default)]
+    /// Refuses a box where any GPU pair reads anything but OK in `nvidia-smi topo -p2p r`.
+    pub require_p2p: bool,
     pub apt: Vec<String>,
-    #[serde(default)]
     pub needs_hf_token: bool,
+    /// The preference list as harness.toml writes it, providers mixed: what `up` walks.
+    pub choices: Vec<Choice>,
+    /// The RunPod choices among `choices`, in the same order: what RunPod's catalog prices.
     pub gpus: Vec<GpuChoice>,
     /// RunPod data centers this issue's pods must not land in, such as one whose hosts download the weights too
     /// slowly for setup to finish.
-    #[serde(default)]
     pub avoid_data_centers: Vec<String>,
+    /// Vast machines this issue's pods must not land on, such as one whose GPUs failed the P2P check.
+    pub avoid_machines: Vec<u64>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+/// `[pod]` as written.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawPod {
+    image: String,
+    count: u32,
+    min_cuda: String,
+    container_disk_gb: u32,
+    volume_gb: u32,
+    require_pcie: Option<bool>,
+    #[serde(default)]
+    require_p2p: bool,
+    #[serde(default)]
+    apt: Vec<String>,
+    #[serde(default)]
+    needs_hf_token: bool,
+    gpus: Vec<Choice>,
+    #[serde(default)]
+    avoid_data_centers: Vec<String>,
+    #[serde(default)]
+    avoid_machines: Vec<u64>,
+}
+
+impl From<RawPod> for PodSpec {
+    fn from(raw: RawPod) -> Self {
+        let gpus = raw
+            .gpus
+            .iter()
+            .filter_map(|choice| match choice {
+                Choice::Runpod(gpu) => Some(gpu.clone()),
+                Choice::Vast(_) => None,
+            })
+            .collect();
+        Self {
+            image: raw.image,
+            count: raw.count,
+            min_cuda: raw.min_cuda,
+            container_disk_gb: raw.container_disk_gb,
+            volume_gb: raw.volume_gb,
+            require_pcie: raw.require_pcie,
+            require_p2p: raw.require_p2p,
+            apt: raw.apt,
+            needs_hf_token: raw.needs_hf_token,
+            choices: raw.gpus,
+            gpus,
+            avoid_data_centers: raw.avoid_data_centers,
+            avoid_machines: raw.avoid_machines,
+        }
+    }
+}
+
+/// A RunPod GPU type in one cloud tier.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GpuChoice {
     pub id: String,
     pub cloud: CloudTier,
+}
+
+/// A Vast GPU type. Vast rents whole machines from many hosts, each at its own price, so the choice carries the
+/// limits an offer has to meet instead of a cloud tier.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VastChoice {
+    /// Vast's `gpu_name`, matched exactly.
+    pub id: String,
+    /// The most the whole machine (every GPU and the disk) may cost per hour.
+    pub max_usd_hr: f64,
+    pub min_reliability: f64,
+    pub min_inet_down_mbps: f64,
+}
+
+const DEFAULT_MIN_RELIABILITY: f64 = 0.95;
+/// Setup downloads the weights on every box, and a slow link bills GPU hours while it waits.
+const DEFAULT_MIN_INET_DOWN_MBPS: f64 = 500.0;
+
+/// One entry of `pod.gpus`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(try_from = "RawChoice")]
+pub enum Choice {
+    Runpod(GpuChoice),
+    Vast(VastChoice),
+}
+
+impl Choice {
+    pub fn provider(&self) -> Provider {
+        match self {
+            Self::Runpod(_) => Provider::Runpod,
+            Self::Vast(_) => Provider::Vast,
+        }
+    }
+}
+
+/// A choice as written: one table whose `provider` decides which other keys it may have.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawChoice {
+    #[serde(default)]
+    provider: Provider,
+    id: String,
+    cloud: Option<CloudTier>,
+    max_usd_hr: Option<f64>,
+    min_reliability: Option<f64>,
+    min_inet_down_mbps: Option<f64>,
+}
+
+impl TryFrom<RawChoice> for Choice {
+    type Error = String;
+
+    fn try_from(raw: RawChoice) -> Result<Self, String> {
+        match raw.provider {
+            Provider::Runpod => {
+                let vast_keys = [
+                    ("max_usd_hr", raw.max_usd_hr.is_some()),
+                    ("min_reliability", raw.min_reliability.is_some()),
+                    ("min_inet_down_mbps", raw.min_inet_down_mbps.is_some()),
+                ];
+                if let Some((key, _)) = vast_keys.iter().find(|(_, set)| *set) {
+                    return Err(format!(
+                        "{key} is for provider = \"vast\" choices; a RunPod choice takes id and cloud"
+                    ));
+                }
+                let cloud = raw.cloud.ok_or("missing field `cloud`")?;
+                Ok(Self::Runpod(GpuChoice { id: raw.id, cloud }))
+            }
+            Provider::Vast => {
+                if raw.cloud.is_some() {
+                    return Err("a Vast choice takes no cloud: Vast has no cloud tiers".into());
+                }
+                let max_usd_hr = raw
+                    .max_usd_hr
+                    .ok_or("a Vast choice needs max_usd_hr, the most the whole machine may cost per hour")?;
+                Ok(Self::Vast(VastChoice {
+                    id: raw.id,
+                    max_usd_hr,
+                    min_reliability: raw.min_reliability.unwrap_or(DEFAULT_MIN_RELIABILITY),
+                    min_inet_down_mbps: raw.min_inet_down_mbps.unwrap_or(DEFAULT_MIN_INET_DOWN_MBPS),
+                }))
+            }
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -336,6 +498,61 @@ impl PodSpec {
         self.require_pcie.unwrap_or(self.count > 1)
     }
 
+    /// Vast has no separate volume: both sizes go on the one container disk, and an offer with less free disk is
+    /// no offer.
+    pub fn vast_disk_gb(&self) -> u32 {
+        self.container_disk_gb + self.volume_gb
+    }
+
+    pub fn vast_choices(&self) -> impl Iterator<Item = &VastChoice> {
+        self.choices.iter().filter_map(|choice| match choice {
+            Choice::Vast(vast) => Some(vast),
+            Choice::Runpod(_) => None,
+        })
+    }
+
+    fn validate_vast(&self) -> Result<()> {
+        for choice in self.vast_choices() {
+            let id = &choice.id;
+            ensure!(!id.trim().is_empty(), "a Vast pod.gpus choice has an empty id");
+            ensure!(
+                choice.max_usd_hr.is_finite() && choice.max_usd_hr > 0.0,
+                "Vast choice {id:?}: max_usd_hr must be a positive dollar amount"
+            );
+            ensure!(
+                (0.0..=1.0).contains(&choice.min_reliability),
+                "Vast choice {id:?}: min_reliability must be between 0 and 1"
+            );
+            ensure!(
+                choice.min_inet_down_mbps.is_finite() && choice.min_inet_down_mbps >= 0.0,
+                "Vast choice {id:?}: min_inet_down_mbps must not be negative"
+            );
+        }
+        let has_vast = self.vast_choices().next().is_some();
+        // The RunPod secret reference means nothing to Vast, and the token itself would sit in the instance's env.
+        ensure!(
+            !(has_vast && self.needs_hf_token),
+            "pod.needs_hf_token passes a RunPod secret, which Vast cannot read; a Vast choice needs an issue that \
+             downloads no gated weights"
+        );
+        ensure!(
+            self.avoid_data_centers.is_empty() || !has_vast,
+            "pod.avoid_data_centers names RunPod data centers, and Vast choices have none; use pod.avoid_machines"
+        );
+        ensure!(
+            self.avoid_machines.is_empty() || has_vast,
+            "pod.avoid_machines names Vast machines, so it needs at least one provider = \"vast\" choice"
+        );
+        let mut seen = BTreeSet::new();
+        for machine in &self.avoid_machines {
+            ensure!(
+                seen.insert(machine),
+                "pod.avoid_machines lists {machine} more than once"
+            );
+        }
+        Ok(())
+    }
+
     fn validate(&self) -> Result<()> {
         let digest = self.image.split_once("@sha256:").map(|(_, hex)| hex);
         ensure!(
@@ -348,7 +565,7 @@ impl PodSpec {
         ensure!(self.container_disk_gb >= 1, "pod.container_disk_gb must be at least 1");
         // RunPod rejects persistent volumes under 10 GB at create time, after the reservation is written.
         ensure!(self.volume_gb >= 10, "pod.volume_gb must be at least 10");
-        ensure!(!self.gpus.is_empty(), "pod.gpus must list at least one GPU");
+        ensure!(!self.choices.is_empty(), "pod.gpus must list at least one GPU");
         for package in &self.apt {
             ensure!(is_apt_name(package), "pod.apt entry {package:?} is not a package name");
         }
@@ -362,6 +579,7 @@ impl PodSpec {
             );
             ensure!(seen.insert(id), "pod.avoid_data_centers lists {id:?} more than once");
         }
+        self.validate_vast()?;
         // The catalog lists data centers for secure stock only, so a community choice would ignore the list unseen.
         ensure!(
             self.avoid_data_centers.is_empty() || self.gpus.iter().all(|choice| choice.cloud == CloudTier::Secure),
@@ -782,6 +1000,102 @@ smoke_concurrency = 13
     fn rejects_a_small_volume() {
         let err = error_of(&example().replace("volume_gb = 80", "volume_gb = 5"));
         assert!(err.contains("volume_gb must be at least 10"), "{err}");
+    }
+
+    const VAST_8X: &str = "  { provider = \"vast\", id = \"RTX PRO 6000 Max-Q\", max_usd_hr = 17.0, \
+                           min_reliability = 0.97 },\n";
+
+    fn with_choices(choices: &str) -> String {
+        let start = example().find("gpus = [\n").unwrap();
+        let end = example()[start..].find("]\n").unwrap() + start + 2;
+        format!("{}gpus = [\n{choices}]\n{}", &example()[..start], &example()[end..])
+    }
+
+    #[test]
+    fn a_choice_without_a_provider_is_runpods() {
+        let spec = parse(&example()).unwrap();
+        assert!(spec.pod.choices.iter().all(|c| c.provider() == Provider::Runpod));
+        assert_eq!(spec.pod.choices.len(), spec.pod.gpus.len());
+        assert!(!spec.pod.require_p2p && spec.pod.avoid_machines.is_empty());
+    }
+
+    #[test]
+    fn mixed_providers_keep_their_order_and_runpods_catalog_sees_only_its_own() {
+        let text = with_choices(&format!(
+            "{VAST_8X}  {{ id = \"NVIDIA RTX PRO 6000 Blackwell Server Edition\", cloud = \"SECURE\" }},\n  \
+             {{ provider = \"vast\", id = \"RTX 5090\", max_usd_hr = 9.5 }},\n"
+        ))
+        .replace(
+            "count = 1",
+            "count = 8\nrequire_p2p = true\navoid_machines = [156482, 43934]",
+        );
+        let spec = parse(&text).unwrap();
+        let providers: Vec<Provider> = spec.pod.choices.iter().map(Choice::provider).collect();
+        assert_eq!(providers, [Provider::Vast, Provider::Runpod, Provider::Vast]);
+        assert_eq!(spec.pod.gpus.len(), 1);
+        assert_eq!(spec.pod.gpus[0].cloud, CloudTier::Secure);
+        let vast: Vec<&VastChoice> = spec.pod.vast_choices().collect();
+        assert_eq!(
+            *vast[0],
+            VastChoice {
+                id: "RTX PRO 6000 Max-Q".into(),
+                max_usd_hr: 17.0,
+                min_reliability: 0.97,
+                min_inet_down_mbps: 500.0,
+            }
+        );
+        assert_eq!((vast[1].min_reliability, vast[1].max_usd_hr), (0.95, 9.5));
+        assert!(spec.pod.require_p2p);
+        assert_eq!(spec.pod.avoid_machines, [156482, 43934]);
+        assert_eq!(spec.pod.vast_disk_gb(), 120);
+    }
+
+    #[test]
+    fn rejects_choices_that_mix_up_the_providers_keys() {
+        let vast = "  { provider = \"vast\", id = \"RTX 5090\", max_usd_hr = 9.5, cloud = \"SECURE\" },\n";
+        assert!(error_of(&with_choices(vast)).contains("a Vast choice takes no cloud"));
+        let vast = "  { provider = \"vast\", id = \"RTX 5090\" },\n";
+        assert!(error_of(&with_choices(vast)).contains("needs max_usd_hr"));
+        let runpod = "  { id = \"NVIDIA GeForce RTX 5090\", cloud = \"SECURE\", max_usd_hr = 3.0 },\n";
+        assert!(error_of(&with_choices(runpod)).contains("max_usd_hr is for provider = \"vast\" choices"));
+        let runpod = "  { id = \"NVIDIA GeForce RTX 5090\" },\n";
+        assert!(error_of(&with_choices(runpod)).contains("missing field `cloud`"));
+        let other = "  { provider = \"verda\", id = \"RTX 5090\", max_usd_hr = 9.5 },\n";
+        assert!(error_of(&with_choices(other)).contains("unknown variant `verda`"));
+        let typo = "  { provider = \"vast\", id = \"RTX 5090\", max_usd_hr = 9.5, min_reliabilty = 0.9 },\n";
+        assert!(error_of(&with_choices(typo)).contains("unknown field `min_reliabilty`"));
+    }
+
+    #[test]
+    fn rejects_vast_limits_that_could_not_hold() {
+        for (bad, expected) in [
+            ("max_usd_hr = 0.0", "max_usd_hr must be a positive"),
+            ("max_usd_hr = nan", "max_usd_hr must be a positive"),
+            (
+                "max_usd_hr = 9.5, min_reliability = 1.5",
+                "min_reliability must be between 0 and 1",
+            ),
+            (
+                "max_usd_hr = 9.5, min_inet_down_mbps = -1.0",
+                "min_inet_down_mbps must not be negative",
+            ),
+        ] {
+            let choice = format!("  {{ provider = \"vast\", id = \"RTX 5090\", {bad} }},\n");
+            let err = error_of(&with_choices(&choice));
+            assert!(err.contains(expected), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn the_avoid_lists_each_need_their_own_provider() {
+        let err = error_of(&avoiding("[\"EUR-IS-2\"]").replace(COMMUNITY_CHOICE, VAST_8X));
+        assert!(err.contains("Vast choices have none; use pod.avoid_machines"), "{err}");
+        let err = error_of(&example().replace("volume_gb = 80", "volume_gb = 80\navoid_machines = [1]"));
+        assert!(err.contains("needs at least one provider = \"vast\" choice"), "{err}");
+        let twice = with_choices(VAST_8X).replace("volume_gb = 80", "volume_gb = 80\navoid_machines = [7, 7]");
+        assert!(error_of(&twice).contains("lists 7 more than once"));
+        let token = with_choices(VAST_8X).replace("count = 1", "count = 1\nneeds_hf_token = true");
+        assert!(error_of(&token).contains("Vast cannot read"));
     }
 
     #[test]
