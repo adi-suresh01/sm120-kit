@@ -15,7 +15,7 @@ use crate::vast::VastOffer;
 /// rate x MARGIN x deadline never exceeds what is left of the budget.
 pub const MARGIN: f64 = 1.10;
 pub const MIN_DEADLINE: SignedDuration = SignedDuration::from_mins(15);
-/// How long a reservation with no pod id waits for its pod to appear in RunPod's list before it is released.
+/// How long a reservation with no pod id waits for its pod to appear in its provider's list before it is released.
 pub const ADOPT_WINDOW: SignedDuration = SignedDuration::from_mins(10);
 /// Billing for a finished pod can show up in parts, so a figure below the estimate is only trusted after this.
 pub const BILLING_SETTLE: SignedDuration = SignedDuration::from_hours(24);

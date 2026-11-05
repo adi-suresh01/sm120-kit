@@ -16,18 +16,26 @@ use crate::vast::VastCreateRequest;
 pub const ENTRYPOINT_VAST: &str = include_str!("../pod/entrypoint_vast.sh");
 /// Vast's `onstart`: a loader for the entrypoint, which travels base64 in `HARNESS_ENTRYPOINT_B64` so that its size
 /// never meets a limit on `onstart`. POSIX sh, since which shell Vast runs it with is not documented. The entrypoint
-/// runs as `/bin/bash -c <text>`, its command line on RunPod too, which the watchdog check looks for. Tests only:
+/// runs as `/bin/bash -c <text>`, its command line on RunPod too, which the watchdog check looks for. A payload that
+/// is empty or does not decode is said in the watchdog log too, which the arm check prints. Tests only:
 /// HARNESS_TEST_ROOT prefixes the paths, as in the entrypoint.
 pub const VAST_ONSTART: &str = r#"root=${HARNESS_TEST_ROOT:-}
 mkdir -p "$root/workspace"
-entry=$(printf '%s' "$HARNESS_ENTRYPOINT_B64" | base64 -d) || { echo "harness: HARNESS_ENTRYPOINT_B64 did not decode; this box has no watchdog" >&2; exit 1; }
+fail() {
+    echo "harness: HARNESS_ENTRYPOINT_B64 $1; this box has no watchdog" >&2
+    echo "harness: HARNESS_ENTRYPOINT_B64 $1; this box has no watchdog" >>"$root/workspace/harness-watchdog.log"
+    exit 1
+}
+entry=$(printf '%s' "$HARNESS_ENTRYPOINT_B64" | base64 -d) || fail "did not decode"
+[ -n "$entry" ] || fail "is empty"
 if command -v setsid >/dev/null 2>&1; then
     setsid /bin/bash -c "$entry" >"$root/workspace/harness-entrypoint.log" 2>&1 </dev/null &
 else
     /bin/bash -c "$entry" >"$root/workspace/harness-entrypoint.log" 2>&1 </dev/null &
 fi
 "#;
-/// Vast's own sshd, reached directly where the host maps a port and through Vast's proxy where not.
+/// Vast's own sshd, reached directly where the host maps a port and through Vast's proxy where not. `ssh_direc` is
+/// Vast's own spelling, as its CLI sends it.
 const VAST_RUNTYPE: &str = "ssh_direc ssh_proxy";
 /// How long a Vast read may come back empty right after the create before the instance counts as gone.
 pub const VAST_FIRST_READ: SignedDuration = SignedDuration::from_mins(2);

@@ -88,6 +88,7 @@ gpus = [
   { id = "NVIDIA RTX PRO 6000 Blackwell Server Edition", cloud = "SECURE" },
 ]
 avoid_machines = [156482]       # Vast machine ids; needs a Vast choice
+expected_download_gb = 700      # Vast only: what setup downloads, held in the reservation at the host's price
 ```
 
 - `id` is Vast's `gpu_name`, matched exactly (`vastai search offers` prints it). A Vast choice takes no `cloud`.
@@ -308,9 +309,10 @@ keeps RunPod's rule, where every write checks the RunPod key. Any command but `d
 aside with a warning, as does a key file that cannot be read, so neither stops a RunPod-only command.
 
 Taken from the vastai 1.10 CLI and still to confirm on the first live box: the env names `CONTAINER_ID` and
-`CONTAINER_API_KEY` (with `VAST_CONTAINERLABEL`, `C.<id>`, as a fallback for the id), that the instance key may
-destroy its own instance, that `onstart` runs on every container start, and the shape of the charge rows (matched
-on `source`, `instance-<id>` or the bare id).
+`CONTAINER_API_KEY` (with `VAST_CONTAINERLABEL`, `C.<id>`, as a fallback for the id), that the instance key reads
+back its own instance by id and may destroy it, how Vast words a refused destroy or stop, that `onstart` runs on
+every container start, and the shape of the charge rows (matched on `source`, `instance-<id>` or the bare id). The
+reserve event's `entrypoint_b64_bytes` is the size of the env var the entrypoint travels in.
 
 ## Watching a run
 

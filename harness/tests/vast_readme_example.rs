@@ -37,4 +37,5 @@ fn the_vast_example_parses() {
     assert_eq!(spec.pod.count, 8);
     assert!(spec.pod.require_p2p);
     assert_eq!(spec.pod.avoid_machines, [156482]);
+    assert_eq!(spec.pod.vast_download_gb(), 700);
 }

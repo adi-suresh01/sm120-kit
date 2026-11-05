@@ -1010,10 +1010,15 @@ fn wait_ready(
                 None => match pod.container() {
                     Some(container) => {
                         let since = *proxy_only_since.get_or_insert(now);
+                        // Vast's proxy is a fallback the endpoint already takes, so there neither way is open.
+                        let missing = match provider {
+                            Provider::Runpod => "no direct SSH endpoint (proxy-only host)",
+                            Provider::Vast => "no SSH endpoint (no mapped 22/tcp and no SSH proxy)",
+                        };
                         ensure!(
                             now.duration_since(since) < NO_DIRECT_SSH,
-                            "pod {}: {provider} gave no direct SSH endpoint (proxy-only host) within {} min of its \
-                             container starting; runtime ports: {}",
+                            "pod {}: {provider} gave {missing} within {} min of its container starting; runtime \
+                             ports: {}",
                             entry.name,
                             NO_DIRECT_SSH.as_mins(),
                             container.ports

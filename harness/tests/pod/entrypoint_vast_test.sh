@@ -227,4 +227,10 @@ if HARNESS_TEST_ROOT=$loader HARNESS_ENTRYPOINT_B64='%%%' sh "$VAST_ONSTART_FILE
     fail "the loader passed an entrypoint that does not decode"
 fi
 grep -q 'did not decode; this box has no watchdog' "$loader/err" || fail "a bad entrypoint is not reported"
+if HARNESS_TEST_ROOT=$loader HARNESS_ENTRYPOINT_B64='' sh "$VAST_ONSTART_FILE" 2>"$loader/err"; then
+    fail "the loader passed an empty entrypoint"
+fi
+grep -q 'is empty; this box has no watchdog' "$loader/err" || fail "an empty entrypoint is not reported"
+grep -q 'is empty; this box has no watchdog' "$loader/workspace/harness-watchdog.log" ||
+    fail "an empty entrypoint is not in the watchdog log, where the arm check shows it"
 echo "ok: the onstart loader decodes the entrypoint and starts it as /bin/bash -c <text>"
