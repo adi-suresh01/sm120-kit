@@ -101,31 +101,19 @@ pub fn emit_quote(ctx: &Ctx, spec: &IssueSpec, candidates: &[Candidate], remaini
         first.rate_usd_hr(),
     )?;
     let fallbacks: Vec<String> = candidates[1..].iter().map(Candidate::describe).collect();
-    let fields = match first {
-        Candidate::Runpod(first) => {
-            let mut fields = json!({
-                "gpu": first.gpu, "cloud": first.cloud, "count": first.count, "rate_usd_hr": first.rate_usd_hr,
-                "deadline": plan.deadline, "worst_case_usd": cents(plan.reserved_usd),
-                "remaining_usd": remaining.map(cents), "fallbacks": fallbacks,
-            });
-            if !first.data_centers.is_empty() {
-                fields["data_centers"] = json!(first.data_centers);
-            }
-            fields
-        }
-        // Downloads bill on top of the hourly rate the reservation covers, so their price is part of the quote.
-        Candidate::Vast(first) => json!({
-            "gpu": first.gpu, "provider": Provider::Vast, "count": first.count, "rate_usd_hr": first.rate_usd_hr,
-            "machine": first.machine_id, "offer": first.offer_id, "reliability": first.reliability(),
-            "inet_down_mbps": first.inet_down, "download_usd_tb": first.internet_down_cost_per_tb,
-            "location": first.geolocation, "deadline": plan.deadline, "worst_case_usd": cents(plan.reserved_usd),
-            "remaining_usd": remaining.map(cents), "fallbacks": fallbacks,
-        }),
-    };
-    ctx.events.emit(Some(&spec.issue), Kind::Quote, fields);
+    let mut fields = first.fields();
+    fields.insert("deadline".into(), json!(plan.deadline));
+    fields.insert("worst_case_usd".into(), json!(cents(plan.reserved_usd)));
+    fields.insert("remaining_usd".into(), json!(remaining.map(cents)));
+    fields.insert("fallbacks".into(), json!(fallbacks));
     let Candidate::Runpod(first) = first else {
+        ctx.events.emit(Some(&spec.issue), Kind::Quote, fields.into());
         return Ok(());
     };
+    if !first.data_centers.is_empty() {
+        fields.insert("data_centers".into(), json!(first.data_centers));
+    }
+    ctx.events.emit(Some(&spec.issue), Kind::Quote, fields.into());
     if !first.unlisted_avoided.is_empty() {
         ctx.warn(
             &spec.issue,

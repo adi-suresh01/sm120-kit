@@ -284,23 +284,21 @@ fn dispatch(
         account: account.as_deref(),
     };
     let reaped = reap::reap(&ctx);
-    if let Command::Reap = command {
-        return reaped.map(|()| ExitCode::SUCCESS);
-    }
-    if let Err(e) = reaped {
+    if let (Err(e), false) = (&reaped, matches!(command, Command::Reap)) {
         events.emit(
             command.issue(),
             Kind::Warn,
             json!({"detail": format!("reaper failed: {e:#}")}),
         );
     }
-    if let Command::Watch { issue, every, limit } = command {
-        return match watch::watch(&ctx, load(repo, &issue)?, every, limit)? {
-            Outcome::Rented(_) | Outcome::Reported => Ok(ExitCode::SUCCESS),
-            Outcome::TimedOut => Ok(ExitCode::from(WATCH_TIMED_OUT)),
-        };
-    }
     let done = match command {
+        Command::Reap => reaped,
+        Command::Watch { issue, every, limit } => {
+            return Ok(match watch::watch(&ctx, load(repo, &issue)?, every, limit)? {
+                Outcome::Rented(_) | Outcome::Reported => ExitCode::SUCCESS,
+                Outcome::TimedOut => ExitCode::from(WATCH_TIMED_OUT),
+            });
+        }
         Command::Budget {
             action: BudgetAction::Set { issue, usd, note },
         } => budget::set(&ctx, &issue, usd, &note),
@@ -318,7 +316,6 @@ fn dispatch(
         Command::Pull { issue } => pod::pull(&ctx, &issue, &pod::live_pod(&ctx, &issue)?.target, TRANSFER_LIMIT),
         Command::Down { issue } => pod::down(&ctx, &issue),
         Command::Run { issue, variants } => exec::run(&ctx, &load(repo, &issue)?, &variants),
-        Command::Reap | Command::Watch { .. } => Ok(()),
         Command::Ssh { issue, command } => ctx
             .remote
             .run_streaming(&pod::live_pod(&ctx, &issue)?.target, &command.join(" ")),

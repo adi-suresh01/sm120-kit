@@ -388,6 +388,36 @@ impl Candidate {
             Self::Vast(offer) => offer.describe(),
         }
     }
+
+    /// What the reserve and quote events say about the offer, in the order they print it.
+    pub fn fields(&self) -> serde_json::Map<String, serde_json::Value> {
+        let fields = match self {
+            Self::Runpod(offer) => serde_json::json!({
+                "gpu": offer.gpu, "cloud": offer.cloud, "count": offer.count, "rate_usd_hr": offer.rate_usd_hr,
+            }),
+            // Downloads bill on top of the hourly rate, so their price goes with the offer.
+            Self::Vast(offer) => serde_json::json!({
+                "gpu": offer.gpu, "provider": Provider::Vast, "machine": offer.machine_id, "offer": offer.offer_id,
+                "count": offer.count, "rate_usd_hr": offer.rate_usd_hr, "reliability": offer.reliability(),
+                "inet_down_mbps": offer.inet_down, "download_usd_tb": offer.internet_down_cost_per_tb,
+                "location": offer.geolocation,
+            }),
+        };
+        match fields {
+            serde_json::Value::Object(fields) => fields,
+            _ => serde_json::Map::new(),
+        }
+    }
+
+    /// RunPod answers 400 both for a broken request and for no capacity on this GPU; the next choice tells the two
+    /// apart. Vast refuses an offer someone else took first, in a shape its docs do not pin down, so any refusal but a
+    /// rejected key or a rate limit moves on; the same offer is never tried twice.
+    pub fn refusal_moves_on(&self, error: &CloudError) -> bool {
+        match self {
+            Self::Runpod(_) => error.status() == Some(400),
+            Self::Vast(_) => !matches!(error.status(), Some(401 | 403 | 429)),
+        }
+    }
 }
 
 /// Said when something needs Vast and the command has no Vast client.

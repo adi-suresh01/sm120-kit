@@ -14,8 +14,8 @@ use serde_json::json;
 use crate::budget;
 use crate::clock::Clock;
 use crate::cloud::{
-    Candidate, Cloud, CloudError, Clouds, CreatePodRequest, GpuRequest, Mounts, NO_VAST_KEY, PersistentMount, Pod,
-    PodStatus, SshEndpoint, find_candidates,
+    Candidate, Cloud, CloudError, Clouds, CreatePodRequest, GpuRequest, Mounts, NO_VAST_KEY, Offer, PersistentMount,
+    Pod, PodStatus, SshEndpoint, find_candidates,
 };
 use crate::events::{Events, Kind};
 use crate::ledger::{
@@ -23,26 +23,10 @@ use crate::ledger::{
 };
 use crate::session::{Remote, TRANSFER_LIMIT, Target, Watch, start_job, wait_job};
 use crate::spec::{IssueSpec, Provider};
-use crate::vast::{VastApi, VastCreateRequest, VastOffer};
+use crate::vast::{VastApi, VastOffer};
+use crate::vast_box::{VAST_FIRST_READ, base64, vast_create_request, vast_entrypoint, wait_vast_watchdog};
 
 pub const ENTRYPOINT: &str = include_str!("../pod/entrypoint.sh");
-/// Vast's part of the entrypoint, spliced in by `vast_entrypoint`.
-pub const ENTRYPOINT_VAST: &str = include_str!("../pod/entrypoint_vast.sh");
-/// Vast's `onstart`: a loader for the entrypoint, which travels base64 in `HARNESS_ENTRYPOINT_B64` so that its size
-/// never meets a limit on `onstart`. POSIX sh, since which shell Vast runs it with is not documented. The entrypoint
-/// runs as `/bin/bash -c <text>`, its command line on RunPod too, which the watchdog check looks for. Tests only:
-/// HARNESS_TEST_ROOT prefixes the paths, as in the entrypoint.
-pub const VAST_ONSTART: &str = r#"root=${HARNESS_TEST_ROOT:-}
-mkdir -p "$root/workspace"
-entry=$(printf '%s' "$HARNESS_ENTRYPOINT_B64" | base64 -d) || { echo "harness: HARNESS_ENTRYPOINT_B64 did not decode; this box has no watchdog" >&2; exit 1; }
-if command -v setsid >/dev/null 2>&1; then
-    setsid /bin/bash -c "$entry" >"$root/workspace/harness-entrypoint.log" 2>&1 </dev/null &
-else
-    /bin/bash -c "$entry" >"$root/workspace/harness-entrypoint.log" 2>&1 </dev/null &
-fi
-"#;
-/// Vast's own sshd, reached directly where the host maps a port and through Vast's proxy where not.
-const VAST_RUNTYPE: &str = "ssh_direc ssh_proxy";
 /// sshd, the watchdog's curl, procps (pkill, free) for the pod scripts, and patch for patch_pkg.sh, whatever
 /// the issue lists: slim images ship none of them.
 const REQUIRED_APT: [&str; 4] = ["openssh-server", "curl", "procps", "patch"];
@@ -324,7 +308,7 @@ fn refuse_clock_skew(ctx: &Ctx, issue: &str, provider: Provider) -> Result<()> {
 }
 
 /// Vast runs its own sshd, which a reinstall of openssh-server could disturb, so a Vast box goes without it.
-fn apt_packages(spec: &IssueSpec, provider: Provider) -> String {
+pub(crate) fn apt_packages(spec: &IssueSpec, provider: Provider) -> String {
     let mut apt: Vec<&str> = REQUIRED_APT
         .into_iter()
         .filter(|package| provider == Provider::Runpod || *package != "openssh-server")
@@ -372,59 +356,6 @@ pub fn create_request(spec: &IssueSpec, entry: &PodEntry, data_centers: &[String
         },
         start_ssh: true,
     }
-}
-
-/// entrypoint.sh with Vast's part spliced in before its last line, `main`, so Vast's definitions replace RunPod's
-/// while the watchdog stays one piece of code, and RunPod pods keep running the file as it is.
-pub fn vast_entrypoint() -> Result<String> {
-    let body = ENTRYPOINT
-        .strip_suffix("\nmain\n")
-        .context("entrypoint.sh no longer ends with `main`, so Vast's part has nowhere to go")?;
-    Ok(format!("{body}\n{ENTRYPOINT_VAST}\nmain\n"))
-}
-
-/// The create body for a Vast offer. `entrypoint_b64` is `vast_entrypoint` in base64, made once before any
-/// reservation so that nothing can fail between the reservation and the create.
-pub fn vast_create_request(spec: &IssueSpec, entry: &PodEntry, entrypoint_b64: &str) -> VastCreateRequest {
-    let env = BTreeMap::from([
-        (
-            "HARNESS_DEADLINE_EPOCH".to_string(),
-            entry.deadline.as_second().to_string(),
-        ),
-        ("HARNESS_APT".to_string(), apt_packages(spec, Provider::Vast)),
-        ("HF_HOME".to_string(), "/workspace/hf".to_string()),
-        ("HARNESS_ENTRYPOINT_B64".to_string(), entrypoint_b64.to_string()),
-    ]);
-    VastCreateRequest {
-        client_id: "me".into(),
-        image: spec.pod.image.clone(),
-        env,
-        disk: spec.pod.vast_disk_gb(),
-        label: entry.name.clone(),
-        onstart: VAST_ONSTART.into(),
-        runtype: VAST_RUNTYPE.into(),
-        cancel_unavail: true,
-    }
-}
-
-/// Standard base64 with padding, as `base64 -d` on the box reads it.
-pub fn base64(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let n = chunk
-            .iter()
-            .enumerate()
-            .fold(0u32, |n, (i, b)| n | u32::from(*b) << (16 - 8 * i));
-        for i in 0..4 {
-            if i <= chunk.len() {
-                out.push(char::from(ALPHABET[(n >> (18 - 6 * i) & 63) as usize]));
-            } else {
-                out.push('=');
-            }
-        }
-    }
-    out
 }
 
 /// What `nvidia-smi topo -m` prints between two GPUs that share no NVLink; NVLink pairs show NV1, NV2, ...
@@ -590,8 +521,6 @@ const READY_TIMEOUT: SignedDuration = SignedDuration::from_mins(30);
 const NO_DIRECT_SSH: SignedDuration = SignedDuration::from_mins(3);
 const NAME_LOOKUPS: usize = 3;
 const GONE_CHECKS: usize = 6;
-/// How long a Vast read may come back empty right after the create before the instance counts as gone.
-const VAST_FIRST_READ: SignedDuration = SignedDuration::from_mins(2);
 
 pub fn up(ctx: &Ctx, spec: &IssueSpec, run_setup: bool, after_failure: AfterFailure) -> Result<LivePod> {
     let issue = spec.issue.as_str();
@@ -691,17 +620,70 @@ struct Created<'c> {
     cloud: &'c dyn Cloud,
 }
 
-fn reserve_fields(name: &str, candidate: &Candidate, entry: &PodEntry) -> serde_json::Value {
-    match candidate {
-        Candidate::Runpod(offer) => json!({
-            "pod": name, "gpu": offer.gpu, "cloud": offer.cloud, "count": offer.count,
-            "rate_usd_hr": offer.rate_usd_hr, "reserved_usd": cents(entry.reserved_usd), "deadline": entry.deadline,
-        }),
-        Candidate::Vast(offer) => json!({
-            "pod": name, "gpu": offer.gpu, "provider": Provider::Vast, "machine": offer.machine_id,
-            "offer": offer.offer_id, "count": offer.count, "rate_usd_hr": offer.rate_usd_hr,
-            "reserved_usd": cents(entry.reserved_usd), "deadline": entry.deadline,
-        }),
+/// A candidate with its provider's client, found before the reservation so that a missing client cannot come
+/// between a reservation and its create.
+enum Bound<'c, 'o> {
+    Runpod {
+        cloud: &'c dyn Cloud,
+        offer: &'o Offer,
+    },
+    Vast {
+        vast: &'c dyn VastApi,
+        offer: &'o VastOffer,
+    },
+}
+
+impl<'c> Bound<'c, '_> {
+    fn cloud(&self) -> &'c dyn Cloud {
+        match *self {
+            Self::Runpod { cloud, .. } => cloud,
+            Self::Vast { vast, .. } => vast,
+        }
+    }
+
+    /// Vast's reply names only the new id, so its pod is the neutral view before Vast reports anything about it;
+    /// `first_read` replaces it.
+    fn create(&self, spec: &IssueSpec, entry: &PodEntry, vast_entrypoint: &str) -> Result<Pod, CloudError> {
+        match *self {
+            Self::Runpod { cloud, offer } => cloud.create_pod(&create_request(spec, entry, &offer.data_centers)),
+            Self::Vast { vast, offer } => {
+                let id = vast.create_instance(offer.offer_id, &vast_create_request(spec, entry, vast_entrypoint))?;
+                Ok(Pod {
+                    id,
+                    name: entry.name.clone(),
+                    status: PodStatus::Provisioning,
+                    cost: None,
+                    ssh: None,
+                    runtime: None,
+                    data_center_id: None,
+                })
+            }
+        }
+    }
+}
+
+impl Candidate {
+    fn bind<'c, 'o>(&'o self, clouds: &'c dyn Clouds) -> Result<Bound<'c, 'o>> {
+        Ok(match self {
+            Self::Runpod(offer) => Bound::Runpod {
+                cloud: clouds.runpod(),
+                offer,
+            },
+            Self::Vast(offer) => Bound::Vast {
+                vast: clouds
+                    .vast()
+                    .with_context(|| format!("{}: {NO_VAST_KEY}", Provider::Vast))?,
+                offer,
+            },
+        })
+    }
+
+    fn reserve_fields(&self, name: &str, entry: &PodEntry) -> serde_json::Value {
+        let mut fields = serde_json::Map::from_iter([("pod".to_string(), json!(name))]);
+        fields.extend(self.fields());
+        fields.insert("reserved_usd".into(), json!(cents(entry.reserved_usd)));
+        fields.insert("deadline".into(), json!(entry.deadline));
+        fields.into()
     }
 }
 
@@ -719,20 +701,14 @@ fn create_first_available<'c>(ctx: &Ctx<'c>, spec: &IssueSpec, candidates: &[Can
     for candidate in candidates {
         ctx.check_interrupted()?;
         let provider = candidate.provider();
-        let cloud = ctx
-            .cloud
-            .on(provider)
-            .with_context(|| format!("{provider}: {NO_VAST_KEY}"))?;
+        let bound = candidate.bind(ctx.cloud)?;
+        let cloud = bound.cloud();
         let name = pod_name(issue)?;
         let now = ctx.clock.now();
         let entry = store.update(|ledger| ledger.reserve_candidate(&name, candidate, spec.planned_hours, now))?;
         ctx.events
-            .emit(Some(issue), Kind::Reserve, reserve_fields(&name, candidate, &entry));
-        let created = match candidate {
-            Candidate::Runpod(offer) => cloud.create_pod(&create_request(spec, &entry, &offer.data_centers)),
-            Candidate::Vast(offer) => create_on_vast(ctx, spec, &entry, offer, &vast_entrypoint),
-        };
-        match created {
+            .emit(Some(issue), Kind::Reserve, candidate.reserve_fields(&name, &entry));
+        match bound.create(spec, &entry, &vast_entrypoint) {
             Ok(pod) => {
                 let entry = track(cloud, &store, &name, &pod.id)?;
                 ctx.events
@@ -755,54 +731,15 @@ fn create_first_available<'c>(ctx: &Ctx<'c>, spec: &IssueSpec, candidates: &[Can
             }
             Err(e) => {
                 store.update(|ledger| ledger.entry_mut(&name)?.mark_create_failed())?;
-                if !refusal_moves_on(candidate, &e) {
+                if !candidate.refusal_moves_on(&e) {
                     return Err(e).context(format!("creating {name}"));
                 }
-                let what = match candidate {
-                    Candidate::Runpod(offer) => format!("{} on {}", offer.gpu, offer.cloud.as_str()),
-                    Candidate::Vast(offer) => offer.describe(),
-                };
-                ctx.warn(issue, format!("{what} was refused: {e}"));
+                ctx.warn(issue, format!("{} was refused: {e}", candidate.describe()));
                 rejections.push(e.to_string());
             }
         }
     }
     bail!("every in-stock choice was refused: {}", rejections.join(" | "))
-}
-
-/// RunPod answers 400 both for a broken request and for no capacity on this GPU; the next choice tells the two
-/// apart. Vast refuses an offer someone else took first, in a shape its docs do not pin down, so any refusal but a
-/// rejected key or a rate limit moves on; the same offer is never tried twice.
-fn refusal_moves_on(candidate: &Candidate, error: &CloudError) -> bool {
-    match candidate {
-        Candidate::Runpod(_) => error.status() == Some(400),
-        Candidate::Vast(_) => !matches!(error.status(), Some(401 | 403 | 429)),
-    }
-}
-
-/// A new Vast instance as the neutral view, before Vast reports anything about it; `first_read` replaces it.
-fn create_on_vast(
-    ctx: &Ctx,
-    spec: &IssueSpec,
-    entry: &PodEntry,
-    offer: &VastOffer,
-    entrypoint_b64: &str,
-) -> Result<Pod, CloudError> {
-    let vast = ctx
-        .cloud
-        .vast()
-        .ok_or_else(|| CloudError::Protocol(NO_VAST_KEY.into()).vast())?;
-    let request = vast_create_request(spec, entry, entrypoint_b64);
-    let id = vast.create_instance(offer.offer_id, &request)?;
-    Ok(Pod {
-        id,
-        name: entry.name.clone(),
-        status: PodStatus::Provisioning,
-        cost: None,
-        ssh: None,
-        runtime: None,
-        data_center_id: None,
-    })
 }
 
 /// RunPod's create reply is a full pod. Vast's names only the id, so its first read comes from the API, and a read
@@ -1024,7 +961,7 @@ fn wait_ready(
 }
 
 /// The start of the line entrypoint.sh's watchdog logs as it arms, after the timestamp; its pid follows.
-fn watchdog_armed_prefix(deadline: Timestamp) -> String {
+pub(crate) fn watchdog_armed_prefix(deadline: Timestamp) -> String {
     format!("watchdog armed for epoch {} in pid ", deadline.as_second())
 }
 
@@ -1063,7 +1000,7 @@ fi"#
     )
 }
 
-const WATCHDOG_LOG: &str = "/workspace/harness-watchdog.log";
+pub(crate) const WATCHDOG_LOG: &str = "/workspace/harness-watchdog.log";
 
 /// The watchdog is what ends the pod once the laptop is gone. An image ENTRYPOINT or an API change that skips
 /// entrypoint.sh leaves a pod that only `down` or a later reaper pass can end, so such a pod is ended before use.
@@ -1081,118 +1018,6 @@ fn check_watchdog(ctx: &Ctx, issue: &str, entry: &PodEntry, target: &Target, pro
         entry.name,
         entry.deadline,
         reply.trim()
-    );
-    Ok(())
-}
-
-/// What Vast's part of the entrypoint logs once it holds what it needs to destroy this very instance.
-fn vast_ready_line(id: &str) -> String {
-    format!("vast self-destruct ready for instance {id}")
-}
-
-/// Logged once apt is done, since Vast's own sshd answers before the box has the packages the jobs use.
-const VAST_SETUP_DONE: &str = "box setup done";
-/// What Vast's part of the entrypoint logs when the box cannot destroy itself: no key, no id, or no curl.
-const VAST_MISSING: &str = "VAST SELF-DESTRUCT MISSING";
-/// The start of the line that reports a read of this instance with its own key: evidence the key works, short of the
-/// destroy itself.
-const VAST_PROBE: &str = "vast key reads instance";
-/// The loader starts the entrypoint seconds after the container; past this there is none.
-const VAST_ARM_WAIT: SignedDuration = SignedDuration::from_mins(5);
-const VAST_SETUP_WAIT: SignedDuration = SignedDuration::from_mins(15);
-
-/// On Vast the entrypoint runs from the instance's onstart, beside Vast's own init, so it cannot be the container's
-/// main process, and something that kills it leaves the box running until `down` or the reaper. It counts as armed
-/// while the pid that logged the armed line is alive and runs the entrypoint, and the entrypoint reported the key and
-/// id to destroy this instance. Prints SETUP_RUNNING while apt still runs.
-fn vast_watchdog_check_script(deadline: Timestamp, id: &str, log: &str, proc: &str) -> String {
-    let armed = watchdog_armed_prefix(deadline);
-    let ready = vast_ready_line(id);
-    format!(
-        r#"log={log}; proc={proc}
-pid=$(sed -nE 's/^[^ ]* {armed}([0-9]+)$/\1/p' "$log" 2>/dev/null | tail -n 1)
-own=""
-if [[ -n $pid && -r $proc/$pid/cmdline ]]; then
-    own=$(tr '\0' ' ' <"$proc/$pid/cmdline" 2>/dev/null)
-fi
-if grep -q ' {VAST_MISSING}' "$log" 2>/dev/null; then
-    echo SELF_DESTRUCT_MISSING
-    grep ' {VAST_MISSING}' "$log" | tail -n 1
-elif [[ $own != "/bin/bash -c #!/usr/bin/env bash"* ]] || ! grep -qx '[^ ]* {ready}' "$log" 2>/dev/null; then
-    echo WATCHDOG_MISSING
-    tail -n 5 "$log" 2>/dev/null || true
-    ps -eo pid,ppid,user,args --forest 2>/dev/null | head -n 30 | cut -c1-160 || true
-elif ! grep -q ' {VAST_SETUP_DONE}' "$log" 2>/dev/null; then
-    echo SETUP_RUNNING
-else
-    echo WATCHDOG_ARMED
-fi
-grep ' {VAST_PROBE} ' "$log" 2>/dev/null | tail -n 1 || true"#
-    )
-}
-
-/// Vast's sshd answers before the onstart has run, so the check repeats until the watchdog reports itself armed
-/// and the box set up, or a limit passes; a failed check (no container env yet) counts as not yet.
-fn wait_vast_watchdog(ctx: &Ctx, issue: &str, entry: &PodEntry, target: &Target) -> Result<()> {
-    let id = entry.id.as_deref().context("live pod without an id")?;
-    let script = vast_watchdog_check_script(entry.deadline, id, WATCHDOG_LOG, "/proc");
-    let started = ctx.clock.now();
-    loop {
-        let (state, last) = match ctx.remote.run(target, &script) {
-            Ok(reply) => (reply.lines().next().unwrap_or("").to_string(), reply),
-            Err(e) => (String::new(), format!("{e:#}")),
-        };
-        let waited = ctx.clock.now().duration_since(started);
-        match state.as_str() {
-            "WATCHDOG_ARMED" => return check_vast_probe(ctx, issue, entry, &last),
-            "SELF_DESTRUCT_MISSING" => bail!(
-                "pod {} cannot destroy itself at its deadline, so nothing on the box would end it: {:?}",
-                entry.name,
-                last.lines().nth(1).unwrap_or("").trim()
-            ),
-            "SETUP_RUNNING" => ensure!(
-                waited < VAST_SETUP_WAIT,
-                "pod {}: apt on the box ran past {} min; the watchdog log ends: {:?}",
-                entry.name,
-                VAST_SETUP_WAIT.as_mins(),
-                last.trim()
-            ),
-            _ => ensure!(
-                waited < VAST_ARM_WAIT,
-                "pod {} shows no watchdog armed for its deadline {} with the key to destroy instance {id} within {} \
-                 min, so nothing on the box would end it; the last check: {:?}",
-                entry.name,
-                entry.deadline,
-                VAST_ARM_WAIT.as_mins(),
-                last.trim()
-            ),
-        }
-        ctx.check_interrupted()?;
-        ctx.clock.sleep(POLL);
-    }
-}
-
-/// The box's read of its own instance with its own key, the one sign before the deadline that the destroy can work.
-/// A key Vast rejects (401 or 403) ends the box; any other failure only warns, since a read can fail where a destroy
-/// would not, and the reaper ends the box past its deadline either way.
-fn check_vast_probe(ctx: &Ctx, issue: &str, entry: &PodEntry, reply: &str) -> Result<()> {
-    let probe = reply.lines().find(|line| line.contains(VAST_PROBE));
-    if probe.is_some_and(|line| line.contains(": http 2")) {
-        return Ok(());
-    }
-    let seen = probe.map_or("no read logged", str::trim);
-    ensure!(
-        !seen.ends_with(": http 401") && !seen.ends_with(": http 403"),
-        "pod {}: Vast rejected the box's own key ({seen}), so it could not destroy itself at its deadline",
-        entry.name
-    );
-    ctx.warn(
-        issue,
-        format!(
-            "pod {}: the box's own Vast key did not read its instance ({seen}), so its self-destruct may be refused; \
-             `harness down {issue}` or the reaper still ends it",
-            entry.name
-        ),
     );
     Ok(())
 }
@@ -1453,7 +1278,7 @@ fn record_billing(ctx: &Ctx, cloud: &dyn Cloud, issue: &str, entry: PodEntry) ->
     }
 }
 
-/// Upgrades estimates to billing records where RunPod has them; `budget show` calls it every time.
+/// Upgrades estimates to billing records where the pod's provider has them; `budget show` calls it every time.
 pub fn reconcile_billing(ctx: &Ctx, issue: &str) -> Result<()> {
     let now = ctx.clock.now();
     let ledger = ctx.ledger(issue).load()?;
@@ -1667,164 +1492,6 @@ mod tests {
             p2p_matrix(8, None).replacen("\tX\t", "\tOK\t", 1),
         ] {
             assert!(check_p2p(&garbled, 8).is_err(), "{garbled:?} passed");
-        }
-    }
-
-    #[test]
-    fn base64_matches_the_standard_alphabet_and_padding() {
-        for (plain, encoded) in [
-            ("", ""),
-            ("f", "Zg=="),
-            ("fo", "Zm8="),
-            ("foo", "Zm9v"),
-            ("foobar", "Zm9vYmFy"),
-            ("\u{0}\u{ff}?>", "AMO/Pz4="),
-        ] {
-            assert_eq!(base64(plain.as_bytes()), encoded, "{plain:?}");
-        }
-    }
-
-    #[test]
-    fn vasts_entrypoint_is_runpods_with_vasts_part_before_main() {
-        let script = vast_entrypoint().unwrap();
-        let body = ENTRYPOINT.strip_suffix("\nmain\n").unwrap();
-        assert!(script.starts_with(body) && script.ends_with(&format!("{ENTRYPOINT_VAST}\nmain\n")));
-        assert!(script.starts_with("#!/usr/bin/env bash\n"));
-        assert!(script.contains("log \"watchdog armed for epoch $deadline in pid $$\""));
-        assert!(ENTRYPOINT_VAST.contains(&format!("log \"{}", vast_ready_line("$vast_id"))));
-        assert!(ENTRYPOINT_VAST.contains(&format!("log \"{VAST_SETUP_DONE}\"")));
-        assert_eq!(ENTRYPOINT_VAST.matches(&format!("log \"{VAST_MISSING}: ")).count(), 2);
-        assert!(ENTRYPOINT_VAST.contains(&format!("log \"{VAST_PROBE} $vast_id: http $vast_code\"")));
-    }
-
-    fn entry() -> PodEntry {
-        PodEntry {
-            name: "sm120-harness-test-vast-0a0b0c".into(),
-            id: None,
-            state: PodState::Reserved,
-            gpu: "GTX 1650".into(),
-            count: 1,
-            cloud: crate::spec::CloudTier::Community,
-            rate_usd_hr: 0.05,
-            reserved_usd: 0.0137,
-            reserved_at: "2026-11-04T17:00:00Z".parse().unwrap(),
-            deadline: "2026-11-04T17:15:00Z".parse().unwrap(),
-            terminated_at: None,
-            cost_usd: None,
-            cost_source: None,
-        }
-    }
-
-    #[test]
-    fn the_vast_create_carries_the_deadline_the_label_and_the_loader() {
-        let spec = IssueSpec::parse(
-            include_str!("../../issues/harness-test-vast/harness.toml"),
-            "harness-test-vast",
-            |_| true,
-        )
-        .unwrap();
-        let request = vast_create_request(&spec, &entry(), "ZW50cnk=");
-        assert_eq!(request.label, "sm120-harness-test-vast-0a0b0c");
-        assert_eq!(request.env["HARNESS_DEADLINE_EPOCH"], "1793812500");
-        assert_eq!(request.env["HARNESS_ENTRYPOINT_B64"], "ZW50cnk=");
-        assert_eq!(request.env["HARNESS_APT"], "curl procps patch");
-        assert!(!request.env.contains_key("HF_TOKEN"));
-        assert_eq!(request.disk, spec.pod.vast_disk_gb());
-        assert!(request.cancel_unavail);
-        assert_eq!(
-            (request.client_id.as_str(), request.runtype.as_str()),
-            ("me", "ssh_direc ssh_proxy")
-        );
-        // Each harness variable is read by the loader or the entrypoint under the same name.
-        let script = vast_entrypoint().unwrap();
-        for key in request.env.keys().filter(|key| key.starts_with("HARNESS_")) {
-            let read = format!("${key}");
-            let braced = format!("${{{key}");
-            assert!(
-                [&request.onstart, &script]
-                    .iter()
-                    .any(|text| text.contains(&read) || text.contains(&braced)),
-                "nothing on the box reads {key}"
-            );
-        }
-    }
-
-    fn vast_check(log_lines: &[&str], procs: &[(u32, &str)]) -> Vec<String> {
-        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!("sm120-vast-watchdog-{}-{n}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        for (pid, cmdline) in procs {
-            let p = dir.join("proc").join(pid.to_string());
-            std::fs::create_dir_all(&p).unwrap();
-            std::fs::write(p.join("cmdline"), cmdline.replace(' ', "\0") + "\0").unwrap();
-        }
-        std::fs::create_dir_all(&dir).unwrap();
-        let log = dir.join("watchdog.log");
-        std::fs::write(&log, log_lines.join("\n") + "\n").unwrap();
-        let deadline: Timestamp = "2026-10-16T20:03:00Z".parse().unwrap();
-        let script = vast_watchdog_check_script(
-            deadline,
-            "31000001",
-            log.to_str().unwrap(),
-            dir.join("proc").to_str().unwrap(),
-        );
-        let out = std::process::Command::new("bash")
-            .arg("-c")
-            .arg(format!("set -euo pipefail\n{script}"))
-            .output()
-            .unwrap();
-        std::fs::remove_dir_all(&dir).unwrap();
-        String::from_utf8(out.stdout)
-            .unwrap()
-            .lines()
-            .map(str::to_string)
-            .collect()
-    }
-
-    #[test]
-    fn the_vast_watchdog_counts_once_alive_holding_the_key_for_this_instance_and_set_up() {
-        const ENTRY: &str = "/bin/bash -c #!/usr/bin/env bash\n# Pod entrypoint";
-        let armed = "2026-10-16T19:48:00Z watchdog armed for epoch 1792180980 in pid 812";
-        let ready = "2026-10-16T19:48:00Z vast self-destruct ready for instance 31000001";
-        let done = "2026-10-16T19:49:10Z box setup done";
-        let probe = "2026-10-16T19:48:01Z vast key reads instance 31000001: http 200";
-        let alive = [(812, ENTRY)];
-        let reply = vast_check(&[ready, armed, probe, done], &alive);
-        assert_eq!(reply, ["WATCHDOG_ARMED", probe]);
-        assert_eq!(vast_check(&[ready, armed], &alive)[0], "SETUP_RUNNING");
-        let no_curl = "2026-10-16T19:49:10Z VAST SELF-DESTRUCT MISSING: curl is not installed";
-        assert_eq!(
-            vast_check(&[ready, armed, no_curl], &alive)[..2],
-            ["SELF_DESTRUCT_MISSING", no_curl]
-        );
-        for (lines, procs) in [
-            // the key or the id never reached the entrypoint
-            (vec![armed, done], &alive[..]),
-            // ready for some other instance
-            (
-                vec![
-                    "2026-10-16T19:48:00Z vast self-destruct ready for instance 310000012",
-                    armed,
-                    done,
-                ],
-                &alive[..],
-            ),
-            // the watchdog has died since it logged
-            (vec![ready, armed, done], &[][..]),
-            // a pid that is not the entrypoint
-            (vec![ready, armed, done], &[(812, "sshd: /usr/sbin/sshd")][..]),
-            // a deadline that is not the ledger's
-            (
-                vec![
-                    ready,
-                    "2026-10-16T19:48:00Z watchdog armed for epoch 1792180000 in pid 812",
-                    done,
-                ],
-                &alive[..],
-            ),
-        ] {
-            assert_eq!(vast_check(&lines, procs)[0], "WATCHDOG_MISSING", "{lines:?}");
         }
     }
 

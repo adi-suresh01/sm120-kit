@@ -6,7 +6,7 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use sm120_harness::pod::{VAST_ONSTART, vast_entrypoint};
+use sm120_harness::vast_box::{VAST_ONSTART, vast_entrypoint};
 use support::{TempDir, modern_bash, path_with_modern_bash};
 
 #[test]
