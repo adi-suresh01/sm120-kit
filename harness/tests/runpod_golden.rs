@@ -6,7 +6,7 @@ use std::path::Path;
 use jiff::Timestamp;
 use sm120_harness::ledger::{PodEntry, PodState};
 use sm120_harness::pod;
-use sm120_harness::spec::IssueSpec;
+use sm120_harness::spec::{IssueSpec, Provider};
 
 fn repo() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
@@ -17,6 +17,7 @@ fn entry(spec: &IssueSpec) -> PodEntry {
     let choice = &spec.pod.gpus[0];
     PodEntry {
         name: format!("sm120-{}-0a0b0c", spec.issue),
+        provider: Provider::Runpod,
         id: None,
         state: PodState::Reserved,
         gpu: choice.id.clone(),
@@ -29,6 +30,7 @@ fn entry(spec: &IssueSpec) -> PodEntry {
         terminated_at: None,
         cost_usd: None,
         cost_source: None,
+        placement: None,
     }
 }
 

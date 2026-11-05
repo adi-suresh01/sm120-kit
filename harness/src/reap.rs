@@ -80,10 +80,7 @@ pub fn decide_on(provider: Provider, ledgers: &[Ledger], pods: &[Pod], now: Time
     let mut actions = Vec::new();
     for ledger in ledgers {
         let issue = ledger.issue.as_str();
-        let ours = ledger
-            .pods
-            .iter()
-            .filter(|entry| ledger.provider_of(&entry.name) == provider);
+        let ours = ledger.pods.iter().filter(|entry| entry.provider == provider);
         for entry in ours {
             match (entry.state, entry.id.as_deref()) {
                 (PodState::Live, Some(id)) => actions.extend(live_action(provider, issue, entry, id, pods, now)),
@@ -169,9 +166,10 @@ pub fn reap(ctx: &Ctx) -> Result<()> {
 /// A ledger can hold a Vast pod while this command has no Vast key; nothing settles it until one is configured.
 fn warn_unsettled(ctx: &Ctx, provider: Provider, ledgers: &[Ledger]) {
     for ledger in ledgers {
-        let open = ledger.pods.iter().filter(|entry| {
-            matches!(entry.state, PodState::Live | PodState::Reserved) && ledger.provider_of(&entry.name) == provider
-        });
+        let open = ledger
+            .pods
+            .iter()
+            .filter(|entry| matches!(entry.state, PodState::Live | PodState::Reserved) && entry.provider == provider);
         for entry in open {
             ctx.events.emit(
                 Some(&ledger.issue),
@@ -218,7 +216,7 @@ fn apply(ctx: &Ctx, provider: Provider, action: &Action) -> Result<()> {
                     json!({"pod": name, "id": id, "action": "terminate", "deadline": entry.deadline,
                            "last_status": status}),
                 );
-                pod::terminate_overdue(ctx, issue, entry, provider)?;
+                pod::terminate_overdue(ctx, issue, entry)?;
             }
         }
         Action::MarkGone { issue, name } => {

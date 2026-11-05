@@ -23,7 +23,7 @@ use sm120_harness::exec::{self, render_variant};
 use sm120_harness::ledger::{PodEntry, PodState};
 use sm120_harness::pod::{Ctx, LivePod};
 use sm120_harness::session::{Remote, Target};
-use sm120_harness::spec::{CloudTier, IssueSpec};
+use sm120_harness::spec::{CloudTier, IssueSpec, Provider};
 use support::fake_cloud::FakeCloud;
 use support::{TempDir, modern_bash, path_with_modern_bash};
 
@@ -279,6 +279,7 @@ fn exec_runs_rendered_variants_through_serve_variant_and_reads_every_line() {
     let live = LivePod {
         entry: PodEntry {
             name: format!("sm120-{ISSUE}-0a0b0c"),
+            provider: Provider::Runpod,
             id: Some("localpod".into()),
             state: PodState::Live,
             gpu: "NVIDIA RTX PRO 6000 Blackwell Server Edition".into(),
@@ -291,6 +292,7 @@ fn exec_runs_rendered_variants_through_serve_variant_and_reads_every_line() {
             terminated_at: None,
             cost_usd: None,
             cost_source: None,
+            placement: None,
         },
         target: Target {
             host: "127.0.0.1".into(),

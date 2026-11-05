@@ -56,7 +56,7 @@ pub fn show(ctx: &Ctx, issue: &str) -> Result<()> {
         .map(|p| {
             let mut pod = json!({"pod": p.name, "state": p.state, "gpu": p.gpu, "rate_usd_hr": p.rate_usd_hr,
                    "deadline": p.deadline, "cost_usd": p.cost_usd.map(cents), "cost_source": p.cost_source});
-            if let Some(placement) = ledger.vast.pods.get(&p.name) {
+            if let Some(placement) = p.placement {
                 pod["provider"] = json!(Provider::Vast);
                 pod["machine"] = json!(placement.machine);
             }

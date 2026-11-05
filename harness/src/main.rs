@@ -15,7 +15,7 @@ use sm120_harness::events::{Events, Kind};
 use sm120_harness::ledger::LedgerStore;
 use sm120_harness::pod::{self, AfterFailure, Ctx};
 use sm120_harness::session::{SshRemote, TRANSFER_LIMIT};
-use sm120_harness::spec::{IssueSpec, is_slug};
+use sm120_harness::spec::{IssueSpec, Provider, is_slug};
 use sm120_harness::vast::{self, VastApi, VastRest};
 use sm120_harness::watch::{self, Outcome};
 use sm120_harness::{budget, exec, reap};
@@ -225,9 +225,11 @@ fn run(cli: Cli) -> Result<ExitCode> {
 /// that does not load could hold a Vast pod, so it counts as one.
 fn vast_in_use(repo: &Path, issue: Option<&str>) -> bool {
     let ledgers = LedgerStore::all(repo).map(|stores| {
-        stores
-            .iter()
-            .any(|store| store.load().map_or(true, |ledger| !ledger.vast.pods.is_empty()))
+        stores.iter().any(|store| {
+            store.load().map_or(true, |ledger| {
+                ledger.pods.iter().any(|pod| pod.provider == Provider::Vast)
+            })
+        })
     });
     let spec = issue
         .and_then(|issue| IssueSpec::load(repo, issue).ok())

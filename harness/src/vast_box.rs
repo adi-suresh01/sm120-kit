@@ -232,6 +232,7 @@ mod tests {
     fn entry() -> PodEntry {
         PodEntry {
             name: "sm120-harness-test-vast-0a0b0c".into(),
+            provider: Provider::Vast,
             id: None,
             state: PodState::Reserved,
             gpu: "GTX 1650".into(),
@@ -244,6 +245,7 @@ mod tests {
             terminated_at: None,
             cost_usd: None,
             cost_source: None,
+            placement: Some(crate::vast::sample_offer(0.05).placement()),
         }
     }
 

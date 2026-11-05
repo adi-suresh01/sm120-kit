@@ -12,7 +12,6 @@ use anyhow::{Context, Result, anyhow, bail, ensure};
 use crate::cloud::PodStatus;
 use crate::ledger::PodEntry;
 use crate::pod::{Ctx, POLL};
-use crate::spec::Provider;
 
 pub const KIT_DIR: &str = "/workspace/sm120-kit";
 const UPLOAD_EXCLUDES: [&str; 3] = [".DS_Store", "harness-ledger.json*", ".harness-ledger.lock"];
@@ -582,11 +581,7 @@ fn check_pod_up(ctx: &Ctx, issue: &str, entry: &PodEntry, job: &str) -> Result<(
     let Some(id) = entry.id.as_deref() else {
         return Ok(());
     };
-    // A ledger that does not load names no provider; RunPod is what this check read before there were two.
-    let provider = ctx
-        .ledger(issue)
-        .load()
-        .map_or(Provider::Runpod, |ledger| ledger.provider_of(&entry.name));
+    let provider = entry.provider;
     let cloud = match ctx.cloud_on(provider) {
         Ok(cloud) => cloud,
         Err(e) => {

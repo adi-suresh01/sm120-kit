@@ -148,12 +148,12 @@ fn up_on_vast_rents_the_cheapest_offer_and_runs_every_gate() {
         ("RTX PRO 6000 Max-Q", 2, 2.46)
     );
     assert_eq!(
-        ledger.vast.pods[&entry.name],
-        VastPlacement {
+        entry.placement,
+        Some(VastPlacement {
             offer: 9100001,
             machine: 70001,
             host: 150001
-        }
+        })
     );
     assert_eq!(ledger.vast.account.as_deref(), Some("vast:424242"));
     let (offer_id, request) = w.vast.0.borrow().requests[0].clone();
@@ -182,7 +182,7 @@ fn a_taken_offer_falls_through_to_the_next_machine_and_never_retries_it() {
     assert_eq!(states, [PodState::CreateFailed, PodState::Live]);
     let tried: Vec<u64> = w.vast.0.borrow().requests.iter().map(|(id, _)| *id).collect();
     assert_eq!(tried, [9100001, 9100002]);
-    assert_eq!(ledger.vast.pods[&ledger.pods[1].name].machine, 70002);
+    assert_eq!(ledger.pods[1].placement.unwrap().machine, 70002);
     assert!(w.events().contains("was refused"), "{}", w.events());
 }
 
@@ -365,7 +365,7 @@ impl World {
         ledger
             .pods
             .iter()
-            .map(|p| (p.state, ledger.vast.pods[&p.name].machine))
+            .map(|p| (p.state, p.placement.unwrap().machine))
             .collect()
     }
 }

@@ -48,9 +48,9 @@ fn every_ledger_reads_and_writes_back_unchanged() {
     assert!(stores.len() >= 15, "{} ledgers", stores.len());
     for store in stores {
         let ledger = store.load().unwrap_or_else(|e| panic!("{}: {e:#}", store.issue()));
-        assert!(ledger.vast.pods.is_empty() && ledger.vast.account.is_none());
+        assert!(ledger.vast.account.is_none());
         for entry in &ledger.pods {
-            assert_eq!(ledger.provider_of(&entry.name), Provider::Runpod);
+            assert_eq!(entry.provider, Provider::Runpod);
         }
         // Compared as JSON values: serde_json reads some long floats a bit off, as it always did, so the text of
         // a rewrite can differ in the last digit while every field and value stays.

@@ -553,15 +553,10 @@ pub fn up(ctx: &Ctx, spec: &IssueSpec, run_setup: bool, after_failure: AfterFail
     for &provider in &providers {
         refuse_clock_skew(ctx, issue, provider)?;
     }
-    let Created {
-        entry,
-        pod,
-        provider,
-        cloud,
-    } = create_first_available(ctx, spec, &candidates)?;
-    let ready = first_read(cloud, provider, pod)
-        .and_then(|pod| wait_ready(ctx, cloud, provider, issue, &entry, pod, &spec.pod.avoid_data_centers))
-        .and_then(|target| gate_and_copy(ctx, spec, &entry, &target, provider).map(|()| target));
+    let Created { entry, pod, cloud } = create_first_available(ctx, spec, &candidates)?;
+    let ready = first_read(cloud, &entry, pod)
+        .and_then(|pod| wait_ready(ctx, cloud, issue, &entry, pod, &spec.pod.avoid_data_centers))
+        .and_then(|target| gate_and_copy(ctx, spec, &entry, &target).map(|()| target));
     let target = match ready {
         Ok(target) => target,
         Err(e) => {
@@ -570,7 +565,7 @@ pub fn up(ctx: &Ctx, spec: &IssueSpec, run_setup: bool, after_failure: AfterFail
                 issue,
                 format!("up failed before the pod was usable: {e:#}; terminating {}", entry.name),
             );
-            return match terminate(ctx, issue, &entry, provider) {
+            return match terminate(ctx, issue, &entry) {
                 Ok(()) => Err(e),
                 Err(stop) => {
                     let e = e.context(format!("then terminating it failed: {stop:#}"));
@@ -616,7 +611,6 @@ impl std::error::Error for NothingInStock {}
 struct Created<'c> {
     entry: PodEntry,
     pod: Pod,
-    provider: Provider,
     cloud: &'c dyn Cloud,
 }
 
@@ -700,7 +694,6 @@ fn create_first_available<'c>(ctx: &Ctx<'c>, spec: &IssueSpec, candidates: &[Can
     let mut rejections = Vec::new();
     for candidate in candidates {
         ctx.check_interrupted()?;
-        let provider = candidate.provider();
         let bound = candidate.bind(ctx.cloud)?;
         let cloud = bound.cloud();
         let name = pod_name(issue)?;
@@ -713,21 +706,11 @@ fn create_first_available<'c>(ctx: &Ctx<'c>, spec: &IssueSpec, candidates: &[Can
                 let entry = track(cloud, &store, &name, &pod.id)?;
                 ctx.events
                     .emit(Some(issue), Kind::Create, json!({"pod": name, "id": pod.id}));
-                return Ok(Created {
-                    entry,
-                    pod,
-                    provider,
-                    cloud,
-                });
+                return Ok(Created { entry, pod, cloud });
             }
             Err(e) if e.create_outcome_unknown() => {
                 let (entry, pod) = adopt_by_name(ctx, cloud, &store, &entry, e)?;
-                return Ok(Created {
-                    entry,
-                    pod,
-                    provider,
-                    cloud,
-                });
+                return Ok(Created { entry, pod, cloud });
             }
             Err(e) => {
                 store.update(|ledger| ledger.entry_mut(&name)?.mark_create_failed())?;
@@ -744,8 +727,8 @@ fn create_first_available<'c>(ctx: &Ctx<'c>, spec: &IssueSpec, candidates: &[Can
 
 /// RunPod's create reply is a full pod. Vast's names only the id, so its first read comes from the API, and a read
 /// that fails ends `up` the way a failed wait does.
-fn first_read(cloud: &dyn Cloud, provider: Provider, pod: Pod) -> Result<Pod> {
-    match provider {
+fn first_read(cloud: &dyn Cloud, entry: &PodEntry, pod: Pod) -> Result<Pod> {
+    match entry.provider {
         Provider::Runpod => Ok(pod),
         Provider::Vast => Ok(cloud.get_pod(&pod.id)?.unwrap_or(pod)),
     }
@@ -817,14 +800,8 @@ fn adopt_by_name(
 
 /// The deadline was sized for the quoted rate, so a pod that bills above it, or whose rate cannot be read, could
 /// outspend its reservation before the watchdog fires.
-fn check_rate(
-    ctx: &Ctx,
-    issue: &str,
-    provider: Provider,
-    entry: &PodEntry,
-    pod: &Pod,
-    warned: &mut bool,
-) -> Result<()> {
+fn check_rate(ctx: &Ctx, issue: &str, entry: &PodEntry, pod: &Pod, warned: &mut bool) -> Result<()> {
+    let provider = entry.provider;
     let reserved_rate = entry.reserved_rate_usd_hr();
     if pod.cost.is_none() && !*warned {
         *warned = true;
@@ -868,19 +845,19 @@ fn check_placement(entry: &PodEntry, pod: &Pod, avoid: &[String]) -> Result<()> 
 fn wait_ready(
     ctx: &Ctx,
     cloud: &dyn Cloud,
-    provider: Provider,
     issue: &str,
     entry: &PodEntry,
     mut pod: Pod,
     avoid: &[String],
 ) -> Result<Target> {
+    let provider = entry.provider;
     let started = ctx.clock.now();
     let mut warned_no_cost = false;
     let mut warned_no_container = false;
     let mut proxy_only_since = None;
     let mut placed = false;
     loop {
-        check_rate(ctx, issue, provider, entry, &pod, &mut warned_no_cost)?;
+        check_rate(ctx, issue, entry, &pod, &mut warned_no_cost)?;
         check_placement(entry, &pod, avoid)?;
         placed |= pod.data_center_id.is_some();
         let now = ctx.clock.now();
@@ -1005,8 +982,8 @@ pub(crate) const WATCHDOG_LOG: &str = "/workspace/harness-watchdog.log";
 /// The watchdog is what ends the pod once the laptop is gone. An image ENTRYPOINT or an API change that skips
 /// entrypoint.sh leaves a pod that only `down` or a later reaper pass can end, so such a pod is ended before use.
 /// The script also sources the container env the entrypoint wrote, which fails the same way.
-fn check_watchdog(ctx: &Ctx, issue: &str, entry: &PodEntry, target: &Target, provider: Provider) -> Result<()> {
-    if provider == Provider::Vast {
+fn check_watchdog(ctx: &Ctx, issue: &str, entry: &PodEntry, target: &Target) -> Result<()> {
+    if entry.provider == Provider::Vast {
         return wait_vast_watchdog(ctx, issue, entry, target);
     }
     let script = watchdog_check_script(entry.deadline, WATCHDOG_LOG, "/proc");
@@ -1041,8 +1018,8 @@ fn gate_p2p(ctx: &Ctx, spec: &IssueSpec, entry: &PodEntry, target: &Target) -> R
     Err(e)
 }
 
-fn gate_and_copy(ctx: &Ctx, spec: &IssueSpec, entry: &PodEntry, target: &Target, provider: Provider) -> Result<()> {
-    check_watchdog(ctx, &spec.issue, entry, target, provider)?;
+fn gate_and_copy(ctx: &Ctx, spec: &IssueSpec, entry: &PodEntry, target: &Target) -> Result<()> {
+    check_watchdog(ctx, &spec.issue, entry, target)?;
     if spec.pod.require_pcie() {
         check_pcie_topology(&ctx.remote.run(target, TOPOLOGY)?, spec.pod.count)?;
     }
@@ -1091,19 +1068,15 @@ pub fn pull_paths(ctx: &Ctx, issue: &str, target: &Target, paths: &[String], lim
     Ok(())
 }
 
-fn live_entry(ctx: &Ctx, issue: &str) -> Result<Option<(PodEntry, Provider)>> {
+fn live_entry(ctx: &Ctx, issue: &str) -> Result<Option<PodEntry>> {
     let ledger = ctx.ledger(issue).load()?;
-    Ok(ledger
-        .pods
-        .iter()
-        .find(|p| p.state == PodState::Live)
-        .map(|entry| (entry.clone(), ledger.provider_of(&entry.name))))
+    Ok(ledger.pods.into_iter().find(|p| p.state == PodState::Live))
 }
 
-fn target_for(ctx: &Ctx, issue: &str, entry: &PodEntry, provider: Provider) -> Result<Target> {
+fn target_for(ctx: &Ctx, issue: &str, entry: &PodEntry) -> Result<Target> {
     let id = entry.id.as_deref().context("live pod without an id")?;
     let pod = ctx
-        .cloud_on(provider)?
+        .cloud_on(entry.provider)?
         .get_pod(id)?
         .with_context(|| format!("pod {id} is no longer listed"))?;
     let endpoint = pod
@@ -1113,14 +1086,14 @@ fn target_for(ctx: &Ctx, issue: &str, entry: &PodEntry, provider: Provider) -> R
 }
 
 pub fn live_pod(ctx: &Ctx, issue: &str) -> Result<LivePod> {
-    let (entry, provider) =
+    let entry =
         live_entry(ctx, issue)?.with_context(|| format!("issue {issue} has no live pod; run `harness up {issue}`"))?;
-    let target = target_for(ctx, issue, &entry, provider)?;
+    let target = target_for(ctx, issue, &entry)?;
     Ok(LivePod { entry, target })
 }
 
 pub fn down(ctx: &Ctx, issue: &str) -> Result<()> {
-    let Some((entry, provider)) = live_entry(ctx, issue)? else {
+    let Some(entry) = live_entry(ctx, issue)? else {
         // A reservation whose create outcome is unknown may still have made a pod, so it is not "down".
         let ledger = ctx.ledger(issue).load()?;
         if let Some(reserved) = ledger.active() {
@@ -1128,33 +1101,33 @@ pub fn down(ctx: &Ctx, issue: &str) -> Result<()> {
                 "pod {} is reserved without an id; `harness reap` adopts and ends it once {} lists it, or releases \
                  it {} min after {}",
                 reserved.name,
-                ledger.provider_of(&reserved.name),
+                reserved.provider,
                 ADOPT_WINDOW.as_mins(),
                 reserved.reserved_at
             );
         }
         return Ok(());
     };
-    let pulled =
-        target_for(ctx, issue, &entry, provider).and_then(|target| pull(ctx, issue, &target, PULL_BEFORE_DELETE));
+    let pulled = target_for(ctx, issue, &entry).and_then(|target| pull(ctx, issue, &target, PULL_BEFORE_DELETE));
     if let Err(e) = pulled {
         ctx.warn(issue, format!("pull before terminate failed: {e:#}"));
     }
-    terminate(ctx, issue, &entry, provider).map_err(|e| e.context(StillLive::of(issue, &entry)))
+    terminate(ctx, issue, &entry).map_err(|e| e.context(StillLive::of(issue, &entry)))
 }
 
 /// Deletes the pod (on Vast, destroys it: never a stop, which keeps billing the disk), waits until its provider no
 /// longer lists it, then books the estimate and any billing record.
-pub fn terminate(ctx: &Ctx, issue: &str, entry: &PodEntry, provider: Provider) -> Result<()> {
-    end_pod(ctx, issue, entry, provider, false)
+pub fn terminate(ctx: &Ctx, issue: &str, entry: &PodEntry) -> Result<()> {
+    end_pod(ctx, issue, entry, false)
 }
 
 /// The reaper's delete of a pod past its deadline: as `terminate`, with the estimate capped at the reservation.
-pub fn terminate_overdue(ctx: &Ctx, issue: &str, entry: &PodEntry, provider: Provider) -> Result<()> {
-    end_pod(ctx, issue, entry, provider, true)
+pub fn terminate_overdue(ctx: &Ctx, issue: &str, entry: &PodEntry) -> Result<()> {
+    end_pod(ctx, issue, entry, true)
 }
 
-fn end_pod(ctx: &Ctx, issue: &str, entry: &PodEntry, provider: Provider, overdue: bool) -> Result<()> {
+fn end_pod(ctx: &Ctx, issue: &str, entry: &PodEntry, overdue: bool) -> Result<()> {
+    let provider = entry.provider;
     let id = entry
         .id
         .as_deref()
@@ -1224,7 +1197,7 @@ pub fn mark_gone(ctx: &Ctx, issue: &str, name: &str) -> Result<()> {
         bail!("ledger for {issue} has no pod named {name}");
     };
     let id = entry.id.as_deref().context("live pod without an id")?;
-    let provider = ledger.provider_of(name);
+    let provider = entry.provider;
     let cloud = ctx.cloud_on(provider)?;
     if let Some(status) = still_billing(cloud.get_pod(id)?) {
         bail!(
@@ -1283,7 +1256,7 @@ pub fn reconcile_billing(ctx: &Ctx, issue: &str) -> Result<()> {
     let now = ctx.clock.now();
     let ledger = ctx.ledger(issue).load()?;
     for entry in ledger.pods.iter().filter(|entry| entry.needs_billing(now)) {
-        let provider = ledger.provider_of(&entry.name);
+        let provider = entry.provider;
         match ctx.cloud.on(provider) {
             Some(cloud) => {
                 record_billing(ctx, cloud, issue, entry.clone());

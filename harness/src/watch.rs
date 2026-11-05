@@ -169,12 +169,12 @@ fn rent(ctx: &Ctx, spec: &mut IssueSpec) -> Result<Rental> {
     let ended: Vec<_> = new.iter().filter(|p| p.state == PodState::Terminated).collect();
     if !ended.is_empty() {
         // RunPod picks the host, so avoiding it is not possible, and the next box could fail the same way.
-        if ended.iter().any(|p| ledger.provider_of(&p.name) == Provider::Runpod) {
+        if ended.iter().any(|p| p.provider == Provider::Runpod) {
             return Err(error);
         }
         let machines: Vec<u64> = ended
             .iter()
-            .filter_map(|p| ledger.vast.pods.get(&p.name))
+            .filter_map(|p| p.placement)
             .map(|placement| placement.machine)
             .collect();
         spec.pod.avoid_machines.extend(&machines);

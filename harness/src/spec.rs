@@ -20,6 +20,10 @@ pub enum Provider {
 
 impl Provider {
     pub const ALL: [Self; 2] = [Self::Runpod, Self::Vast];
+
+    pub fn is_runpod(&self) -> bool {
+        *self == Self::Runpod
+    }
 }
 
 impl fmt::Display for Provider {
