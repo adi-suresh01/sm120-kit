@@ -50,6 +50,30 @@
       "terminated_at": "2026-10-17T07:34:44Z",
       "cost_usd": 15.304064817959445,
       "cost_source": "billing"
+    },
+    {
+      "name": "sm120-sglang-33422-52d849",
+      "provider": "vast",
+      "id": "59322555",
+      "state": "terminated",
+      "gpu": "RTX PRO 6000 S",
+      "count": 4,
+      "cloud": "COMMUNITY",
+      "rate_usd_hr": 6.495377777777778,
+      "reserved_usd": 16.594886666666667,
+      "reserved_at": "2026-11-05T21:16:41Z",
+      "deadline": "2026-11-05T23:31:41Z",
+      "terminated_at": "2026-11-05T22:37:03Z",
+      "cost_usd": 9.105,
+      "cost_source": "billing",
+      "placement": {
+        "offer": 57705485,
+        "machine": 154996,
+        "host": 234190
+      }
     }
-  ]
+  ],
+  "vast": {
+    "account": "vast:843318"
+  }
 }

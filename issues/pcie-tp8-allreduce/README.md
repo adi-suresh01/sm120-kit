@@ -179,4 +179,49 @@ no box live it does nothing.
 
 ## Results
 
-Not run yet.
+### 2026-11-05, 8x RTX PRO 6000 Server Edition, Vast machine 142634 (Bulgaria)
+
+Box: dual-socket AMD EPYC 9575F, 2 NUMA nodes, driver 615.71.10, 600 W power limit (default), `topo -p2p r` OK on
+all 28 pairs. vLLM v0.33.0 image, torch NCCL 2.30.7, pynccl 2.31.2. 49 min from rent to `down`, $8.38 (estimate
+until Vast itemizes it). 61 runs ok, 4 timeouts, none of them data loss: the three vLLM NCCL arms finished every
+size and then hung in `destroy_process_group` until their 421 s limit; the forced custom all-reduce arm ran out of
+time at 2 MiB (below).
+
+Left alone at TP8, vLLM picks pynccl (custom all-reduce off: NVML reports no NVLink; no symmetric-memory entry for
+12.0; FlashInfer PCIe IPC available but opt-in). NCCL then connects every pair through SHM, although P2P works on
+every pair: its default `p2pLevel = PATH_PXB` (`src/graph/paths.cc:356`) excludes pairs that meet at a CPU root port,
+and the AMD exception there covers 2 GPUs only.
+
+vLLM at TP8, CUDA graphs, out of place, us per all-reduce, 0 wrong elements in every cell shown. Payloads are
+batch x 5120 x 2 B, the DeepSeek-V4.1-Flash hidden size from vllm#59203:
+
+| Batch (bytes) | pynccl, NCCL defaults (SHM) | pynccl, `NCCL_P2P_LEVEL=SYS` (P2P) | FlashInfer PCIe IPC (vllm#53576) | Custom all-reduce forced, 1stage |
+|---|---|---|---|---|
+| 1 (10240) | 33.2 | 18.5 | **7.5** | 50.0 |
+| 2 (20480) | 33.8 | 18.9 | **11.4** | 118.5 |
+| 4 (40960) | 36.4 | **21.2** | 21.4 | 343.5 |
+| 8 (81920) | 38.5 | **21.8** | 25.1 | 856.0 |
+| 16 (163840) | 54.3 | 27.6 | **27.5** | 1967.6 |
+| 32 (327680) | 85.7 | 39.8 | **39.1** | 4462.4 |
+| 64 (655360) | 112.8 | 72.7 | **62.5** | 8431.7 |
+| 128 (1310720) | 149.1 | **94.8** | 99.8 | 17032.7 |
+
+- H1 holds: the default is NCCL over SHM, and sizes that are multiples of 5120 B land on a slower path than the powers
+  of two beside them (10240 B 33.2 us vs 8192 B 22.7 us; 81920 B 38.5 us vs 65536 B 27.8 us).
+- `NCCL_P2P_LEVEL=SYS` alone is 1.5-2.2x faster at every decode size, with no code change. `NCCL_PROTO=LL` on top of
+  it changes nothing (within 0.2 us), and torch.distributed matches pynccl within 0.4 us.
+- The FlashInfer PCIe IPC backend is correct at TP8 (200 replays per size with rank-dependent values and per-rank
+  delays, plus a check after timing) and the fastest path at batch 1 and 2 (4.4x and 3.0x over the default). Against
+  `P2P_LEVEL=SYS` it is ahead at batch 1, 2 and 64, level at 4, 16 and 32, and behind at 8 and 128.
+- The stock custom all-reduce forced on at world size 8 is correct but slower than NCCL from the first size and grows
+  with size (1 MiB and up took over 80 s per step), which is why vLLM keeps it off on PCIe.
+- Pairwise 8 B sendrecv is 4.1-4.3 us on all 28 pairs: crossing sockets costs nothing measurable on this host.
+
+nccl-tests (one process, one thread per GPU, CUDA graphs) agree: default 31.9 us at 10240 B via SHM, `P2P_LEVEL=SYS`
+16.1 us via P2P, `NCCL_ALGO=Tree` 61.4 us, `NCCL_PROTO=LL128` 63.3 us.
+
+Not measured here: a serving run. At batch 1, vllm#59203's trace spends 29.4% of decode in 81 all-reduces of 10 KB at
+43.8 us each; these microbenchmarks suggest both env vars together (`VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC=1`, and
+`NCCL_P2P_LEVEL=SYS` for the sizes it hands to NCCL) cut most of that, but the end-to-end number needs stage 2. P2P
+across root ports is not safe on every host (a split-NUMA RunPod host hung NCCL with P2P on, issues/sglang-33422), so
+each machine needs a probe before turning it on.

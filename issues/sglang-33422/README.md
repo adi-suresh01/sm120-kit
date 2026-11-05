@@ -466,3 +466,46 @@ change is `boot_timeout_s` 2400 -> 1800, which still covers a cold read plus the
 Not verifiable without the box: the size of `/dev/shm` (the probe exercises SHM under d1's and d2's settings);
 whether P2P works past `-p2p r` (the probe again); the decode rates, so every row time above; whether H11's
 scheduler behavior holds; image pull and first-boot time on the host's CPU.
+
+### Results (2026-11-05)
+
+Box: 4x RTX PRO 6000 Server Edition, Vast (New York), all four GPUs on NUMA node 1 and connected `NODE` (separate
+PCIe root ports, one socket), `topo -p2p r` OK on every pair. DeepSeek-V4-Flash-0731 on `lmsysorg/sglang:v0.5.22-cu130`,
+NCCL 2.30.7, TP4 + EP4, flashinfer_mxfp4, DSpark off, `--disable-custom-all-reduce`. Setup 23 min (167 GB at about
+120 MB/s), all three arms OK, GSM8K 19/20 on each. $9.03 billed.
+
+Transport, from each arm's `nccl_transport.txt` (8 connections per rank pair, all pairs alike):
+
+- d1, NCCL defaults: `via SHM/direct` on every pair. NCCL's default level is PXB (`paths.cc:356`), and these pairs
+  are `NODE`, so "P2P on" is SHM.
+- d2, `NCCL_P2P_DISABLE=1`: `via SHM/direct` on every pair.
+- d3, `NCCL_P2P_LEVEL=SYS`: `via P2P/IPC` on every pair.
+
+Setup's probe (torch all-reduce over the 4 GPUs, eager): 32 MiB, the size of a 4096-token prefill chunk, 2901 us
+under d1, 2910 us under d2, 1318 us under d3.
+
+One rep per arm; N = 9 (W1) or 8 (W2) requests per row, output 512, fixed lengths (`--random-range-ratio 1`):
+
+| Arm | Shape | c | TTFT mean (ms) | Mean TPOT (ms) | Median ITL (ms) | p99 ITL (ms) | Per-request decode tok/s min / median / max |
+|---|---|---|---|---|---|---|---|
+| d1 P2P "on" (SHM) | W1 9 x 90K | 1 | 9,910 | 10.76 | 10.76 | 10.92 | 92.9 / 92.9 / 93.0 |
+| d2 P2P off (SHM) | W1 9 x 90K | 1 | 9,917 | 10.76 | 10.76 | 10.94 | 92.8 / 92.9 / 93.0 |
+| d3 P2P SYS (P2P) | W1 9 x 90K | 1 | **7,048** | 10.50 | **10.50** | 10.67 | 95.2 / 95.2 / 95.3 |
+| d1 | W1 9 x 90K | 8 | 40,516 | 75.46 | 17.72 | 18.47 | 6.6 / 13.6 / 93.0 |
+| d2 | W1 9 x 90K | 8 | 40,359 | 75.33 | 17.71 | 18.34 | 6.7 / 13.6 / 92.9 |
+| d3 | W1 9 x 90K | 8 | **28,516** | **57.50** | **17.18** | 17.78 | 9.1 / 17.7 / 95.3 |
+| d1 | W2 8 x 238K | 1 | 30,115 | 11.05 | 11.05 | 11.19 | 90.4 / 90.5 / 90.6 |
+| d2 | W2 8 x 238K | 1 | 30,083 | 11.06 | 11.06 | 11.18 | 90.4 / 90.4 / 90.5 |
+| d3 | W2 8 x 238K | 1 | **22,561** | 10.79 | **10.79** | 10.91 | 92.6 / 92.7 / 92.8 |
+| d1 | W2 8 x 238K | 8 | 133,884 | 219.91 | 18.61 | 19.05 | 2.4 / 4.6 / 53.6 |
+| d2 | W2 8 x 238K | 8 | 133,706 | 220.16 | 18.63 | 19.10 | 2.4 / 4.6 / 53.5 |
+| d3 | W2 8 x 238K | 8 | **99,898** | **167.79** | **18.13** | 18.59 | 3.1 / 6.1 / 55.0 |
+
+- d1 and d2 agree within 0.4% on every column, which is both the noise floor and the evidence that NCCL's "P2P on"
+  was the same path as "off" here (H10).
+- Real P2P (d3) cuts TTFT 25-30% on every row: prefill all-reduces are large, and the probe's 32 MiB all-reduce is
+  2.2x faster over P2P than over SHM.
+- Pure decode moves 2-3% at TP4 (median ITL 10.76 -> 10.50 ms at W1 c=1, 18.61 -> 18.13 ms at W2 c=8). At four ranks
+  the decode all-reduces are a small share of a 10.5 ms step.
+- Mean TPOT at c=8 falls 24% while median ITL falls 3%: the c=8 TPOT carries the other requests' prefill (H11), so
+  most of that 24% is the prefill speedup, not decode. Median ITL is the decode number.
