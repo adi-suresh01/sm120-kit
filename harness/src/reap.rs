@@ -431,24 +431,7 @@ mod tests {
             approved_at: at("2026-10-16T16:00:00Z"),
             note: "chat".into(),
         });
-        let offer = crate::vast::VastOffer {
-            offer_id: 9100005,
-            machine_id: 70005,
-            host_id: 80005,
-            gpu: "RTX PRO 6000 Max-Q".into(),
-            count: 8,
-            rate_usd_hr: 16.0,
-            reliability2: Some(0.99),
-            reliability: None,
-            disk_space: 500.0,
-            inet_down: 2000.0,
-            internet_down_cost_per_tb: Some(4.0),
-            rentable: Some(true),
-            rented: Some(false),
-            cuda_max_good: Some(13.2),
-            geolocation: None,
-            hosting_type: Some(1),
-        };
+        let offer = crate::vast::sample_offer(16.0);
         ledger
             .reserve_vast(VAST_NAME, &offer, 1.0, at("2026-10-16T17:00:00Z"))
             .unwrap();

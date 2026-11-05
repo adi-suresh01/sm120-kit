@@ -645,6 +645,7 @@ impl LedgerStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vast::sample_offer;
 
     fn at(s: &str) -> Timestamp {
         s.parse().unwrap()
@@ -818,32 +819,11 @@ mod tests {
         assert!(serde_json::to_value(funded(1.0)).unwrap().get("account").is_none());
     }
 
-    fn vast_offer(rate: f64) -> VastOffer {
-        VastOffer {
-            offer_id: 9100005,
-            machine_id: 70005,
-            host_id: 80005,
-            gpu: "RTX PRO 6000 Max-Q".into(),
-            count: 8,
-            rate_usd_hr: rate,
-            reliability2: Some(0.99),
-            reliability: None,
-            disk_space: 500.0,
-            inet_down: 2000.0,
-            internet_down_cost_per_tb: None,
-            rentable: Some(true),
-            rented: Some(false),
-            cuda_max_good: Some(13.2),
-            geolocation: None,
-            hosting_type: Some(0),
-        }
-    }
-
     #[test]
     fn a_vast_reservation_records_where_it_was_rented() {
         let mut ledger = funded(50.0);
         let entry = ledger
-            .reserve_vast("a", &vast_offer(16.0), 1.0, at("2026-10-16T17:00:00Z"))
+            .reserve_vast("a", &sample_offer(16.0), 1.0, at("2026-10-16T17:00:00Z"))
             .unwrap();
         assert_eq!(
             (entry.count, entry.cloud, entry.rate_usd_hr),

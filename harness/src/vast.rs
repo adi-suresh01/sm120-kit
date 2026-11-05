@@ -711,6 +711,29 @@ pub fn decode_offers(rows: Vec<Value>) -> Result<Vec<VastOffer>, CloudError> {
     }
 }
 
+/// An 8x Max-Q offer that passes every default limit, for the tests of the modules that reserve from one.
+#[cfg(test)]
+pub(crate) fn sample_offer(rate_usd_hr: f64) -> VastOffer {
+    VastOffer {
+        offer_id: 9100005,
+        machine_id: 70005,
+        host_id: 80005,
+        gpu: "RTX PRO 6000 Max-Q".into(),
+        count: 8,
+        rate_usd_hr,
+        reliability2: Some(0.99),
+        reliability: None,
+        disk_space: 500.0,
+        inet_down: 2000.0,
+        internet_down_cost_per_tb: Some(4.0),
+        rentable: Some(true),
+        rented: Some(false),
+        cuda_max_good: Some(13.2),
+        geolocation: None,
+        hosting_type: Some(0),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

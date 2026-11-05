@@ -1,6 +1,8 @@
 //! Every issue folder in this repo reads as it did before Vast, and a ledger written by the RunPod-only harness
 //! writes back the same fields and values.
 
+#[path = "support/fake_vast.rs"]
+mod fake_vast;
 mod support;
 
 use std::fs;
@@ -59,22 +61,9 @@ fn every_ledger_reads_and_writes_back_unchanged() {
 
 fn offer() -> VastOffer {
     VastOffer {
-        offer_id: 9100000,
-        machine_id: 70000,
-        host_id: 80000,
         gpu: "GTX 1650".into(),
         count: 1,
-        rate_usd_hr: 0.05,
-        reliability2: Some(0.98),
-        reliability: None,
-        disk_space: 100.0,
-        inet_down: 4000.0,
-        internet_down_cost_per_tb: Some(3.0),
-        rentable: Some(true),
-        rented: Some(false),
-        cuda_max_good: Some(13.2),
-        geolocation: Some("Oregon, US".into()),
-        hosting_type: Some(0),
+        ..fake_vast::offer(9100000, 70000, 0.05)
     }
 }
 
