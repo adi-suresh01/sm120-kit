@@ -54,7 +54,7 @@ flags = []
 
 struct World {
     repo: TempDir,
-    clock: WatchClock,
+    clock: Rc<WatchClock>,
     runpod: FakeCloud,
     vast: FakeVast,
     remote: VastBox,
@@ -64,7 +64,7 @@ struct World {
 impl World {
     fn new() -> Self {
         let repo = repo_with_issue(ISSUE, &[("harness.toml", SPEC)]);
-        let clock = WatchClock::at("2026-11-04T17:00:00Z");
+        let clock = Rc::new(WatchClock::at("2026-11-04T17:00:00Z"));
         LedgerStore::new(repo.path(), ISSUE)
             .update(|ledger| {
                 ledger.budget = Some(Budget {
@@ -77,10 +77,10 @@ impl World {
             .unwrap();
         Self {
             repo,
+            remote: VastBox::new(Rc::clone(&clock)),
             clock,
             runpod: FakeCloud::default(),
             vast: FakeVast::default(),
-            remote: VastBox::default(),
             interrupted: Rc::new(AtomicBool::new(false)),
         }
     }
@@ -99,12 +99,12 @@ impl World {
     }
 
     fn with_clouds<T>(&self, clouds: &dyn Clouds, f: impl FnOnce(&Ctx) -> T) -> T {
-        let events = Events::new(&self.repo.path().join("results"), &self.clock, false);
+        let events = Events::new(&self.repo.path().join("results"), &*self.clock, false);
         let ctx = Ctx {
             repo: self.repo.path(),
             cloud: clouds,
             remote: &self.remote,
-            clock: &self.clock,
+            clock: &*self.clock,
             events: &events,
             interrupted: &self.interrupted,
             account: Some("org-sm120"),
@@ -170,6 +170,11 @@ fn up_on_vast_rents_the_cheapest_offer_and_runs_every_gate() {
     assert!(w.runpod.0.borrow().requests.is_empty(), "nothing went to RunPod");
     let events = w.events();
     assert!(events.contains("\"provider\":\"vast\",\"machine\":70001"), "{events}");
+    let b64 = &request.env["HARNESS_ENTRYPOINT_B64"];
+    assert!(
+        events.contains(&format!("\"entrypoint_b64_bytes\":{}", b64.len())),
+        "{events}"
+    );
 }
 
 #[test]
@@ -204,10 +209,10 @@ fn a_lost_create_reply_is_adopted_by_its_label() {
 fn a_box_that_cannot_destroy_itself_is_ended_at_once() {
     for reply in [
         "SELF_DESTRUCT_MISSING\n2026-11-04T17:01:00Z VAST SELF-DESTRUCT MISSING: curl is not installed\n",
-        "WATCHDOG_ARMED\n2026-11-04T17:01:00Z vast key reads instance 31000001: http 403\n",
+        "WATCHDOG_ARMED\n2026-11-04T17:01:00Z vast key reads instance {id}: http 403\nBOX_CLOCK {now}\n",
     ] {
         let w = World::new();
-        *w.remote.watchdog.borrow_mut() = Some(reply.into());
+        w.remote.arm_check_prints(reply);
         let err = format!("{:#}", w.up().unwrap_err());
         assert!(
             err.contains("could not destroy itself") || err.contains("cannot destroy itself"),
@@ -224,12 +229,57 @@ fn a_box_that_cannot_destroy_itself_is_ended_at_once() {
 }
 
 #[test]
-fn a_probe_that_fails_short_of_a_rejected_key_only_warns() {
-    let w = World::new();
-    *w.remote.watchdog.borrow_mut() =
-        Some("WATCHDOG_ARMED\n2026-11-04T17:01:00Z vast key reads instance 31000001: http none\n".into());
-    w.up().unwrap();
-    assert!(w.events().contains("did not read its instance"), "{}", w.events());
+fn a_box_whose_key_did_not_read_back_this_instance_is_ended() {
+    let read = |code: &str| format!("2026-11-04T17:01:00Z vast key reads instance {{id}}: http {code}\n");
+    let ok = |id: &str| format!("2026-11-04T17:01:00Z vast probe ok id={id}\n");
+    for lines in [
+        // The read failed short of a refused key.
+        read("none"),
+        // A 200 that names no instance, as Vast answers a key that does not own it.
+        read("200"),
+        // A reply about another instance.
+        read("200") + &ok("310000012"),
+        // An earlier start read it back; the latest did not.
+        read("200") + &ok("{id}") + &read("none"),
+        // No read logged at all.
+        String::new(),
+    ] {
+        let w = World::new();
+        w.remote
+            .arm_check_prints(&format!("WATCHDOG_ARMED\n{lines}BOX_CLOCK {{now}}\n"));
+        let err = format!("{:#}", w.up().unwrap_err());
+        assert!(err.contains("did not read back instance 31000001"), "{lines}: {err}");
+        assert_eq!(w.vast.0.borrow().deleted, ["31000001"], "{lines}");
+        assert_eq!(w.ledger().pods[0].state, PodState::Terminated, "{lines}");
+    }
+}
+
+#[test]
+fn a_box_whose_clock_is_off_or_unread_is_ended() {
+    let unread = fake_vast::ARMED.replace("BOX_CLOCK {now}\n", "");
+    let garbled = fake_vast::ARMED.replace("BOX_CLOCK {now}", "BOX_CLOCK soon");
+    for (offset, reply, refusal) in [
+        (0, unread.as_str(), Some("printed no clock reading")),
+        (0, garbled.as_str(), Some("printed no clock reading")),
+        (-121, fake_vast::ARMED, Some("the box's clock is -121 s off")),
+        (600, fake_vast::ARMED, Some("the box's clock is 600 s off")),
+        (-120, fake_vast::ARMED, None),
+        (120, fake_vast::ARMED, None),
+    ] {
+        let w = World::new();
+        w.remote.arm_check_prints(reply);
+        w.remote.clock_offset_s.set(offset);
+        match refusal {
+            Some(refusal) => {
+                let err = format!("{:#}", w.up().unwrap_err());
+                assert!(err.contains(refusal), "{offset}: {err}");
+                assert_eq!(w.vast.0.borrow().deleted, ["31000001"], "{offset}");
+            }
+            None => {
+                w.up().unwrap();
+            }
+        }
+    }
 }
 
 #[test]

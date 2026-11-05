@@ -57,6 +57,14 @@ for tool in bash python3 env date mkdir sleep; do
     ln -s "$(command -v "$tool")" "$work/nocurl/$tool"
 done
 ln -s "$work/bin/apt-get" "$work/nocurl/apt-get"
+# A PATH with curl but no python3, as on a slim CUDA image: the probe falls back to matching the reply's text.
+mkdir -p "$work/nopy"
+for tool in bash env date mkdir sleep cat; do
+    ln -s "$(command -v "$tool")" "$work/nopy/$tool"
+done
+ln -s "$work/bin/apt-get" "$work/nopy/apt-get"
+ln -s "$work/bin/curl" "$work/nopy/curl"
+python=$(command -v python3)
 
 entrypoint_text=$(cat "$VAST_ENTRYPOINT_FILE")
 default_signals='import os, signal, sys
@@ -64,6 +72,7 @@ signal.signal(signal.SIGINT, signal.SIG_DFL)
 os.setsid()
 os.execvp(sys.argv[1], sys.argv[1:])'
 key='vast_TESTKEY"quote\slash'
+own_instance='{"instances": {"id": 31000001, "machine_id": 70001, "label": "sm120-x-0a0b0c"}}'
 
 # Starts one box. Args: name deadline [VAR=value...] (overrides for the fakes and the box env)
 start_box() {
@@ -74,8 +83,8 @@ start_box() {
         export PATH="$work/bin:$PATH" FAKE_DIR=$dir HARNESS_TEST_ROOT=$dir/root HARNESS_WATCHDOG_NAP_S=1 \
             HARNESS_DEADLINE_EPOCH=$deadline CONTAINER_ID=31000001 CONTAINER_API_KEY=$key \
             HARNESS_ENTRYPOINT_B64=bm90IG5lZWRlZCBoZXJl HARNESS_APT='curl procps patch' HF_HOME=/workspace/hf \
-            FAKE_CURL_CODE=200
-        exec env "$@" python3 -I -c "$default_signals" bash -c "$entrypoint_text" >"$dir/box.out" 2>&1
+            FAKE_CURL_CODE=200 FAKE_CURL_BODY_GET="$own_instance"
+        exec env "$@" "$python" -I -c "$default_signals" bash -c "$entrypoint_text" >"$dir/box.out" 2>&1
     ) &
     box_pid[$name]=$!
     disown "$!"
@@ -90,6 +99,15 @@ log_has() {
 alive() {
     kill -0 "${box_pid[$1]}" 2>/dev/null
 }
+# Waits up to 10 s for a line in a box's watchdog log.
+wait_log() {
+    local _
+    for _ in $(seq 100); do
+        log_has "$1" "$2" && return 0
+        sleep 0.1
+    done
+    return 1
+}
 
 now=$(date +%s)
 past=$((now - 60))
@@ -103,6 +121,10 @@ start_box nokey "$past" CONTAINER_API_KEY=
 start_box label "$past" CONTAINER_ID= VAST_CONTAINERLABEL=C.456
 start_box future "$soon"
 start_box nocurl "$((now + 600))" PATH="$work/nocurl"
+start_box notmine "$((now + 600))" FAKE_CURL_BODY_GET='{"instances": null}'
+start_box other "$((now + 600))" FAKE_CURL_BODY_GET='{"instances": {"id": 310000012}}'
+start_box nopy "$((now + 600))" PATH="$work/nopy" FAKE_CURL_BODY_GET='{"instances":{"machine_id":5,"id":31000001}}'
+start_box nopyother "$((now + 600))" PATH="$work/nopy" FAKE_CURL_BODY_GET='{"instances":{"id":310000012,"x":31000001}}'
 
 leaked=""
 for ((i = 0; i < 8; i++)); do
@@ -124,6 +146,7 @@ delete_url='-X DELETE -H Content-Type: application/json --data \{\} https://cons
 (( $(calls future "$delete_url") >= 1 )) || fail "future did not destroy itself after its deadline"
 log_has destroy 'vast self-destruct ready for instance 31000001' || fail "the ready line is missing"
 log_has destroy 'vast key reads instance 31000001: http 200' || fail "the key probe is not logged"
+log_has destroy 'vast probe ok id=31000001' || fail "a read that names this instance did not count"
 log_has destroy 'curl DELETE /api/v0/instances/31000001/: http 200' || fail "the destroy result is not logged"
 ! grep -q '^runpodctl' "$work/destroy/calls.log" || fail "a Vast box ran runpodctl"
 echo "ok: destroys itself through the Vast API at the deadline, every round, and logs it"
@@ -154,6 +177,17 @@ log_has nocurl 'VAST SELF-DESTRUCT MISSING: curl is not installed' || fail "a bo
 ! log_has nocurl 'box setup done' || fail "a box without curl reported its setup done"
 alive nocurl || fail "nocurl: the entrypoint died"
 echo "ok: a box without curl says it cannot destroy itself and never reports its setup done"
+
+for name in notmine other nopyother; do
+    wait_log "$name" 'box setup done' || fail "$name: setup never reported done"
+    log_has "$name" 'vast key reads instance 31000001: http 200' || fail "$name: the key probe is not logged"
+    ! log_has "$name" 'vast probe ok' || fail "$name: a read that names no instance, or another, counted"
+done
+wait_log nopy 'box setup done' || fail "nopy: setup never reported done"
+log_has nopy 'vast probe ok id=31000001' || fail "without python3, a read that names this instance did not count"
+! grep -q 'vast_TESTKEY\|machine_id' "$work"/*/root/workspace/harness-watchdog.log ||
+    fail "the key or a successful read's body reached the watchdog log"
+echo "ok: the probe counts only a read that names this very instance, with or without python3"
 
 [[ -z $leaked ]] || fail "the instance key showed up in a process's argv"
 if grep -l TESTKEY "$work"/*/calls.log; then

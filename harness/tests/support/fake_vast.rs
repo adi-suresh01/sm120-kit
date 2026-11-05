@@ -2,7 +2,7 @@
 //! test crates that use it, next to `mod support;`.
 #![allow(dead_code)]
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::ops::Deref;
 use std::path::Path;
@@ -378,21 +378,58 @@ pub fn p2p_without(cell: &str) -> String {
         .replace("GPU1\tOK\tX", &format!("GPU1\t{cell}\tX"))
 }
 
-/// A Vast box: FakeRemote, plus the P2P matrix each box prints in turn (the last one repeats) and what the Vast
-/// watchdog check prints when not FakeRemote's plain WATCHDOG_ARMED.
+/// What a Vast box's arm check prints once its watchdog is armed, its key read back this instance, and apt is done.
+/// `{id}` and `{now}` are filled in with the instance and the fake clock.
+pub const ARMED: &str = "WATCHDOG_ARMED\n\
+                         2026-11-04T17:01:00Z vast key reads instance {id}: http 200\n\
+                         2026-11-04T17:01:00Z vast probe ok id={id}\n\
+                         BOX_CLOCK {now}\n";
+
+/// A Vast box: FakeRemote, plus the P2P matrix each box prints in turn and what each Vast arm check prints (the last
+/// one of each repeats).
 pub struct VastBox {
     pub inner: FakeRemote,
     pub p2p: RefCell<VecDeque<String>>,
-    pub watchdog: RefCell<Option<String>>,
+    pub watchdog: RefCell<VecDeque<String>>,
+    /// How far the box's clock runs ahead of the fake clock, in seconds.
+    pub clock_offset_s: Cell<i64>,
+    clock: Rc<WatchClock>,
 }
 
-impl Default for VastBox {
-    fn default() -> Self {
+impl VastBox {
+    pub fn new(clock: Rc<WatchClock>) -> Self {
         Self {
             inner: FakeRemote::default(),
             p2p: RefCell::new(VecDeque::from([P2P_OK.to_string()])),
-            watchdog: RefCell::new(None),
+            watchdog: RefCell::new(VecDeque::from([ARMED.to_string()])),
+            clock_offset_s: Cell::new(0),
+            clock,
         }
+    }
+
+    /// Every arm check from now on prints `reply`.
+    pub fn arm_check_prints(&self, reply: &str) {
+        *self.watchdog.borrow_mut() = VecDeque::from([reply.to_string()]);
+    }
+
+    fn arm_check(&self, script: &str) -> String {
+        let id: String = script
+            .split("vast self-destruct ready for instance ")
+            .nth(1)
+            .unwrap_or("")
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect();
+        let mut replies = self.watchdog.borrow_mut();
+        let reply = if replies.len() > 1 {
+            replies.pop_front()
+        } else {
+            replies.front().cloned()
+        };
+        reply.unwrap_or_default().replace("{id}", &id).replace(
+            "{now}",
+            &(self.clock.now().as_second() + self.clock_offset_s.get()).to_string(),
+        )
     }
 }
 
@@ -404,11 +441,9 @@ impl Remote for VastBox {
         self.inner.reachable(target)
     }
     fn run(&self, target: &Target, script: &str) -> Result<String> {
-        if let Some(reply) = self.watchdog.borrow().as_ref()
-            && script.contains("watchdog armed for epoch")
-        {
+        if script.contains("vast self-destruct ready for instance ") {
             self.inner.scripts.borrow_mut().push(script.to_string());
-            return Ok(reply.clone());
+            return Ok(self.arm_check(script));
         }
         if script.contains("nvidia-smi topo -p2p r") {
             self.inner.scripts.borrow_mut().push(script.to_string());

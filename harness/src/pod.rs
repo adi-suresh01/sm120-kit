@@ -672,11 +672,16 @@ impl Candidate {
         })
     }
 
-    fn reserve_fields(&self, name: &str, entry: &PodEntry) -> serde_json::Value {
+    /// The size of the entrypoint a Vast box gets in its env goes with it, since the live box is where a limit on
+    /// that size would show.
+    fn reserve_fields(&self, name: &str, entry: &PodEntry, vast_entrypoint: &str) -> serde_json::Value {
         let mut fields = serde_json::Map::from_iter([("pod".to_string(), json!(name))]);
         fields.extend(self.fields());
         fields.insert("reserved_usd".into(), json!(cents(entry.reserved_usd)));
         fields.insert("deadline".into(), json!(entry.deadline));
+        if let Self::Vast(_) = self {
+            fields.insert("entrypoint_b64_bytes".into(), json!(vast_entrypoint.len()));
+        }
         fields.into()
     }
 }
@@ -699,8 +704,11 @@ fn create_first_available<'c>(ctx: &Ctx<'c>, spec: &IssueSpec, candidates: &[Can
         let name = pod_name(issue)?;
         let now = ctx.clock.now();
         let entry = store.update(|ledger| ledger.reserve_candidate(&name, candidate, spec.planned_hours, now))?;
-        ctx.events
-            .emit(Some(issue), Kind::Reserve, candidate.reserve_fields(&name, &entry));
+        ctx.events.emit(
+            Some(issue),
+            Kind::Reserve,
+            candidate.reserve_fields(&name, &entry, &vast_entrypoint),
+        );
         match bound.create(spec, &entry, &vast_entrypoint) {
             Ok(pod) => {
                 let entry = track(cloud, &store, &name, &pod.id)?;
@@ -1005,9 +1013,9 @@ pub(crate) const WATCHDOG_LOG: &str = "/workspace/harness-watchdog.log";
 /// The watchdog is what ends the pod once the laptop is gone. An image ENTRYPOINT or an API change that skips
 /// entrypoint.sh leaves a pod that only `down` or a later reaper pass can end, so such a pod is ended before use.
 /// The script also sources the container env the entrypoint wrote, which fails the same way.
-fn check_watchdog(ctx: &Ctx, issue: &str, entry: &PodEntry, target: &Target) -> Result<()> {
+fn check_watchdog(ctx: &Ctx, entry: &PodEntry, target: &Target) -> Result<()> {
     if entry.provider == Provider::Vast {
-        return wait_vast_watchdog(ctx, issue, entry, target);
+        return wait_vast_watchdog(ctx, entry, target);
     }
     let script = watchdog_check_script(entry.deadline, WATCHDOG_LOG, "/proc");
     let reply = ctx.remote.run(target, &script).context("checking the pod's watchdog")?;
@@ -1042,7 +1050,7 @@ fn gate_p2p(ctx: &Ctx, spec: &IssueSpec, entry: &PodEntry, target: &Target) -> R
 }
 
 fn gate_and_copy(ctx: &Ctx, spec: &IssueSpec, entry: &PodEntry, target: &Target) -> Result<()> {
-    check_watchdog(ctx, &spec.issue, entry, target)?;
+    check_watchdog(ctx, entry, target)?;
     if spec.pod.require_pcie() {
         check_pcie_topology(&ctx.remote.run(target, TOPOLOGY)?, spec.pod.count)?;
     }

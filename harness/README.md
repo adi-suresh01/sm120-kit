@@ -256,10 +256,14 @@ The same layers, mapped:
    runs `onstart` beside its own init, so the watchdog is not the container's main process as on RunPod, and a
    process that kills it leaves the box to `down` and the reaper. `up` waits (up to 5 min) until the log shows the
    watchdog armed for the ledger's deadline in a live `/bin/bash -c` process, ready to destroy this instance's id,
-   and (up to 15 min more) apt done, since Vast's own sshd answers first; otherwise it destroys the box. curl is
-   the box's only way to destroy itself, so a box where it is missing after apt, or whose own key Vast rejects (401
-   or 403) when the box reads its own instance, is destroyed at once; a read that fails any other way only warns.
-   The read is the one sign before the deadline that the destroy can work, not proof that it does.
+   and apt done (up to 15 min from the start of the check), since Vast's own sshd answers first; otherwise it
+   destroys the box. curl is the box's only way to destroy itself, so a box where it is missing after apt is
+   destroyed at once. After apt the box reads its own instance with its own key and logs `vast probe ok id=<id>`
+   only when the reply names that very instance (python3 parses it where the image has it, else the id has to follow
+   an `"id"` key), since Vast answers a key that cannot act on the instance with a 200 and no instance. `up` destroys
+   a box whose latest read lacks that line, naming a rejected key (401 or 403) when that is why. The read is the one
+   sign before the deadline that the destroy can work, not proof that it does. The same check reads the box's clock,
+   which the watchdog compares the deadline with, and a box more than 2 min off the laptop's is destroyed.
 3. **Reaper.** Lists Vast's instances (all pages, or an error) beside RunPod's, whenever a Vast key is set and some
    ledger holds a Vast pod or the command's issue has a Vast choice; other commands never call Vast, so a hung Vast
    API cannot hold up a RunPod `down`. A pod missing from the list within 10 min of its reservation is left alone,

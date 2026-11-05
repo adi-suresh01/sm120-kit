@@ -70,12 +70,33 @@ setup_ssh() {
         log "VAST SELF-DESTRUCT MISSING: curl is not installed, so this box cannot destroy itself at its deadline"
         return 1
     fi
-    # A read of this instance with its own key: the one sign before the deadline that the destroy can work.
+    # A read of this instance with its own key: the one sign before the deadline that the destroy can work. Vast
+    # answers a key that does not own the instance with a 200 and no instance, so only a reply naming this id counts.
     if [[ -n $vast_id && -n $vast_key ]]; then
-        vast_call GET "instances/$vast_id/?owner=me" ''
+        vast_call GET "instances/$vast_id/?owner=me" '' && reply_names_self
+        local named=$?
         log "vast key reads instance $vast_id: http $vast_code"
+        (( named == 0 )) && log "vast probe ok id=$vast_id"
     fi
     log "box setup done"
+}
+
+# Whether the last reply's instance is this one: parsed by python3 where the image has it, else the id has to follow
+# an "id" key, which a reply about no instance or another one does not show.
+reply_names_self() {
+    local pattern="\"id\"[[:space:]]*:[[:space:]]*\"?${vast_id}\"?([^0-9]|\$)"
+    [[ $vast_id =~ ^[0-9]+$ ]] || return 1
+    if command -v python3 >/dev/null 2>&1; then
+        printf '%s' "$vast_reply" | python3 -I -c '
+import json, sys
+found = json.load(sys.stdin).get("instances")
+if isinstance(found, list):
+    found = found[0] if len(found) == 1 else None
+sys.exit(0 if isinstance(found, dict) and str(found.get("id")) == sys.argv[1] else 1)
+' "$vast_id" 2>/dev/null
+    else
+        [[ $vast_reply =~ $pattern ]]
+    fi
 }
 
 if [[ -n $vast_id && -n $vast_key ]]; then

@@ -94,9 +94,13 @@ fn vast_ready_line(id: &str) -> String {
 const VAST_SETUP_DONE: &str = "box setup done";
 /// What Vast's part of the entrypoint logs when the box cannot destroy itself: no key, no id, or no curl.
 const VAST_MISSING: &str = "VAST SELF-DESTRUCT MISSING";
-/// The start of the line that reports a read of this instance with its own key: evidence the key works, short of the
-/// destroy itself.
+/// The start of the line that reports a read of this instance with its own key.
 const VAST_PROBE: &str = "vast key reads instance";
+/// Logged after that read only when the reply named this very instance: evidence the key may act on it, short of the
+/// destroy itself.
+const VAST_PROBE_OK: &str = "vast probe ok id=";
+/// The box's watchdog reads the deadline against the box's own clock.
+const MAX_BOX_SKEW: SignedDuration = SignedDuration::from_secs(120);
 /// The loader starts the entrypoint seconds after the container; past this there is none.
 const VAST_ARM_WAIT: SignedDuration = SignedDuration::from_mins(5);
 const VAST_SETUP_WAIT: SignedDuration = SignedDuration::from_mins(15);
@@ -104,7 +108,8 @@ const VAST_SETUP_WAIT: SignedDuration = SignedDuration::from_mins(15);
 /// On Vast the entrypoint runs from the instance's onstart, beside Vast's own init, so it cannot be the container's
 /// main process, and something that kills it leaves the box running until `down` or the reaper. It counts as armed
 /// while the pid that logged the armed line is alive and runs the entrypoint, and the entrypoint reported the key and
-/// id to destroy this instance. Prints SETUP_RUNNING while apt still runs.
+/// id to destroy this instance. Prints SETUP_RUNNING while apt still runs. Ends with the probe's lines and the box's
+/// clock.
 fn vast_watchdog_check_script(deadline: Timestamp, id: &str, log: &str, proc: &str) -> String {
     let armed = watchdog_armed_prefix(deadline);
     let ready = vast_ready_line(id);
@@ -127,13 +132,14 @@ elif ! grep -q ' {VAST_SETUP_DONE}' "$log" 2>/dev/null; then
 else
     echo WATCHDOG_ARMED
 fi
-grep ' {VAST_PROBE} ' "$log" 2>/dev/null | tail -n 1 || true"#
+grep -E ' ({VAST_PROBE} |{VAST_PROBE_OK})' "$log" 2>/dev/null | tail -n 2 || true
+echo "BOX_CLOCK $(date +%s)""#
     )
 }
 
 /// Vast's sshd answers before the onstart has run, so the check repeats until the watchdog reports itself armed
 /// and the box set up, or a limit passes; a failed check (no container env yet) counts as not yet.
-pub fn wait_vast_watchdog(ctx: &Ctx, issue: &str, entry: &PodEntry, target: &Target) -> Result<()> {
+pub fn wait_vast_watchdog(ctx: &Ctx, entry: &PodEntry, target: &Target) -> Result<()> {
     let id = entry.id.as_deref().context("live pod without an id")?;
     let script = vast_watchdog_check_script(entry.deadline, id, WATCHDOG_LOG, "/proc");
     let started = ctx.clock.now();
@@ -144,7 +150,10 @@ pub fn wait_vast_watchdog(ctx: &Ctx, issue: &str, entry: &PodEntry, target: &Tar
         };
         let waited = ctx.clock.now().duration_since(started);
         match state.as_str() {
-            "WATCHDOG_ARMED" => return check_vast_probe(ctx, issue, entry, &last),
+            "WATCHDOG_ARMED" => {
+                check_vast_probe(entry, id, &last)?;
+                return check_box_clock(ctx, entry, &last);
+            }
             "SELF_DESTRUCT_MISSING" => bail!(
                 "pod {} cannot destroy itself at its deadline, so nothing on the box would end it: {:?}",
                 entry.name,
@@ -173,26 +182,53 @@ pub fn wait_vast_watchdog(ctx: &Ctx, issue: &str, entry: &PodEntry, target: &Tar
 }
 
 /// The box's read of its own instance with its own key, the one sign before the deadline that the destroy can work.
-/// A key Vast rejects (401 or 403) ends the box; any other failure only warns, since a read can fail where a destroy
-/// would not, and the reaper ends the box past its deadline either way.
-fn check_vast_probe(ctx: &Ctx, issue: &str, entry: &PodEntry, reply: &str) -> Result<()> {
-    let probe = reply.lines().find(|line| line.contains(VAST_PROBE));
-    if probe.is_some_and(|line| line.contains(": http 2")) {
+/// Vast answers a key that cannot act on the instance with a 200 that names no instance, so only the line the box logs
+/// once the reply named this very id counts, and only when no later read logged since. Anything else ends the box.
+fn check_vast_probe(entry: &PodEntry, id: &str, reply: &str) -> Result<()> {
+    let lines: Vec<&str> = reply
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.contains(VAST_PROBE) || line.contains(VAST_PROBE_OK))
+        .collect();
+    let ok = format!(" {VAST_PROBE_OK}{id}");
+    if lines.last().is_some_and(|line| line.ends_with(&ok)) {
         return Ok(());
     }
-    let seen = probe.map_or("no read logged", str::trim);
+    let seen = lines
+        .iter()
+        .rev()
+        .find(|line| line.contains(VAST_PROBE))
+        .copied()
+        .unwrap_or("no read logged");
     ensure!(
         !seen.ends_with(": http 401") && !seen.ends_with(": http 403"),
         "pod {}: Vast rejected the box's own key ({seen}), so it could not destroy itself at its deadline",
         entry.name
     );
-    ctx.warn(
-        issue,
-        format!(
-            "pod {}: the box's own Vast key did not read its instance ({seen}), so its self-destruct may be refused; \
-             `harness down {issue}` or the reaper still ends it",
+    bail!(
+        "pod {}: the box's own Vast key did not read back instance {id} ({seen}), so nothing shows that its \
+         self-destruct would be obeyed",
+        entry.name
+    )
+}
+
+/// The watchdog compares the deadline with the box's clock, so a box clock behind the laptop's bills past it.
+fn check_box_clock(ctx: &Ctx, entry: &PodEntry, reply: &str) -> Result<()> {
+    let reading = reply
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("BOX_CLOCK "))
+        .and_then(|epoch| epoch.trim().parse::<i64>().ok());
+    let Some(epoch) = reading else {
+        bail!(
+            "pod {}: the arm check printed no clock reading, and the box's watchdog reads its deadline from that clock",
             entry.name
-        ),
+        );
+    };
+    let skew = epoch - ctx.clock.now().as_second();
+    ensure!(
+        skew.abs() <= MAX_BOX_SKEW.as_secs(),
+        "pod {}: the box's clock is {skew} s off this laptop's, and its watchdog reads the deadline from it",
+        entry.name
     );
     Ok(())
 }
@@ -324,9 +360,12 @@ mod tests {
         let ready = "2026-10-16T19:48:00Z vast self-destruct ready for instance 31000001";
         let done = "2026-10-16T19:49:10Z box setup done";
         let probe = "2026-10-16T19:48:01Z vast key reads instance 31000001: http 200";
+        let probe_ok = "2026-10-16T19:48:01Z vast probe ok id=31000001";
         let alive = [(812, ENTRY)];
-        let reply = vast_check(&[ready, armed, probe, done], &alive);
-        assert_eq!(reply, ["WATCHDOG_ARMED", probe]);
+        let reply = vast_check(&[ready, armed, probe, probe_ok, done], &alive);
+        assert_eq!(reply[..3], ["WATCHDOG_ARMED", probe, probe_ok]);
+        let clock: i64 = reply[3].strip_prefix("BOX_CLOCK ").unwrap().parse().unwrap();
+        assert!((clock - jiff::Timestamp::now().as_second()).abs() < 60, "{reply:?}");
         assert_eq!(vast_check(&[ready, armed], &alive)[0], "SETUP_RUNNING");
         let no_curl = "2026-10-16T19:49:10Z VAST SELF-DESTRUCT MISSING: curl is not installed";
         assert_eq!(
