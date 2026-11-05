@@ -10,13 +10,16 @@ use serde::{Deserialize, Serialize};
 use ureq::http::{HeaderMap, Response};
 use ureq::{Agent, Body};
 
+use anyhow::Context;
+
 use crate::clock::Clock;
 use crate::ledger::ADOPT_WINDOW;
-use crate::spec::{CloudTier, GpuChoice, PodSpec};
+use crate::spec::{Choice, CloudTier, GpuChoice, PodSpec, Provider};
+use crate::vast::{self, VastApi, VastOffer};
 
 const BACKOFF_S: [u64; 5] = [1, 2, 4, 8, 16];
 /// A request that has not finished in this long is treated as lost; for a create, the name lookup takes over.
-const HTTP_TIMEOUT_S: u64 = 60;
+pub(crate) const HTTP_TIMEOUT_S: u64 = 60;
 /// A wait the server asks for is capped: an hourly window would stall `down`, and past this the pod watchdog is
 /// the better bet.
 pub const MAX_RETRY_AFTER_S: u64 = 60;
@@ -28,7 +31,7 @@ pub const CREATE_WORST_CASE_S: u64 =
     (BACKOFF_S.len() as u64 + 1) * HTTP_TIMEOUT_S + BACKOFF_S.len() as u64 * MAX_CREATE_RETRY_AFTER_S;
 const _: () = assert!(CREATE_WORST_CASE_S < ADOPT_WINDOW.as_secs() as u64);
 /// RunPod returns up to 1000 pods a page, so 100 pages is far past any real account; more means a loop.
-const MAX_POD_PAGES: usize = 100;
+pub(crate) const MAX_POD_PAGES: usize = 100;
 
 #[derive(Debug)]
 pub enum CloudError {
@@ -43,25 +46,47 @@ pub enum CloudError {
     Decode(String),
     /// Replies that each decode but together break the protocol, such as a pagination cursor that repeats.
     Protocol(String),
+    /// Any of the above from Vast's API, so the message names the API that answered.
+    Vast(Box<CloudError>),
 }
 
 impl CloudError {
+    pub fn vast(self) -> Self {
+        match self {
+            Self::Vast(_) => self,
+            other => Self::Vast(Box::new(other)),
+        }
+    }
+
     pub fn retryable(&self) -> bool {
         match self {
             Self::Network(_) => true,
             Self::Http { status, .. } => *status == 429 || *status >= 500,
             Self::Decode(_) | Self::Protocol(_) => false,
+            Self::Vast(inner) => inner.retryable(),
         }
     }
 
     pub fn rate_limited(&self) -> bool {
-        matches!(self, Self::Http { status: 429, .. })
+        match self {
+            Self::Vast(inner) => inner.rate_limited(),
+            other => matches!(other, Self::Http { status: 429, .. }),
+        }
     }
 
     pub fn status(&self) -> Option<u16> {
         match self {
             Self::Http { status, .. } => Some(*status),
             Self::Network(_) | Self::Decode(_) | Self::Protocol(_) => None,
+            Self::Vast(inner) => inner.status(),
+        }
+    }
+
+    pub fn detail(&self) -> Option<&str> {
+        match self {
+            Self::Http { detail, .. } => Some(detail),
+            Self::Network(_) | Self::Decode(_) | Self::Protocol(_) => None,
+            Self::Vast(inner) => inner.detail(),
         }
     }
 
@@ -71,18 +96,24 @@ impl CloudError {
         match self {
             Self::Network(_) | Self::Decode(_) | Self::Protocol(_) => true,
             Self::Http { status, .. } => *status >= 500,
+            Self::Vast(inner) => inner.create_outcome_unknown(),
+        }
+    }
+
+    fn describe(&self, api: &str, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Self::Network(e) => write!(f, "{api} API unreachable: {e}"),
+            Self::Http { status, detail, .. } => write!(f, "{api} API returned {status}: {detail}"),
+            Self::Decode(e) => write!(f, "{api} API response did not decode: {e}"),
+            Self::Protocol(e) => write!(f, "{api} API broke its protocol: {e}"),
+            Self::Vast(inner) => inner.describe("Vast", f),
         }
     }
 }
 
 impl fmt::Display for CloudError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            Self::Network(e) => write!(f, "RunPod API unreachable: {e}"),
-            Self::Http { status, detail, .. } => write!(f, "RunPod API returned {status}: {detail}"),
-            Self::Decode(e) => write!(f, "RunPod API response did not decode: {e}"),
-            Self::Protocol(e) => write!(f, "RunPod API broke its protocol: {e}"),
-        }
+        self.describe("RunPod", f)
     }
 }
 
@@ -268,28 +299,179 @@ pub fn offer_for(choice: &GpuChoice, count: u32, avoid: &[String], catalog: &[Ca
     })
 }
 
-/// Every in-stock choice, in preference order. One catalog read per cloud tier that the preferences use.
+/// RunPod's catalog for each cloud tier the RunPod choices use; empty for a tier none of them uses.
+struct Catalogs {
+    secure: Vec<CatalogGpu>,
+    community: Vec<CatalogGpu>,
+}
+
+impl Catalogs {
+    fn read(api: &dyn Cloud, pod: &PodSpec) -> Result<Self, CloudError> {
+        let catalog_for = |tier: CloudTier| -> Result<Vec<CatalogGpu>, CloudError> {
+            if pod.gpus.iter().any(|choice| choice.cloud == tier) {
+                api.gpu_catalog(tier, pod.count, &pod.min_cuda)
+            } else {
+                Ok(Vec::new())
+            }
+        };
+        Ok(Self {
+            secure: catalog_for(CloudTier::Secure)?,
+            community: catalog_for(CloudTier::Community)?,
+        })
+    }
+
+    fn offer(&self, choice: &GpuChoice, pod: &PodSpec) -> Option<Offer> {
+        let catalog = match choice.cloud {
+            CloudTier::Secure => &self.secure,
+            CloudTier::Community => &self.community,
+        };
+        offer_for(choice, pod.count, &pod.avoid_data_centers, catalog)
+    }
+}
+
+/// Every in-stock RunPod choice, in preference order. One catalog read per cloud tier that the preferences use.
 pub fn find_offers(api: &dyn Cloud, pod: &PodSpec) -> Result<Vec<Offer>, CloudError> {
-    let catalog_for = |tier: CloudTier| -> Result<Vec<CatalogGpu>, CloudError> {
-        if pod.gpus.iter().any(|choice| choice.cloud == tier) {
-            api.gpu_catalog(tier, pod.count, &pod.min_cuda)
-        } else {
-            Ok(Vec::new())
-        }
-    };
-    let secure = catalog_for(CloudTier::Secure)?;
-    let community = catalog_for(CloudTier::Community)?;
+    let catalogs = Catalogs::read(api, pod)?;
     Ok(pod
         .gpus
         .iter()
-        .filter_map(|choice| {
-            let catalog = match choice.cloud {
-                CloudTier::Secure => &secure,
-                CloudTier::Community => &community,
-            };
-            offer_for(choice, pod.count, &pod.avoid_data_centers, catalog)
-        })
+        .filter_map(|choice| catalogs.offer(choice, pod))
         .collect())
+}
+
+/// A live price on any provider: what `up` reserves for and creates from.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Candidate {
+    Runpod(Offer),
+    Vast(VastOffer),
+}
+
+impl Candidate {
+    pub fn provider(&self) -> Provider {
+        match self {
+            Self::Runpod(_) => Provider::Runpod,
+            Self::Vast(_) => Provider::Vast,
+        }
+    }
+
+    pub fn gpu(&self) -> &str {
+        match self {
+            Self::Runpod(offer) => &offer.gpu,
+            Self::Vast(offer) => &offer.gpu,
+        }
+    }
+
+    pub fn count(&self) -> u32 {
+        match self {
+            Self::Runpod(offer) => offer.count,
+            Self::Vast(offer) => offer.count,
+        }
+    }
+
+    pub fn rate_usd_hr(&self) -> f64 {
+        match self {
+            Self::Runpod(offer) => offer.rate_usd_hr,
+            Self::Vast(offer) => offer.rate_usd_hr,
+        }
+    }
+
+    /// One line naming where the pod would land and its price, as a fallback list shows it.
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Runpod(offer) => {
+                let mut line = format!("{} {} ${:.2}/hr", offer.gpu, offer.cloud.as_str(), offer.rate_usd_hr);
+                if !offer.data_centers.is_empty() {
+                    line.push_str(&format!(" in {}", offer.data_centers.join(", ")));
+                }
+                line
+            }
+            Self::Vast(offer) => offer.describe(),
+        }
+    }
+}
+
+/// Said when something needs Vast and the command has no Vast client.
+pub const NO_VAST_KEY: &str = "no Vast key is usable: set VAST_API_KEY, or save one with `vastai set api-key` (it \
+                               writes ~/.config/vastai/vast_api_key); a key whose account check failed is set aside \
+                               with a warning";
+
+/// Every choice with a live price, in preference order. A RunPod choice is at most one candidate; a Vast choice is
+/// each qualifying offer, cheapest first, so an offer taken before the create falls through to the next machine.
+/// The RunPod catalog is read once per tier, as `find_offers` does, and Vast is searched once per Vast choice.
+pub fn find_candidates(clouds: &dyn Clouds, pod: &PodSpec) -> anyhow::Result<Vec<Candidate>> {
+    let catalogs = Catalogs::read(clouds.runpod(), pod)?;
+    let mut found: Vec<Candidate> = Vec::new();
+    for choice in &pod.choices {
+        match choice {
+            Choice::Runpod(gpu) => found.extend(catalogs.offer(gpu, pod).map(Candidate::Runpod)),
+            Choice::Vast(vast) => {
+                let api = clouds
+                    .vast()
+                    .with_context(|| format!("pod.gpus lists Vast's {:?}, but {NO_VAST_KEY}", vast.id))?;
+                for offer in vast::offers_for(api, vast, pod)? {
+                    let seen = found
+                        .iter()
+                        .any(|c| matches!(c, Candidate::Vast(earlier) if earlier.offer_id == offer.offer_id));
+                    if !seen {
+                        found.push(Candidate::Vast(offer));
+                    }
+                }
+            }
+        }
+    }
+    Ok(found)
+}
+
+/// The provider clients one command has. Any single `Cloud` is a set holding RunPod's client alone, which is what
+/// a command, or a test, that never touches Vast passes.
+pub trait Clouds {
+    fn runpod(&self) -> &dyn Cloud;
+    /// Present when a Vast key is configured.
+    fn vast(&self) -> Option<&dyn VastApi>;
+    /// `vast:<user id>` of the Vast key, read once per command.
+    fn vast_account(&self) -> Option<&str>;
+
+    fn on(&self, provider: Provider) -> Option<&dyn Cloud> {
+        match provider {
+            Provider::Runpod => Some(self.runpod()),
+            Provider::Vast => self.vast().map(|vast| vast as &dyn Cloud),
+        }
+    }
+}
+
+impl<T: Cloud> Clouds for T {
+    fn runpod(&self) -> &dyn Cloud {
+        self
+    }
+
+    fn vast(&self) -> Option<&dyn VastApi> {
+        None
+    }
+
+    fn vast_account(&self) -> Option<&str> {
+        None
+    }
+}
+
+/// What `main` builds: RunPod's client, and Vast's when a key is configured.
+pub struct Providers<'a> {
+    pub runpod: &'a dyn Cloud,
+    pub vast: Option<&'a dyn VastApi>,
+    pub vast_account: Option<String>,
+}
+
+impl Clouds for Providers<'_> {
+    fn runpod(&self) -> &dyn Cloud {
+        self.runpod
+    }
+
+    fn vast(&self) -> Option<&dyn VastApi> {
+        self.vast
+    }
+
+    fn vast_account(&self) -> Option<&str> {
+        self.vast_account.as_deref()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -504,7 +686,7 @@ impl<'a> RunpodRest<'a> {
     }
 }
 
-fn found_or_gone(result: Result<Pod, CloudError>) -> Result<Option<Pod>, CloudError> {
+pub(crate) fn found_or_gone(result: Result<Pod, CloudError>) -> Result<Option<Pod>, CloudError> {
     match result {
         Ok(pod) => Ok(Some(pod)),
         Err(e) if e.status() == Some(404) => Ok(None),
@@ -513,15 +695,20 @@ fn found_or_gone(result: Result<Pod, CloudError>) -> Result<Option<Pod>, CloudEr
 }
 
 /// HTTP dates (`Fri, 16 Oct 2026 17:03:00 GMT`) are the RFC 2822 form with a GMT zone.
-fn http_date(value: &str) -> Option<Timestamp> {
+pub(crate) fn http_date(value: &str) -> Option<Timestamp> {
     DateTimeParser::new().parse_timestamp(value.trim()).ok()
 }
 
-fn header<'h>(headers: &'h HeaderMap, name: &str) -> Option<&'h str> {
+pub(crate) fn header<'h>(headers: &'h HeaderMap, name: &str) -> Option<&'h str> {
     headers.get(name).and_then(|value| value.to_str().ok())
 }
 
 fn ensure_success(response: &mut Response<Body>) -> Result<(), CloudError> {
+    ensure_success_with(response, problem_detail)
+}
+
+/// `detail` turns an error body into the message, in the shape each API uses.
+pub(crate) fn ensure_success_with(response: &mut Response<Body>, detail: fn(&str) -> String) -> Result<(), CloudError> {
     let status = response.status().as_u16();
     if (200..300).contains(&status) {
         return Ok(());
@@ -535,7 +722,7 @@ fn ensure_success(response: &mut Response<Body>) -> Result<(), CloudError> {
     let body = response.body_mut().read_to_string().unwrap_or_default();
     Err(CloudError::Http {
         status,
-        detail: problem_detail(&body),
+        detail: detail(&body),
         retry_after_s,
     })
 }
@@ -544,6 +731,10 @@ fn ensure_success(response: &mut Response<Body>) -> Result<(), CloudError> {
 /// whole and is not the expected JSON is a decode failure.
 fn read_json<T: DeserializeOwned>(mut response: Response<Body>) -> Result<T, CloudError> {
     ensure_success(&mut response)?;
+    read_body_json(response)
+}
+
+pub(crate) fn read_body_json<T: DeserializeOwned>(mut response: Response<Body>) -> Result<T, CloudError> {
     let text = response
         .body_mut()
         .read_to_string()

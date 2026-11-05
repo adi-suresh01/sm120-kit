@@ -1,0 +1,11 @@
+{
+ "count": 4,
+ "next_token": null,
+ "results": [
+  {"amount": 0.0412, "description": "GPU, disk, and bandwidth", "end": 1793818800.0, "items": [{"amount": 0.0400, "description": "gpu", "end": 1793818800.0, "items": [], "metadata": {}, "source": "gpu", "start": 1793815200.0, "type": "gpu"}], "metadata": {}, "source": "instance-31000001", "start": 1793815200.0, "type": "instance"},
+  {"amount": 0.0105, "description": "GPU and disk", "end": 1793905200.0, "items": [], "metadata": {}, "source": "31000001", "start": 1793818800.0, "type": "instance"},
+  {"amount": 3.2, "description": "GPU and disk", "end": 1793818800.0, "items": [], "metadata": {}, "source": "instance-31000002", "start": 1793815200.0, "type": "instance"},
+  {"amount": 0.02, "description": "storage", "end": 1793818800.0, "items": [], "metadata": {"instance_id": 31000001}, "source": "volume-5", "start": 1793815200.0, "type": "volume"}
+ ],
+ "total": 4
+}

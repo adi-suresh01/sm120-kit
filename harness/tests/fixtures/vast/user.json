@@ -1,0 +1,1 @@
+{"balance": 0, "billing_creditonly": 0, "can_pay": true, "credit": 25.0, "crisp_hmac": "scrubbed", "email": "user@example.com", "email_verified": true, "has_billing": true, "host_only": false, "id": 424242, "key_id": 1001, "rights": {}, "sid": 2002, "ssh_key": "ssh-ed25519 AAAAscrubbed harness", "total_spend": 1.5, "username": "harness-test"}

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
@@ -6,8 +7,9 @@ use anyhow::{Context, Result, bail, ensure};
 use jiff::{SignedDuration, Timestamp};
 use serde::{Deserialize, Serialize};
 
-use crate::cloud::Offer;
-use crate::spec::CloudTier;
+use crate::cloud::{Candidate, Offer};
+use crate::spec::{CloudTier, Provider};
+use crate::vast::VastOffer;
 
 /// Headroom on the quoted GPU rate for disk charges and price drift; the deadline is sized so that
 /// rate x MARGIN x deadline never exceeds what is left of the budget.
@@ -27,6 +29,34 @@ pub struct Ledger {
     pub account: Option<String>,
     pub budget: Option<Budget>,
     pub pods: Vec<PodEntry>,
+    /// Absent from a ledger that never held a Vast pod, so RunPod ledgers read and write exactly as before.
+    #[serde(default, skip_serializing_if = "VastBook::is_empty")]
+    pub vast: VastBook,
+}
+
+/// What only Vast pods need. A pod is Vast's when `pods` names it, RunPod's otherwise.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct VastBook {
+    /// `vast:<user id>` of the key that wrote the first Vast pod. Vast answers a key that cannot see an instance as
+    /// if it were gone, so another account's key must never settle these pods.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub pods: BTreeMap<String, VastPlacement>,
+}
+
+impl VastBook {
+    fn is_empty(&self) -> bool {
+        self.account.is_none() && self.pods.is_empty()
+    }
+}
+
+/// Where a Vast pod was rented: the offer it was created from and the machine and host behind it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VastPlacement {
+    pub offer: u64,
+    pub machine: u64,
+    pub host: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -109,6 +139,27 @@ impl Ledger {
             account: None,
             budget: None,
             pods: Vec::new(),
+            vast: VastBook::default(),
+        }
+    }
+
+    pub fn provider_of(&self, name: &str) -> Provider {
+        if self.vast.pods.contains_key(name) {
+            Provider::Vast
+        } else {
+            Provider::Runpod
+        }
+    }
+
+    /// Only a recorded account that differs refuses: with no Vast key, or none readable, nothing reads Vast at all.
+    pub fn check_vast_account(&self, current: Option<&str>) -> Result<()> {
+        match (self.vast.account.as_deref(), current) {
+            (Some(recorded), Some(current)) if recorded != current => bail!(
+                "issues/{}/harness-ledger.json holds Vast pods of account {recorded}, but the Vast key belongs to \
+                 {current}; Vast shows that key none of these pods, so the harness stops before reading one as gone",
+                self.issue
+            ),
+            _ => Ok(()),
         }
     }
 
@@ -167,6 +218,18 @@ impl Ledger {
         })
     }
 
+    /// As `tracks`, among this ledger's pods on `provider` only: the two providers' ids share no namespace.
+    pub fn tracks_on(&self, provider: Provider, id: &str, name: &str) -> bool {
+        self.pods.iter().any(|entry| {
+            self.provider_of(&entry.name) == provider
+                && match entry.state {
+                    PodState::Live => entry.id.as_deref() == Some(id),
+                    PodState::Reserved => entry.name == name,
+                    PodState::Terminated | PodState::CreateFailed => false,
+                }
+        })
+    }
+
     /// The pod that is reserved or live, if any. v0 allows one per issue.
     pub fn active(&self) -> Option<&PodEntry> {
         self.pods
@@ -182,6 +245,48 @@ impl Ledger {
     }
 
     pub fn reserve(&mut self, name: &str, offer: &Offer, planned_hours: f64, now: Timestamp) -> Result<PodEntry> {
+        let terms = Terms {
+            gpu: &offer.gpu,
+            count: offer.count,
+            cloud: offer.cloud,
+            rate_usd_hr: offer.rate_usd_hr,
+        };
+        self.reserve_terms(name, &terms, planned_hours, now)
+    }
+
+    /// A Vast pod has no cloud tier; its entry records Vast's own split instead (`VastOffer::cloud`).
+    pub fn reserve_vast(
+        &mut self,
+        name: &str,
+        offer: &VastOffer,
+        planned_hours: f64,
+        now: Timestamp,
+    ) -> Result<PodEntry> {
+        let terms = Terms {
+            gpu: &offer.gpu,
+            count: offer.count,
+            cloud: offer.cloud(),
+            rate_usd_hr: offer.rate_usd_hr,
+        };
+        let entry = self.reserve_terms(name, &terms, planned_hours, now)?;
+        self.vast.pods.insert(name.to_string(), offer.placement());
+        Ok(entry)
+    }
+
+    pub fn reserve_candidate(
+        &mut self,
+        name: &str,
+        candidate: &Candidate,
+        planned_hours: f64,
+        now: Timestamp,
+    ) -> Result<PodEntry> {
+        match candidate {
+            Candidate::Runpod(offer) => self.reserve(name, offer, planned_hours, now),
+            Candidate::Vast(offer) => self.reserve_vast(name, offer, planned_hours, now),
+        }
+    }
+
+    fn reserve_terms(&mut self, name: &str, terms: &Terms, planned_hours: f64, now: Timestamp) -> Result<PodEntry> {
         if let Some(active) = self.active() {
             bail!(
                 "issue {} already has pod {} ({:?}); run `harness down {}` first",
@@ -191,15 +296,15 @@ impl Ledger {
                 self.issue
             );
         }
-        let plan = plan_reservation(now, planned_hours, self.remaining_usd()?, offer.rate_usd_hr)?;
+        let plan = plan_reservation(now, planned_hours, self.remaining_usd()?, terms.rate_usd_hr)?;
         let entry = PodEntry {
             name: name.to_string(),
             id: None,
             state: PodState::Reserved,
-            gpu: offer.gpu.clone(),
-            count: offer.count,
-            cloud: offer.cloud,
-            rate_usd_hr: offer.rate_usd_hr,
+            gpu: terms.gpu.to_string(),
+            count: terms.count,
+            cloud: terms.cloud,
+            rate_usd_hr: terms.rate_usd_hr,
             reserved_usd: plan.reserved_usd,
             reserved_at: now,
             deadline: plan.deadline,
@@ -243,8 +348,22 @@ impl Ledger {
                 <= 1,
             "more than one pod is reserved or live"
         );
+        for name in self.vast.pods.keys() {
+            ensure!(
+                self.pods.iter().any(|pod| &pod.name == name),
+                "vast.pods names {name}, which pods does not list"
+            );
+        }
         Ok(())
     }
+}
+
+/// What a reservation is made for, whichever provider offered it.
+struct Terms<'a> {
+    gpu: &'a str,
+    count: u32,
+    cloud: CloudTier,
+    rate_usd_hr: f64,
 }
 
 impl PodEntry {
@@ -347,6 +466,7 @@ pub struct LedgerStore {
     path: PathBuf,
     lock_path: PathBuf,
     account: Option<String>,
+    vast_account: Option<String>,
 }
 
 /// Run before anything reads a 404 as "gone": every ledger that loads must match the key's account. A ledger that
@@ -360,6 +480,16 @@ pub fn check_accounts(repo: &Path, current: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// As `check_accounts`, for the Vast key against every ledger's Vast pods.
+pub fn check_vast_accounts(repo: &Path, current: Option<&str>) -> Result<()> {
+    for store in LedgerStore::all(repo)? {
+        if let Ok(ledger) = store.load() {
+            ledger.check_vast_account(current)?;
+        }
+    }
+    Ok(())
+}
+
 impl LedgerStore {
     pub fn new(repo: &Path, issue: &str) -> Self {
         let dir = repo.join("issues").join(issue);
@@ -368,12 +498,19 @@ impl LedgerStore {
             path: dir.join("harness-ledger.json"),
             lock_path: dir.join(".harness-ledger.lock"),
             account: None,
+            vast_account: None,
         }
     }
 
     /// Writes refuse a ledger of another account and record this one on a ledger that has none yet.
     pub fn with_account(mut self, account: Option<&str>) -> Self {
         self.account = account.map(str::to_string);
+        self
+    }
+
+    /// As `with_account`, for the Vast key, recorded once the ledger holds a Vast pod.
+    pub fn with_vast_account(mut self, account: Option<&str>) -> Self {
+        self.vast_account = account.map(str::to_string);
         self
     }
 
@@ -435,11 +572,15 @@ impl LedgerStore {
             .with_context(|| format!("locking {}", self.lock_path.display()))?;
         let before = self.load()?;
         before.check_account(self.account.as_deref())?;
+        before.check_vast_account(self.vast_account.as_deref())?;
         let mut ledger = before.clone();
         let out = change(&mut ledger)?;
         if ledger != before {
             if ledger.account.is_none() {
                 ledger.account.clone_from(&self.account);
+            }
+            if ledger.vast.account.is_none() && !ledger.vast.pods.is_empty() {
+                ledger.vast.account.clone_from(&self.vast_account);
             }
             ledger.check()?;
             self.write(&ledger)?;
@@ -639,6 +780,87 @@ mod tests {
         let json = serde_json::to_value(&ledger).unwrap();
         assert_eq!(json["account"], "org-a");
         assert!(serde_json::to_value(funded(1.0)).unwrap().get("account").is_none());
+    }
+
+    fn vast_offer(rate: f64) -> VastOffer {
+        VastOffer {
+            offer_id: 9100005,
+            machine_id: 70005,
+            host_id: 80005,
+            gpu: "RTX PRO 6000 Max-Q".into(),
+            count: 8,
+            rate_usd_hr: rate,
+            reliability2: Some(0.99),
+            reliability: None,
+            disk_space: 500.0,
+            inet_down: 2000.0,
+            internet_down_cost_per_tb: None,
+            rentable: Some(true),
+            rented: Some(false),
+            cuda_max_good: Some(13.2),
+            geolocation: None,
+            hosting_type: Some(0),
+        }
+    }
+
+    #[test]
+    fn a_vast_reservation_records_where_it_was_rented() {
+        let mut ledger = funded(50.0);
+        let entry = ledger
+            .reserve_vast("a", &vast_offer(16.0), 1.0, at("2026-10-16T17:00:00Z"))
+            .unwrap();
+        assert_eq!(
+            (entry.count, entry.cloud, entry.rate_usd_hr),
+            (8, CloudTier::Community, 16.0)
+        );
+        assert_eq!(ledger.provider_of("a"), Provider::Vast);
+        assert_eq!(ledger.provider_of("b"), Provider::Runpod);
+        assert_eq!(
+            ledger.vast.pods["a"],
+            VastPlacement {
+                offer: 9100005,
+                machine: 70005,
+                host: 80005
+            }
+        );
+        ledger.check().unwrap();
+        let json = serde_json::to_value(&ledger).unwrap();
+        assert_eq!(json["vast"]["pods"]["a"]["machine"], 70005);
+        assert_eq!(serde_json::from_value::<Ledger>(json).unwrap(), ledger);
+        // A reservation on Vast is the issue's one active pod, like any other.
+        let err = ledger
+            .reserve("b", &offer(2.0), 1.0, at("2026-10-16T17:00:00Z"))
+            .unwrap_err();
+        assert!(err.to_string().contains("already has pod a"), "{err}");
+        ledger.vast.pods.insert("ghost".into(), ledger.vast.pods["a"]);
+        assert!(ledger.check().is_err());
+    }
+
+    #[test]
+    fn a_runpod_only_ledger_writes_no_vast_section() {
+        let mut ledger = funded(20.0);
+        ledger
+            .reserve("a", &offer(2.0), 1.0, at("2026-10-16T17:00:00Z"))
+            .unwrap();
+        let json = serde_json::to_value(&ledger).unwrap();
+        assert!(json.get("vast").is_none(), "{json}");
+        assert_eq!(ledger.provider_of("a"), Provider::Runpod);
+    }
+
+    #[test]
+    fn the_vast_account_refuses_only_a_different_one() {
+        let mut ledger = funded(50.0);
+        ledger.check_vast_account(Some("vast:1")).unwrap();
+        ledger.vast.account = Some("vast:1".into());
+        ledger.check_vast_account(Some("vast:1")).unwrap();
+        ledger.check_vast_account(None).unwrap();
+        let err = ledger.check_vast_account(Some("vast:2")).unwrap_err().to_string();
+        assert!(
+            err.contains("Vast pods of account vast:1, but the Vast key belongs to vast:2"),
+            "{err}"
+        );
+        // The RunPod organization is a separate fingerprint.
+        ledger.check_account(Some("org-a")).unwrap();
     }
 
     #[test]

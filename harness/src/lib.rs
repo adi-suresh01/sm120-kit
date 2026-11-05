@@ -8,3 +8,4 @@ pub mod pod;
 pub mod reap;
 pub mod session;
 pub mod spec;
+pub mod vast;

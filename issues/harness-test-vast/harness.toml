@@ -1,0 +1,31 @@
+# Live test of the harness on Vast: offer search, create, the self-destruct env and watchdog, SSH, the P2P read,
+# destroy, and billing. No server runs here, so [server] only satisfies the schema. Cheapest GPUs first; the model
+# does not matter for these checks.
+issue = "harness-test-vast"
+planned_hours = 0.25
+
+[pod]
+image = "nvidia/cuda:12.8.1-base-ubuntu24.04@sha256:133c78a0575303be34164d0b90137a042172bdf60696af01a3c424ab402d86e2"
+count = 1
+min_cuda = "12.8"
+container_disk_gb = 20
+volume_gb = 10
+needs_hf_token = false
+# A 1x matrix reads only X, so this runs `nvidia-smi topo -p2p r` and its parse on real output at no risk to the
+# check itself; turn it off if the driver prints no matrix for one GPU.
+require_p2p = true
+# Each cap is for the whole box, disk included: at $0.25/hr the 15 min deadline reserves under $0.07.
+gpus = [
+  { provider = "vast", id = "GTX 1650", max_usd_hr = 0.25 },
+  { provider = "vast", id = "GTX 1070", max_usd_hr = 0.25 },
+  { provider = "vast", id = "GTX 1080", max_usd_hr = 0.25 },
+  { provider = "vast", id = "RTX 3060", max_usd_hr = 0.25 },
+]
+
+[server]
+package = "vllm"
+model = "none"
+launch = ["true"]
+port = 8000
+fail_pattern = "never-matches"
+boot_timeout_s = 60
