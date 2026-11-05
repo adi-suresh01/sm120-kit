@@ -1123,23 +1123,21 @@ fn check_watchdog(ctx: &Ctx, entry: &PodEntry, target: &Target) -> Result<()> {
     Ok(())
 }
 
-/// The matrix of a box that failed the P2P check, kept as the results of that box, since nothing else of it is.
+/// Every box's P2P matrix is kept, in a file of its own beside env.txt (env_report.sh's): a passing one is what a
+/// benchmark on the box rests on, and a failing one is all that is left of the box.
 fn gate_p2p(ctx: &Ctx, spec: &IssueSpec, entry: &PodEntry, target: &Target) -> Result<()> {
     let matrix = ctx.remote.run(target, P2P)?;
-    let Err(e) = check_p2p(&matrix, spec.pod.count) else {
-        return Ok(());
-    };
     let dir = ctx.repo.join("results").join(&spec.issue);
     let saved = fs::create_dir_all(&dir).and_then(|()| {
         fs::write(
-            dir.join("env.txt"),
+            dir.join(format!("p2p-{}.txt", entry.name)),
             format!("## P2P on pod {} ({P2P})\n{matrix}", entry.name),
         )
     });
     if let Err(write) = saved {
         ctx.warn(&spec.issue, format!("saving the P2P matrix failed: {write}"));
     }
-    Err(e)
+    check_p2p(&matrix, spec.pod.count)
 }
 
 fn gate_and_copy(ctx: &Ctx, spec: &IssueSpec, entry: &PodEntry, target: &Target) -> Result<()> {

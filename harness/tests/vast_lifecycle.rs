@@ -170,6 +170,14 @@ fn up_on_vast_rents_the_cheapest_offer_and_runs_every_gate() {
     assert_eq!(request.disk, 120);
     assert_eq!(live.target.port, 41022);
     assert_eq!(w.scripts_with("nvidia-smi topo -p2p r"), 1);
+    // A passing matrix is kept as well: it is what a benchmark on this box rests on.
+    let p2p = w
+        .repo
+        .path()
+        .join("results")
+        .join(ISSUE)
+        .join(format!("p2p-{}.txt", entry.name));
+    assert!(fs::read_to_string(p2p).unwrap().contains("GPU1\tOK\tX"));
     assert_eq!(w.scripts_with("nvidia-smi topo -m"), 1);
     assert!(w.runpod.0.borrow().requests.is_empty(), "nothing went to RunPod");
     let events = w.events();
@@ -325,8 +333,10 @@ fn a_box_without_p2p_on_every_pair_is_destroyed_with_its_matrix_kept() {
         (entry.state, entry.cost_source),
         (PodState::Terminated, Some(CostSource::Estimate))
     );
-    let saved = fs::read_to_string(w.repo.path().join("results").join(ISSUE).join("env.txt")).unwrap();
+    let results = w.repo.path().join("results").join(ISSUE);
+    let saved = fs::read_to_string(results.join(format!("p2p-{}.txt", entry.name))).unwrap();
     assert!(saved.contains("GPU0\tX\tCNS") && saved.contains(&entry.name), "{saved}");
+    assert!(!results.join("env.txt").exists());
 }
 
 #[test]

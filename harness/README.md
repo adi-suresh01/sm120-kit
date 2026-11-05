@@ -107,7 +107,8 @@ avoid_machines = [156482]       # Vast machine ids; needs a Vast choice
   falls through to the next machine, and the same offer is never tried twice.
 
 `require_p2p = true` runs `nvidia-smi topo -p2p r` after the topology gate and refuses a box where any GPU pair reads
-anything but `OK` (`NS`, `CNS`, ...), keeping the matrix in `results/<issue>/env.txt`. `avoid_machines` keeps the
+anything but `OK` (`NS`, `CNS`, ...). Every box's matrix, passing or not, is kept in
+`results/<issue>/p2p-<pod>.txt`. `avoid_machines` keeps the
 issue off those Vast machines; `avoid_data_centers` stays RunPod's and is refused beside a Vast choice.
 
 `avoid_data_centers = ["EUR-IS-2"]` under `[pod]` keeps the issue's pods out of the named RunPod data centers, for
