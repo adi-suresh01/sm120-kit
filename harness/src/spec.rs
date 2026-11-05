@@ -576,10 +576,6 @@ impl PodSpec {
              downloads no gated weights"
         );
         ensure!(
-            self.avoid_data_centers.is_empty() || !has_vast,
-            "pod.avoid_data_centers names RunPod data centers, and Vast choices have none; use pod.avoid_machines"
-        );
-        ensure!(
             self.avoid_machines.is_empty() || has_vast,
             "pod.avoid_machines names Vast machines, so it needs at least one provider = \"vast\" choice"
         );
@@ -621,6 +617,7 @@ impl PodSpec {
         }
         self.validate_vast()?;
         // The catalog lists data centers for secure stock only, so a community choice would ignore the list unseen.
+        // Vast choices are not RunPod's and never read it.
         ensure!(
             self.avoid_data_centers.is_empty() || self.gpus.iter().all(|choice| choice.cloud == CloudTier::Secure),
             "pod.avoid_data_centers needs every pod.gpus choice to be SECURE: community hosts sit outside RunPod's \
@@ -1144,9 +1141,11 @@ smoke_concurrency = 13
     }
 
     #[test]
-    fn the_avoid_lists_each_need_their_own_provider() {
-        let err = error_of(&avoiding("[\"EUR-IS-2\"]").replace(COMMUNITY_CHOICE, VAST_8X));
-        assert!(err.contains("Vast choices have none; use pod.avoid_machines"), "{err}");
+    fn each_avoid_list_is_read_by_its_own_provider() {
+        // RunPod's data centers mean nothing to a Vast choice, which simply does not read them.
+        let both = parse(&avoiding("[\"EUR-IS-2\"]").replace(COMMUNITY_CHOICE, VAST_8X)).unwrap();
+        assert_eq!(both.pod.avoid_data_centers, ["EUR-IS-2"]);
+        assert_eq!(both.pod.vast_choices().count(), 1);
         let err = error_of(&example().replace("volume_gb = 80", "volume_gb = 80\navoid_machines = [1]"));
         assert!(err.contains("needs at least one provider = \"vast\" choice"), "{err}");
         let twice = with_choices(VAST_8X).replace("volume_gb = 80", "volume_gb = 80\navoid_machines = [7, 7]");

@@ -107,17 +107,17 @@ avoid_machines = [156482]       # Vast machine ids; needs a Vast choice
   falls through to the next machine, and the same offer is never tried twice.
 
 `require_p2p = true` runs `nvidia-smi topo -p2p r` after the topology gate and refuses a box where any GPU pair reads
-anything but `OK` (`NS`, `CNS`, ...). Every box's matrix, passing or not, is kept in
-`results/<issue>/p2p-<pod>.txt`. `avoid_machines` keeps the
-issue off those Vast machines; `avoid_data_centers` stays RunPod's and is refused beside a Vast choice.
+anything but `OK` (`NS`, `CNS`, ...). Every box's matrix, passing or not, is kept in `results/<issue>/p2p-<pod>.txt`.
+`avoid_machines` keeps the issue off those Vast machines; `avoid_data_centers` is RunPod's, and Vast choices do not
+read it.
 
 `avoid_data_centers = ["EUR-IS-2"]` under `[pod]` keeps the issue's pods out of the named RunPod data centers, for
 hosts where `setup.sh` cannot finish (see `docs/runpod.md` on host network speed). Ids must have RunPod's shape
-(uppercase letters, digits, and dashes, ending in a digit), since they match exactly. Every `gpus` choice must then
-be SECURE, since the catalog lists data centers for secure stock only. A choice counts as in stock only where a data
-center outside the list has it, and the create names those data centers in `dataCenterIds`. The v2 API schema calls
-that list preferred data centers, so `up` also terminates, before setup, a pod that RunPod reports in an avoided
-data center. `quote` shows the data centers each choice may use, and warns about an avoided id the catalog lists for
+(uppercase letters, digits, and dashes, ending in a digit), since they match exactly. Every RunPod choice in `gpus`
+must then be SECURE, since the catalog lists data centers for secure stock only. A choice counts as in stock only
+where a data center outside the list has it, and the create names those data centers in `dataCenterIds`. The v2 API
+schema calls that list preferred data centers, so `up` also terminates, before setup, a pod that RunPod reports in an
+avoided data center. `quote` shows the data centers each choice may use, and warns about an avoided id the catalog lists for
 no data center of the first choice's GPU. Empty, the default, sends no list and leaves placement to RunPod.
 
 A variant can also measure quality and speed on the live server: GSM8K on the first `gsm8k` test questions, then one
