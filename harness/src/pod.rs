@@ -1092,6 +1092,8 @@ fn vast_ready_line(id: &str) -> String {
 
 /// Logged once apt is done, since Vast's own sshd answers before the box has the packages the jobs use.
 const VAST_SETUP_DONE: &str = "box setup done";
+/// What Vast's part of the entrypoint logs when the box cannot destroy itself: no key, no id, or no curl.
+const VAST_MISSING: &str = "VAST SELF-DESTRUCT MISSING";
 /// The start of the line that reports a read of this instance with its own key: evidence the key works, short of the
 /// destroy itself.
 const VAST_PROBE: &str = "vast key reads instance";
@@ -1113,7 +1115,10 @@ own=""
 if [[ -n $pid && -r $proc/$pid/cmdline ]]; then
     own=$(tr '\0' ' ' <"$proc/$pid/cmdline" 2>/dev/null)
 fi
-if [[ $own != "/bin/bash -c #!/usr/bin/env bash"* ]] || ! grep -qx '[^ ]* {ready}' "$log" 2>/dev/null; then
+if grep -q ' {VAST_MISSING}' "$log" 2>/dev/null; then
+    echo SELF_DESTRUCT_MISSING
+    grep ' {VAST_MISSING}' "$log" | tail -n 1
+elif [[ $own != "/bin/bash -c #!/usr/bin/env bash"* ]] || ! grep -qx '[^ ]* {ready}' "$log" 2>/dev/null; then
     echo WATCHDOG_MISSING
     tail -n 5 "$log" 2>/dev/null || true
     ps -eo pid,ppid,user,args --forest 2>/dev/null | head -n 30 | cut -c1-160 || true
@@ -1139,10 +1144,12 @@ fn wait_vast_watchdog(ctx: &Ctx, issue: &str, entry: &PodEntry, target: &Target)
         };
         let waited = ctx.clock.now().duration_since(started);
         match state.as_str() {
-            "WATCHDOG_ARMED" => {
-                report_vast_probe(ctx, issue, entry, &last);
-                return Ok(());
-            }
+            "WATCHDOG_ARMED" => return check_vast_probe(ctx, issue, entry, &last),
+            "SELF_DESTRUCT_MISSING" => bail!(
+                "pod {} cannot destroy itself at its deadline, so nothing on the box would end it: {:?}",
+                entry.name,
+                last.lines().nth(1).unwrap_or("").trim()
+            ),
             "SETUP_RUNNING" => ensure!(
                 waited < VAST_SETUP_WAIT,
                 "pod {}: apt on the box ran past {} min; the watchdog log ends: {:?}",
@@ -1165,14 +1172,20 @@ fn wait_vast_watchdog(ctx: &Ctx, issue: &str, entry: &PodEntry, target: &Target)
     }
 }
 
-/// Not a gate: a read can fail for reasons a destroy would not, and the reaper ends the box past its deadline either
-/// way. It is the one sign before the deadline that the instance key works, so its absence is said out loud.
-fn report_vast_probe(ctx: &Ctx, issue: &str, entry: &PodEntry, reply: &str) {
+/// The box's read of its own instance with its own key, the one sign before the deadline that the destroy can work.
+/// A key Vast rejects (401 or 403) ends the box; any other failure only warns, since a read can fail where a destroy
+/// would not, and the reaper ends the box past its deadline either way.
+fn check_vast_probe(ctx: &Ctx, issue: &str, entry: &PodEntry, reply: &str) -> Result<()> {
     let probe = reply.lines().find(|line| line.contains(VAST_PROBE));
     if probe.is_some_and(|line| line.contains(": http 2")) {
-        return;
+        return Ok(());
     }
-    let seen = probe.map_or("no read logged yet".to_string(), |line| line.trim().to_string());
+    let seen = probe.map_or("no read logged", str::trim);
+    ensure!(
+        !seen.ends_with(": http 401") && !seen.ends_with(": http 403"),
+        "pod {}: Vast rejected the box's own key ({seen}), so it could not destroy itself at its deadline",
+        entry.name
+    );
     ctx.warn(
         issue,
         format!(
@@ -1181,6 +1194,7 @@ fn report_vast_probe(ctx: &Ctx, issue: &str, entry: &PodEntry, reply: &str) {
             entry.name
         ),
     );
+    Ok(())
 }
 
 /// The matrix of a box that failed the P2P check, kept as the results of that box, since nothing else of it is.
@@ -1679,6 +1693,7 @@ mod tests {
         assert!(script.contains("log \"watchdog armed for epoch $deadline in pid $$\""));
         assert!(ENTRYPOINT_VAST.contains(&format!("log \"{}", vast_ready_line("$vast_id"))));
         assert!(ENTRYPOINT_VAST.contains(&format!("log \"{VAST_SETUP_DONE}\"")));
+        assert_eq!(ENTRYPOINT_VAST.matches(&format!("log \"{VAST_MISSING}: ")).count(), 2);
         assert!(ENTRYPOINT_VAST.contains(&format!("log \"{VAST_PROBE} $vast_id: http $vast_code\"")));
     }
 
@@ -1778,6 +1793,11 @@ mod tests {
         let reply = vast_check(&[ready, armed, probe, done], &alive);
         assert_eq!(reply, ["WATCHDOG_ARMED", probe]);
         assert_eq!(vast_check(&[ready, armed], &alive)[0], "SETUP_RUNNING");
+        let no_curl = "2026-10-16T19:49:10Z VAST SELF-DESTRUCT MISSING: curl is not installed";
+        assert_eq!(
+            vast_check(&[ready, armed, no_curl], &alive)[..2],
+            ["SELF_DESTRUCT_MISSING", no_curl]
+        );
         for (lines, procs) in [
             // the key or the id never reached the entrypoint
             (vec![armed, done], &alive[..]),

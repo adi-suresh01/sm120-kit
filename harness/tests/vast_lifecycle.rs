@@ -259,6 +259,8 @@ impl VastApi for FakeVast {
 struct Box2 {
     inner: FakeRemote,
     p2p: RefCell<VecDeque<String>>,
+    /// What the Vast watchdog check prints, when not FakeRemote's plain WATCHDOG_ARMED.
+    watchdog: RefCell<Option<String>>,
 }
 
 fn p2p_without(cell: &str) -> String {
@@ -278,6 +280,11 @@ impl Remote for Box2 {
         self.inner.reachable(target)
     }
     fn run(&self, target: &Target, script: &str) -> Result<String> {
+        if let Some(reply) = self.watchdog.borrow().as_ref()
+            && script.contains("watchdog armed for epoch")
+        {
+            return Ok(reply.clone());
+        }
         if script.contains("nvidia-smi topo -p2p r") {
             self.inner.scripts.borrow_mut().push(script.to_string());
             let mut matrices = self.p2p.borrow_mut();
@@ -335,6 +342,7 @@ impl World {
             remote: Box2 {
                 inner: FakeRemote::default(),
                 p2p: RefCell::new(VecDeque::from([P2P_OK.to_string()])),
+                watchdog: RefCell::new(None),
             },
             interrupted: AtomicBool::new(false),
         }
@@ -453,6 +461,38 @@ fn a_lost_create_reply_is_adopted_by_its_label() {
         (PodState::Live, Some("31000001"))
     );
     assert!(w.events().contains("\"adopted\":true"));
+}
+
+#[test]
+fn a_box_that_cannot_destroy_itself_is_ended_at_once() {
+    for reply in [
+        "SELF_DESTRUCT_MISSING\n2026-11-04T17:01:00Z VAST SELF-DESTRUCT MISSING: curl is not installed\n",
+        "WATCHDOG_ARMED\n2026-11-04T17:01:00Z vast key reads instance 31000001: http 403\n",
+    ] {
+        let w = World::new();
+        *w.remote.watchdog.borrow_mut() = Some(reply.into());
+        let err = format!("{:#}", w.up().unwrap_err());
+        assert!(
+            err.contains("could not destroy itself") || err.contains("cannot destroy itself"),
+            "{err}"
+        );
+        assert_eq!(w.vast.0.borrow().deleted, ["31000001"], "{reply}");
+        assert_eq!(w.ledger().pods[0].state, PodState::Terminated);
+        assert_eq!(
+            w.clock.slept.borrow().len(),
+            1,
+            "no wait for a box that said it cannot end itself"
+        );
+    }
+}
+
+#[test]
+fn a_probe_that_fails_short_of_a_rejected_key_only_warns() {
+    let w = World::new();
+    *w.remote.watchdog.borrow_mut() =
+        Some("WATCHDOG_ARMED\n2026-11-04T17:01:00Z vast key reads instance 31000001: http none\n".into());
+    w.up().unwrap();
+    assert!(w.events().contains("did not read its instance"), "{}", w.events());
 }
 
 #[test]

@@ -48,23 +48,28 @@ terminate_round() {
 }
 
 # Vast runs its own sshd with the account's keys, so this only saves the env for the jobs and installs the packages.
-# Vast's sshd answers before this ends, so `up` waits for the last line.
+# Vast's sshd answers before this ends, so `up` waits for the last line. Slim images ship no curl, the only way this
+# box can destroy itself, so a failed install is a box without a self-destruct, said as loudly as a missing key.
 setup_ssh() {
     (umask 077; export -p >"$root/root/container_env.sh") 2>/dev/null || log "writing container_env.sh failed"
     # HARNESS_APT is a space-separated list of package names, validated by the harness.
     # shellcheck disable=SC2086
     run_logged apt-get update -qq &&
         DEBIAN_FRONTEND=noninteractive run_logged apt-get install -y -qq ${HARNESS_APT:-curl procps}
+    if ! command -v curl >/dev/null 2>&1; then
+        log "VAST SELF-DESTRUCT MISSING: curl is not installed, so this box cannot destroy itself at its deadline"
+        return 1
+    fi
+    # A read of this instance with its own key: the one sign before the deadline that the destroy can work.
+    if [[ -n $vast_id && -n $vast_key ]]; then
+        vast_call GET "instances/$vast_id/?owner=me" ''
+        log "vast key reads instance $vast_id: http $vast_code"
+    fi
     log "box setup done"
 }
 
 if [[ -n $vast_id && -n $vast_key ]]; then
     log "vast self-destruct ready for instance $vast_id"
-    # A read of this instance with its own key, the one sign before the deadline that the destroy can work.
-    {
-        vast_call GET "instances/$vast_id/?owner=me" ''
-        log "vast key reads instance $vast_id: http $vast_code"
-    } &
 else
     log "VAST SELF-DESTRUCT MISSING: CONTAINER_ID or CONTAINER_API_KEY is not set, so this box cannot destroy itself" \
         "at its deadline; harness up ends such a box"

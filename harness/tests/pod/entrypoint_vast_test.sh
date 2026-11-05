@@ -48,6 +48,12 @@ for tool in apt-get runpodctl sshd ssh-keygen; do
     printf '#!/usr/bin/env bash\nprintf "%s %%s\\n" "$*" >>"$FAKE_DIR/calls.log"\n' "$tool" >"$work/bin/$tool"
 done
 chmod +x "$work/bin/"*
+# A PATH with no curl at all, as on a slim image whose apt failed.
+mkdir -p "$work/nocurl"
+for tool in bash python3 env date mkdir sleep; do
+    ln -s "$(command -v "$tool")" "$work/nocurl/$tool"
+done
+ln -s "$work/bin/apt-get" "$work/nocurl/apt-get"
 
 entrypoint_text=$(cat "$VAST_ENTRYPOINT_FILE")
 default_signals='import os, signal, sys
@@ -90,6 +96,7 @@ start_box fallback "$past" FAKE_CURL_CODE_DELETE=403
 start_box nokey "$past" CONTAINER_API_KEY=
 start_box label "$past" CONTAINER_ID= VAST_CONTAINERLABEL=C.456
 start_box future "$soon"
+start_box nocurl "$((now + 600))" PATH="$work/nocurl"
 
 leaked=""
 for ((i = 0; i < 8; i++)); do
@@ -126,6 +133,11 @@ echo "ok: a missing key is logged loudly, and nothing calls Vast"
 
 (( $(calls label 'instances/456/') >= 1 )) || fail "the instance id was not read from VAST_CONTAINERLABEL"
 echo "ok: VAST_CONTAINERLABEL names the instance when CONTAINER_ID is missing"
+
+log_has nocurl 'VAST SELF-DESTRUCT MISSING: curl is not installed' || fail "a box without curl is not said out loud"
+! log_has nocurl 'box setup done' || fail "a box without curl reported its setup done"
+alive nocurl || fail "nocurl: the entrypoint died"
+echo "ok: a box without curl says it cannot destroy itself and never reports its setup done"
 
 [[ -z $leaked ]] || fail "the instance key showed up in a process's argv"
 if grep -l TESTKEY "$work"/*/calls.log; then
