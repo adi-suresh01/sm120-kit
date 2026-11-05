@@ -23,6 +23,8 @@ pub enum Kind {
     Pull,
     Terminate,
     Reap,
+    /// `harness watch`: its mode at the start, and what each offer it found came to.
+    Watch,
     Warn,
     Error,
 }

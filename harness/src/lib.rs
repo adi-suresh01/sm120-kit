@@ -9,3 +9,4 @@ pub mod reap;
 pub mod session;
 pub mod spec;
 pub mod vast;
+pub mod watch;

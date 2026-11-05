@@ -3,9 +3,11 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand};
+use jiff::SignedDuration;
 use serde_json::json;
 use sm120_harness::clock::SystemClock;
 use sm120_harness::cloud::{API_BASE, Providers, RunpodRest};
@@ -15,6 +17,7 @@ use sm120_harness::pod::{self, AfterFailure, Ctx};
 use sm120_harness::session::{SshRemote, TRANSFER_LIMIT};
 use sm120_harness::spec::{IssueSpec, is_slug};
 use sm120_harness::vast::{self, VastApi, VastRest};
+use sm120_harness::watch::{self, Outcome};
 use sm120_harness::{budget, exec, reap};
 
 /// Rents a RunPod pod or a Vast box for an issue, runs server variants on it, pulls the results, and terminates it,
@@ -56,6 +59,16 @@ enum Command {
     Run { issue: String, variants: Vec<String> },
     /// Settle every ledger against RunPod and Vast; every other command does this first
     Reap,
+    /// Search for an offer every few minutes; rent it as `up` would when the budget is set, else report it
+    Watch {
+        issue: String,
+        /// Time between searches, such as 4m or 90s
+        #[arg(long, default_value = "4m", value_parser = duration)]
+        every: Duration,
+        /// How long to keep searching; exit status 3 when it runs out
+        #[arg(long = "for", default_value = "24h", value_parser = duration)]
+        limit: Duration,
+    },
     /// Run a command on the live pod, in the kit directory with the container environment loaded
     Ssh {
         issue: String,
@@ -89,15 +102,30 @@ impl Command {
             | Self::Pull { issue }
             | Self::Down { issue }
             | Self::Run { issue, .. }
+            | Self::Watch { issue, .. }
             | Self::Ssh { issue, .. } => Some(issue),
             Self::Reap => None,
         }
     }
 }
 
+/// `4m`, `90s`, `24h`, or `1h 30m`; zero would search without pause.
+fn duration(text: &str) -> Result<Duration, String> {
+    let parsed: SignedDuration = text
+        .parse()
+        .map_err(|e| format!("{text:?} is not a duration such as 4m: {e}"))?;
+    Duration::try_from(parsed)
+        .ok()
+        .filter(|d| !d.is_zero())
+        .ok_or_else(|| format!("{text:?} must be longer than zero"))
+}
+
+/// What `watch` exits with when `--for` runs out without an offer.
+const WATCH_TIMED_OUT: u8 = 3;
+
 fn main() -> ExitCode {
     match run(Cli::parse()) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => code,
         Err(e) => {
             let _ = writeln!(io::stderr().lock(), "harness: {e:#}");
             ExitCode::FAILURE
@@ -136,7 +164,7 @@ fn load(repo: &Path, issue: &str) -> Result<IssueSpec> {
     IssueSpec::load(repo, issue)
 }
 
-fn run(cli: Cli) -> Result<()> {
+fn run(cli: Cli) -> Result<ExitCode> {
     let repo = find_repo()?;
     let api_key = std::env::var("RUNPOD_API_KEY")
         .ok()
@@ -203,7 +231,7 @@ fn dispatch(
     events: &Events,
     interrupted: &AtomicBool,
     command: Command,
-) -> Result<()> {
+) -> Result<ExitCode> {
     let ends_pods = matches!(command, Command::Down { .. } | Command::Reap);
     let account = pod::key_account(runpod, repo, events, command.issue(), ends_pods)?;
     let (vast, vast_account) = usable_vast(vast, repo, events, command.issue(), ends_pods).unzip();
@@ -224,7 +252,7 @@ fn dispatch(
     };
     let reaped = reap::reap(&ctx);
     if let Command::Reap = command {
-        return reaped;
+        return reaped.map(|()| ExitCode::SUCCESS);
     }
     if let Err(e) = reaped {
         events.emit(
@@ -233,7 +261,13 @@ fn dispatch(
             json!({"detail": format!("reaper failed: {e:#}")}),
         );
     }
-    match command {
+    if let Command::Watch { issue, every, limit } = command {
+        return match watch::watch(&ctx, load(repo, &issue)?, every, limit)? {
+            Outcome::Rented(_) | Outcome::Reported => Ok(ExitCode::SUCCESS),
+            Outcome::TimedOut => Ok(ExitCode::from(WATCH_TIMED_OUT)),
+        };
+    }
+    let done = match command {
         Command::Budget {
             action: BudgetAction::Set { issue, usd, note },
         } => budget::set(&ctx, &issue, usd, &note),
@@ -251,11 +285,12 @@ fn dispatch(
         Command::Pull { issue } => pod::pull(&ctx, &issue, &pod::live_pod(&ctx, &issue)?.target, TRANSFER_LIMIT),
         Command::Down { issue } => pod::down(&ctx, &issue),
         Command::Run { issue, variants } => exec::run(&ctx, &load(repo, &issue)?, &variants),
-        Command::Reap => Ok(()),
+        Command::Reap | Command::Watch { .. } => Ok(()),
         Command::Ssh { issue, command } => ctx
             .remote
             .run_streaming(&pod::live_pod(&ctx, &issue)?.target, &command.join(" ")),
-    }
+    };
+    done.map(|()| ExitCode::SUCCESS)
 }
 
 #[cfg(test)]
@@ -267,6 +302,27 @@ mod tests {
     #[test]
     fn cli_definition_is_consistent() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn watch_reads_its_schedule_and_names_its_issue() {
+        let parse = |args: &[&str]| match Cli::try_parse_from(args).map(|cli| cli.command) {
+            Ok(Command::Watch { issue, every, limit }) => Ok((issue, every, limit)),
+            Ok(_) => panic!("parsed as another command"),
+            Err(e) => Err(e.to_string()),
+        };
+        let (issue, every, limit) = parse(&["harness", "watch", "x-1"]).unwrap();
+        assert_eq!(
+            (issue.as_str(), every, limit),
+            ("x-1", Duration::from_secs(240), Duration::from_secs(86400))
+        );
+        let (_, every, limit) = parse(&["harness", "watch", "x-1", "--every", "90s", "--for", "1h 30m"]).unwrap();
+        assert_eq!((every, limit), (Duration::from_secs(90), Duration::from_secs(5400)));
+        for bad in ["0s", "-4m", "soon"] {
+            assert!(parse(&["harness", "watch", "x-1", "--every", bad]).is_err(), "{bad}");
+        }
+        let cli = Cli::try_parse_from(["harness", "watch", "x-1"]).unwrap();
+        assert_eq!(cli.command.issue(), Some("x-1"));
     }
 
     #[test]

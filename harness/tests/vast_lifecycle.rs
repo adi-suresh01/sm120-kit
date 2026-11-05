@@ -24,6 +24,7 @@ use sm120_harness::reap;
 use sm120_harness::session::{Remote, Target};
 use sm120_harness::spec::{CloudTier, IssueSpec};
 use sm120_harness::vast::{OfferQuery, VastApi, VastCreateRequest, VastOffer};
+use sm120_harness::watch::{self, Outcome};
 use support::fake_cloud::FakeCloud;
 use support::fake_remote::FakeRemote;
 use support::{FakeClock, TempDir, repo_with_issue};
@@ -68,7 +69,7 @@ struct VastState {
     requests: Vec<(u64, VastCreateRequest)>,
     instances: Vec<(Pod, u64)>,
     searches: usize,
-    /// Searches that find nothing before the offers show up.
+    /// Searches that find nothing before the offers show up, as while a watch waits.
     empty_searches: usize,
     deleted: Vec<String>,
     billing: Option<f64>,
@@ -538,4 +539,114 @@ fn quote_names_the_machine_its_price_and_the_download_rate() {
         quote.contains("NVIDIA RTX PRO 6000 Blackwell Server Edition SECURE $4.98/hr"),
         "{quote}"
     );
+}
+
+const EVERY: Duration = Duration::from_secs(240);
+const DAY: Duration = Duration::from_secs(86400);
+
+impl World {
+    fn watch(&self, every: Duration, limit: Duration) -> Result<Outcome> {
+        let spec = self.spec();
+        self.with(|ctx| watch::watch(ctx, spec, every, limit))
+    }
+
+    fn machines(&self) -> Vec<(PodState, u64)> {
+        let ledger = self.ledger();
+        ledger
+            .pods
+            .iter()
+            .map(|p| (p.state, ledger.vast.pods[&p.name].machine))
+            .collect()
+    }
+}
+
+#[test]
+fn a_watch_waits_for_an_offer_skips_a_machine_that_failed_and_rents_the_next() {
+    let w = World::new();
+    w.vast.0.borrow_mut().empty_searches = 1;
+    *w.remote.p2p.borrow_mut() = VecDeque::from([p2p_without("NS"), P2P_OK.to_string()]);
+    let outcome = w.watch(EVERY, DAY).unwrap();
+    assert!(matches!(outcome, Outcome::Rented(_)), "{outcome:?}");
+    assert_eq!(w.machines(), [(PodState::Terminated, 70001), (PodState::Live, 70002)]);
+    assert_eq!(w.vast.0.borrow().deleted, ["31000001"]);
+    let events = w.events();
+    assert!(events.contains("\"mode\":\"will rent\""), "{events}");
+    assert!(events.contains("avoiding Vast machine [70001]"), "{events}");
+}
+
+#[test]
+fn a_watch_without_a_budget_reports_the_offer_and_rents_nothing() {
+    let w = World::new();
+    LedgerStore::new(w.repo.path(), ISSUE)
+        .update(|ledger| {
+            ledger.budget = None;
+            Ok(())
+        })
+        .unwrap();
+    assert!(matches!(w.watch(EVERY, DAY).unwrap(), Outcome::Reported));
+    assert!(w.vast.0.borrow().requests.is_empty());
+    assert!(w.ledger().pods.is_empty());
+    let events = w.events();
+    assert!(events.contains("\"mode\":\"report only\""), "{events}");
+    assert!(
+        events.contains("\"kind\":\"quote\"") && events.contains("\"machine\":70001"),
+        "{events}"
+    );
+}
+
+#[test]
+fn a_budget_short_of_the_planned_hours_at_the_cheapest_cap_only_reports() {
+    let w = World::new();
+    // 3.00 x 1.10 x 1 h = 3.30 is needed.
+    LedgerStore::new(w.repo.path(), ISSUE)
+        .update(|ledger| {
+            ledger.budget.as_mut().unwrap().usd = 3.2;
+            Ok(())
+        })
+        .unwrap();
+    assert!(matches!(w.watch(EVERY, DAY).unwrap(), Outcome::Reported));
+    assert!(w.vast.0.borrow().requests.is_empty());
+}
+
+#[test]
+fn a_watch_that_finds_nothing_ends_when_its_time_runs_out() {
+    let w = World::new();
+    w.vast.0.borrow_mut().empty_searches = usize::MAX;
+    // The RunPod fallback is a choice too, and would be rented while in stock.
+    w.runpod.0.borrow_mut().secure.clear();
+    let outcome = w.watch(EVERY, Duration::from_secs(600)).unwrap();
+    assert!(matches!(outcome, Outcome::TimedOut), "{outcome:?}");
+    // Searches at 0, 4, 8, and 12 minutes; the last one is past the 10 minutes.
+    assert_eq!(w.vast.0.borrow().searches, 4);
+    assert!(w.ledger().pods.is_empty());
+}
+
+#[test]
+fn a_watch_stops_renting_after_three_boxes_fail_their_checks() {
+    let w = World::new();
+    w.vast.0.borrow_mut().offers = (0..5)
+        .map(|i| offer(9100010 + i, 70010 + i, 2.0 + 0.1 * i as f64))
+        .collect();
+    *w.remote.p2p.borrow_mut() = VecDeque::from([p2p_without("CNS")]);
+    let err = format!("{:#}", w.watch(EVERY, DAY).unwrap_err());
+    assert!(err.contains("3 boxes failed a check in this watch"), "{err}");
+    assert_eq!(
+        w.machines(),
+        [
+            (PodState::Terminated, 70010),
+            (PodState::Terminated, 70011),
+            (PodState::Terminated, 70012)
+        ]
+    );
+    assert!(w.vast.billing_ids().is_empty());
+}
+
+#[test]
+fn ctrl_c_ends_a_watch_between_searches() {
+    let w = World::new();
+    w.vast.0.borrow_mut().empty_searches = usize::MAX;
+    w.interrupted.store(true, std::sync::atomic::Ordering::SeqCst);
+    let err = w.watch(EVERY, DAY).unwrap_err();
+    assert!(err.downcast_ref::<pod::Interrupted>().is_some(), "{err:#}");
+    assert!(w.ledger().pods.is_empty());
 }
