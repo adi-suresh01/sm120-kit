@@ -2,10 +2,11 @@ use anyhow::Result;
 use jiff::{SignedDuration, Timestamp};
 use serde_json::json;
 
-use crate::cloud::{Pod, PodStatus};
+use crate::cloud::{NO_VAST_KEY, Pod, PodStatus};
 use crate::events::Kind;
 use crate::ledger::{ADOPT_WINDOW, Ledger, LedgerStore, PodEntry, PodState};
 use crate::pod::{self, Ctx};
+use crate::spec::Provider;
 
 /// The pod's own watchdog fires at the deadline; the reaper steps in only after it had time to.
 pub const GRACE: SignedDuration = SignedDuration::from_mins(2);
@@ -59,12 +60,22 @@ fn live_action(issue: &str, entry: &PodEntry, id: &str, pods: &[Pod], now: Times
     }
 }
 
-/// Pure: what to do about every ledger entry and every listed pod, given the time.
+/// Pure: what to do about every RunPod ledger entry and every listed RunPod pod, given the time.
 pub fn decide(ledgers: &[Ledger], pods: &[Pod], now: Timestamp) -> Vec<Action> {
+    decide_on(Provider::Runpod, ledgers, pods, now)
+}
+
+/// As `decide`, for one provider: its entries against its own pod list. Entries on another provider are left
+/// alone, so a list from one provider never releases, books, or ends a pod on the other.
+pub fn decide_on(provider: Provider, ledgers: &[Ledger], pods: &[Pod], now: Timestamp) -> Vec<Action> {
     let mut actions = Vec::new();
     for ledger in ledgers {
         let issue = ledger.issue.as_str();
-        for entry in &ledger.pods {
+        let ours = ledger
+            .pods
+            .iter()
+            .filter(|entry| ledger.provider_of(&entry.name) == provider);
+        for entry in ours {
             match (entry.state, entry.id.as_deref()) {
                 (PodState::Live, Some(id)) => actions.extend(live_action(issue, entry, id, pods, now)),
                 (PodState::Reserved, _) => match pods.iter().find(|pod| pod.name == entry.name) {
@@ -86,7 +97,11 @@ pub fn decide(ledgers: &[Ledger], pods: &[Pod], now: Timestamp) -> Vec<Action> {
             }
         }
     }
-    let tracked = |pod: &Pod| ledgers.iter().any(|ledger| ledger.tracks(&pod.id, &pod.name));
+    let tracked = |pod: &Pod| {
+        ledgers
+            .iter()
+            .any(|ledger| ledger.tracks_on(provider, &pod.id, &pod.name))
+    };
     for pod in pods {
         if pod.name.starts_with("sm120-") && pod.status != PodStatus::Terminated && !tracked(pod) {
             actions.push(Action::WarnUntracked {
@@ -99,7 +114,8 @@ pub fn decide(ledgers: &[Ledger], pods: &[Pod], now: Timestamp) -> Vec<Action> {
 }
 
 /// Runs first in every command. A ledger that fails to load is reported and skipped, so one bad file cannot stop
-/// the others from being settled.
+/// the others from being settled. Each provider with a client is listed and settled on its own, so one provider's
+/// outage leaves the other's pods settled; the first list that failed is the error.
 pub fn reap(ctx: &Ctx) -> Result<()> {
     let mut ledgers = Vec::new();
     for store in LedgerStore::all(ctx.repo)? {
@@ -112,17 +128,51 @@ pub fn reap(ctx: &Ctx) -> Result<()> {
             ),
         }
     }
-    let pods = ctx.cloud.list_pods()?;
-    for action in decide(&ledgers, &pods, ctx.clock.now()) {
-        if let Err(e) = apply(ctx, &action) {
+    let mut failed = None;
+    for provider in Provider::ALL {
+        let Some(cloud) = ctx.cloud.on(provider) else {
+            warn_unsettled(ctx, provider, &ledgers);
+            continue;
+        };
+        let pods = match cloud.list_pods() {
+            Ok(pods) => pods,
+            Err(e) => {
+                failed.get_or_insert(e);
+                continue;
+            }
+        };
+        for action in decide_on(provider, &ledgers, &pods, ctx.clock.now()) {
+            if let Err(e) = apply(ctx, provider, &action) {
+                ctx.events.emit(
+                    action_issue(ctx, &action),
+                    Kind::Error,
+                    json!({"detail": format!("reaper action {action:?} failed: {e:#}")}),
+                );
+            }
+        }
+    }
+    match failed {
+        Some(e) => Err(e.into()),
+        None => Ok(()),
+    }
+}
+
+/// A ledger can hold a Vast pod while this command has no Vast key; nothing settles it until one is configured.
+fn warn_unsettled(ctx: &Ctx, provider: Provider, ledgers: &[Ledger]) {
+    for ledger in ledgers {
+        let open = ledger.pods.iter().filter(|entry| {
+            matches!(entry.state, PodState::Live | PodState::Reserved) && ledger.provider_of(&entry.name) == provider
+        });
+        for entry in open {
             ctx.events.emit(
-                action_issue(ctx, &action),
-                Kind::Error,
-                json!({"detail": format!("reaper action {action:?} failed: {e:#}")}),
+                Some(&ledger.issue),
+                Kind::Warn,
+                json!({"pod": entry.name, "detail": format!(
+                    "{provider} pod {} ({:?}) went unsettled: {NO_VAST_KEY}", entry.name, entry.state
+                )}),
             );
         }
     }
-    Ok(())
 }
 
 /// Where the action's events go: its ledger's issue, or for an untracked pod the issue its name points at, so
@@ -142,9 +192,14 @@ fn action_issue<'a>(ctx: &Ctx, action: &'a Action) -> Option<&'a str> {
 }
 
 /// Each change re-checks the entry under the ledger lock, since another harness process may have moved it on.
-fn apply(ctx: &Ctx, action: &Action) -> Result<()> {
+fn apply(ctx: &Ctx, provider: Provider, action: &Action) -> Result<()> {
     match action {
-        Action::Terminate { issue, name, id, status } => {
+        Action::Terminate {
+            issue,
+            name,
+            id,
+            status,
+        } => {
             let ledger = ctx.ledger(issue).load()?;
             let entry = ledger.pods.iter().find(|e| &e.name == name);
             if let Some(entry) = entry.filter(|e| e.state == PodState::Live && e.id.as_deref() == Some(id.as_str())) {
@@ -154,12 +209,13 @@ fn apply(ctx: &Ctx, action: &Action) -> Result<()> {
                     json!({"pod": name, "id": id, "action": "terminate", "deadline": entry.deadline,
                            "last_status": status}),
                 );
-                pod::terminate_overdue(ctx, issue, entry)?;
+                pod::terminate_overdue(ctx, issue, entry, provider)?;
             }
         }
         Action::MarkGone { issue, name } => {
             pod::mark_gone(ctx, issue, name)?;
-            ctx.events.emit(Some(issue), Kind::Reap, json!({"pod": name, "action": "mark_gone"}));
+            ctx.events
+                .emit(Some(issue), Kind::Reap, json!({"pod": name, "action": "mark_gone"}));
         }
         Action::Adopt { issue, name, id } => {
             ctx.ledger(issue).update(|ledger| {
@@ -169,7 +225,11 @@ fn apply(ctx: &Ctx, action: &Action) -> Result<()> {
                 }
                 Ok(())
             })?;
-            ctx.events.emit(Some(issue), Kind::Reap, json!({"pod": name, "id": id, "action": "adopt"}));
+            ctx.events.emit(
+                Some(issue),
+                Kind::Reap,
+                json!({"pod": name, "id": id, "action": "adopt"}),
+            );
         }
         Action::Release { issue, name } => {
             ctx.ledger(issue).update(|ledger| {
@@ -179,13 +239,20 @@ fn apply(ctx: &Ctx, action: &Action) -> Result<()> {
                 }
                 Ok(())
             })?;
-            ctx.events.emit(Some(issue), Kind::Reap, json!({"pod": name, "action": "release"}));
+            ctx.events
+                .emit(Some(issue), Kind::Reap, json!({"pod": name, "action": "release"}));
         }
-        Action::WarnUntracked { name, id } => ctx.events.emit(
-            action_issue(ctx, action),
-            Kind::Warn,
-            json!({"pod": name, "id": id, "detail": "sm120 pod that no ledger tracks; not terminated, check it by hand"}),
-        ),
+        Action::WarnUntracked { name, id } => {
+            let detail = match provider {
+                Provider::Runpod => "sm120 pod that no ledger tracks; not terminated, check it by hand".to_string(),
+                other => format!("sm120 pod on {other} that no ledger tracks; not terminated, check it by hand"),
+            };
+            ctx.events.emit(
+                action_issue(ctx, action),
+                Kind::Warn,
+                json!({"pod": name, "id": id, "detail": detail}),
+            );
+        }
     }
     Ok(())
 }
@@ -342,6 +409,122 @@ mod tests {
             id: "x1".into(),
         };
         assert_eq!(actions, [warn]);
+    }
+
+    const VAST_ISSUE: &str = "sglang-33422-tp8";
+    const VAST_NAME: &str = "sm120-sglang-33422-tp8-cccccc";
+
+    /// A Vast reservation made at 17:00 with a 1 h deadline, moved to `state` with instance id 31000001.
+    fn vast_ledger_with(state: PodState) -> Ledger {
+        let mut ledger = Ledger::new(VAST_ISSUE);
+        ledger.budget = Some(Budget {
+            usd: 50.0,
+            approved_at: at("2026-10-16T16:00:00Z"),
+            note: "chat".into(),
+        });
+        let offer = crate::vast::VastOffer {
+            offer_id: 9100005,
+            machine_id: 70005,
+            host_id: 80005,
+            gpu: "RTX PRO 6000 Max-Q".into(),
+            count: 8,
+            rate_usd_hr: 16.0,
+            reliability2: Some(0.99),
+            reliability: None,
+            disk_space: 500.0,
+            inet_down: 2000.0,
+            internet_down_cost_per_tb: Some(4.0),
+            rentable: Some(true),
+            rented: Some(false),
+            cuda_max_good: Some(13.2),
+            geolocation: None,
+            hosting_type: Some(1),
+        };
+        ledger
+            .reserve_vast(VAST_NAME, &offer, 1.0, at("2026-10-16T17:00:00Z"))
+            .unwrap();
+        if state == PodState::Live {
+            ledger.pods[0].mark_live("31000001").unwrap();
+        }
+        ledger
+    }
+
+    #[test]
+    fn a_vast_pod_is_settled_only_against_vasts_own_list() {
+        let ledgers = [ledger_with(PodState::Live), vast_ledger_with(PodState::Live)];
+        let runpod = [pod("p1", NAME, PodStatus::Running)];
+        // RunPod's list never names the Vast pod, and that is no evidence it is gone.
+        assert!(decide(&ledgers, &runpod, at("2026-10-16T17:30:00Z")).is_empty());
+        let gone = Action::MarkGone {
+            issue: VAST_ISSUE.into(),
+            name: VAST_NAME.into(),
+        };
+        assert_eq!(
+            decide_on(Provider::Vast, &ledgers, &[], at("2026-10-16T17:30:00Z")),
+            [gone]
+        );
+        let listed = [pod("31000001", VAST_NAME, PodStatus::Running)];
+        assert!(decide_on(Provider::Vast, &ledgers, &listed, at("2026-10-16T17:30:00Z")).is_empty());
+        let overdue = Action::Terminate {
+            issue: VAST_ISSUE.into(),
+            name: VAST_NAME.into(),
+            id: "31000001".into(),
+            status: PodStatus::Exited,
+        };
+        let stopped = [pod("31000001", VAST_NAME, PodStatus::Exited)];
+        assert_eq!(
+            decide_on(Provider::Vast, &ledgers, &stopped, at("2026-10-16T18:02:01Z")),
+            [overdue]
+        );
+    }
+
+    #[test]
+    fn a_vast_reservation_is_adopted_or_released_by_vast_alone() {
+        let ledgers = [vast_ledger_with(PodState::Reserved)];
+        assert!(decide(&ledgers, &[], at("2026-10-16T17:30:00Z")).is_empty());
+        let release = Action::Release {
+            issue: VAST_ISSUE.into(),
+            name: VAST_NAME.into(),
+        };
+        assert_eq!(
+            decide_on(Provider::Vast, &ledgers, &[], at("2026-10-16T17:30:00Z")),
+            [release]
+        );
+        // A RunPod pod that happens to carry the name is not the Vast reservation's.
+        let same_name = [pod("p7", VAST_NAME, PodStatus::Running)];
+        let stray = Action::WarnUntracked {
+            name: VAST_NAME.into(),
+            id: "p7".into(),
+        };
+        assert_eq!(decide(&ledgers, &same_name, at("2026-10-16T17:05:00Z")), [stray]);
+        let adopt = Action::Adopt {
+            issue: VAST_ISSUE.into(),
+            name: VAST_NAME.into(),
+            id: "31000001".into(),
+        };
+        let listed = [pod("31000001", VAST_NAME, PodStatus::Starting)];
+        assert_eq!(
+            decide_on(Provider::Vast, &ledgers, &listed, at("2026-10-16T17:05:00Z")),
+            [adopt]
+        );
+    }
+
+    #[test]
+    fn an_id_tracked_on_one_provider_does_not_track_a_pod_on_the_other() {
+        let mut runpod = ledger_with(PodState::Live);
+        runpod.pods[0].id = Some("31000001".into());
+        let vast_listed = [
+            pod("31000001", "sm120-sglang-1-ffffff", PodStatus::Running),
+            pod("31000009", "", PodStatus::Running),
+        ];
+        let warn = Action::WarnUntracked {
+            name: "sm120-sglang-1-ffffff".into(),
+            id: "31000001".into(),
+        };
+        assert_eq!(
+            decide_on(Provider::Vast, &[runpod], &vast_listed, at("2026-10-16T17:30:00Z")),
+            [warn]
+        );
     }
 
     #[test]

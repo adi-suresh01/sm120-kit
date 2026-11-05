@@ -107,6 +107,7 @@ fn ssh_command(target: &Target, identity: Option<&Path>) -> Result<Command> {
     // SendEnv pattern in a user's ssh config would hand it the API key.
     command
         .env_remove("RUNPOD_API_KEY")
+        .env_remove("VAST_API_KEY")
         .args([
             "-o",
             "BatchMode=yes",
@@ -580,24 +581,41 @@ fn check_pod_up(ctx: &Ctx, issue: &str, entry: &PodEntry, job: &str) -> Result<(
     let Some(id) = entry.id.as_deref() else {
         return Ok(());
     };
-    let read = ctx.cloud.get_pod_once(id).and_then(|pod| match pod {
-        Some(pod) => Ok(Some(pod)),
-        // RunPod also answers 404 for a pod this key cannot see, so only the pod list agreeing makes it gone.
-        None => ctx
-            .cloud
-            .list_pods()
-            .map(|pods| pods.into_iter().find(|pod| pod.id == id)),
-    });
-    let what = match read {
-        Ok(Some(pod)) if matches!(pod.status, PodStatus::Exited | PodStatus::Error | PodStatus::Terminated) => {
-            format!("RunPod reports pod {} (id {id}) {:?}", entry.name, pod.status)
+    let provider = match ctx.ledger(issue).load() {
+        Ok(ledger) => ledger.provider_of(&entry.name),
+        Err(e) => {
+            ctx.warn(issue, format!("reading the ledger after a failed poll failed: {e:#}"));
+            return Ok(());
         }
-        Ok(Some(_)) => return Ok(()),
-        Ok(None) => format!("RunPod no longer lists pod {} (id {id})", entry.name),
+    };
+    let cloud = match ctx.cloud_on(provider) {
+        Ok(cloud) => cloud,
         Err(e) => {
             ctx.warn(
                 issue,
-                format!("reading pod {} from RunPod after a failed poll failed: {e}", entry.name),
+                format!("pod {} went unchecked after a failed poll: {e:#}", entry.name),
+            );
+            return Ok(());
+        }
+    };
+    let read = cloud.get_pod_once(id).and_then(|pod| match pod {
+        Some(pod) => Ok(Some(pod)),
+        // RunPod also answers 404 for a pod this key cannot see, so only the pod list agreeing makes it gone.
+        None => cloud.list_pods().map(|pods| pods.into_iter().find(|pod| pod.id == id)),
+    });
+    let what = match read {
+        Ok(Some(pod)) if matches!(pod.status, PodStatus::Exited | PodStatus::Error | PodStatus::Terminated) => {
+            format!("{provider} reports pod {} (id {id}) {:?}", entry.name, pod.status)
+        }
+        Ok(Some(_)) => return Ok(()),
+        Ok(None) => format!("{provider} no longer lists pod {} (id {id})", entry.name),
+        Err(e) => {
+            ctx.warn(
+                issue,
+                format!(
+                    "reading pod {} from {provider} after a failed poll failed: {e}",
+                    entry.name
+                ),
             );
             return Ok(());
         }

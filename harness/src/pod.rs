@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::fmt;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::Read;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,15 +14,33 @@ use serde_json::json;
 use crate::budget;
 use crate::clock::Clock;
 use crate::cloud::{
-    Cloud, CloudError, CreatePodRequest, GpuRequest, Mounts, Offer, PersistentMount, Pod, PodStatus, SshEndpoint,
-    find_offers,
+    Candidate, Cloud, CloudError, Clouds, CreatePodRequest, GpuRequest, Mounts, NO_VAST_KEY, PersistentMount, Pod,
+    PodStatus, SshEndpoint, find_candidates,
 };
 use crate::events::{Events, Kind};
-use crate::ledger::{ADOPT_WINDOW, Ledger, LedgerStore, PodEntry, PodState, check_accounts};
+use crate::ledger::{ADOPT_WINDOW, Ledger, LedgerStore, PodEntry, PodState, check_accounts, check_vast_accounts};
 use crate::session::{Remote, TRANSFER_LIMIT, Target, Watch, start_job, wait_job};
-use crate::spec::IssueSpec;
+use crate::spec::{IssueSpec, Provider};
+use crate::vast::{VastApi, VastCreateRequest, VastOffer};
 
 pub const ENTRYPOINT: &str = include_str!("../pod/entrypoint.sh");
+/// Vast's part of the entrypoint, spliced in by `vast_entrypoint`.
+pub const ENTRYPOINT_VAST: &str = include_str!("../pod/entrypoint_vast.sh");
+/// Vast's `onstart`: a loader for the entrypoint, which travels base64 in `HARNESS_ENTRYPOINT_B64` so that its size
+/// never meets a limit on `onstart`. POSIX sh, since which shell Vast runs it with is not documented. The entrypoint
+/// runs as `/bin/bash -c <text>`, its command line on RunPod too, which the watchdog check looks for. Tests only:
+/// HARNESS_TEST_ROOT prefixes the paths, as in the entrypoint.
+pub const VAST_ONSTART: &str = r#"root=${HARNESS_TEST_ROOT:-}
+mkdir -p "$root/workspace"
+entry=$(printf '%s' "$HARNESS_ENTRYPOINT_B64" | base64 -d) || { echo "harness: HARNESS_ENTRYPOINT_B64 did not decode; this box has no watchdog" >&2; exit 1; }
+if command -v setsid >/dev/null 2>&1; then
+    setsid /bin/bash -c "$entry" >"$root/workspace/harness-entrypoint.log" 2>&1 </dev/null &
+else
+    /bin/bash -c "$entry" >"$root/workspace/harness-entrypoint.log" 2>&1 </dev/null &
+fi
+"#;
+/// Vast's own sshd, reached directly where the host maps a port and through Vast's proxy where not.
+const VAST_RUNTYPE: &str = "ssh_direc ssh_proxy";
 /// sshd, the watchdog's curl, procps (pkill, free) for the pod scripts, and patch for patch_pkg.sh, whatever
 /// the issue lists: slim images ship none of them.
 const REQUIRED_APT: [&str; 4] = ["openssh-server", "curl", "procps", "patch"];
@@ -40,18 +58,34 @@ impl std::error::Error for Interrupted {}
 
 pub struct Ctx<'a> {
     pub repo: &'a Path,
-    pub cloud: &'a dyn Cloud,
+    /// RunPod's client always, Vast's when a Vast key is configured.
+    pub cloud: &'a dyn Clouds,
     pub remote: &'a dyn Remote,
     pub clock: &'a dyn Clock,
     pub events: &'a Events<'a>,
     pub interrupted: &'a AtomicBool,
-    /// From `Cloud::account`, read once per command.
+    /// The RunPod key's organization from `Cloud::account`, read once per command.
     pub account: Option<&'a str>,
 }
 
 impl Ctx<'_> {
     pub fn ledger(&self, issue: &str) -> LedgerStore {
-        LedgerStore::new(self.repo, issue).with_account(self.account)
+        LedgerStore::new(self.repo, issue)
+            .with_account(self.account)
+            .with_vast_account(self.cloud.vast_account())
+    }
+
+    /// The client for a pod on `provider`.
+    pub fn cloud_on(&self, provider: Provider) -> Result<&dyn Cloud> {
+        self.cloud
+            .on(provider)
+            .with_context(|| format!("this pod is on {provider}, but {NO_VAST_KEY}"))
+    }
+
+    pub fn vast(&self) -> Result<&dyn VastApi> {
+        self.cloud
+            .vast()
+            .with_context(|| format!("this needs Vast, but {NO_VAST_KEY}"))
     }
 
     pub fn check_interrupted(&self) -> Result<()> {
@@ -159,8 +193,40 @@ pub fn report_error(events: &Events, issue: Option<&str>, error: &anyhow::Error)
 /// more than one sent with another account's key, which RunPod answers with a harmless 404, and the ledger write
 /// after it still refuses to book that account's pod as gone.
 pub fn key_account(
-    cloud: &dyn Cloud,
+    cloud: &dyn Clouds,
     repo: &Path,
+    events: &Events,
+    issue: Option<&str>,
+    ends_pods: bool,
+) -> Result<Option<String>> {
+    let read = cloud.runpod().account();
+    let check = |account: Option<&str>| check_accounts(repo, account);
+    settle_account(read, "the key's RunPod organization", check, events, issue, ends_pods)
+}
+
+/// As `key_account`, for the Vast key against every ledger's Vast pods.
+pub fn vast_key_account(
+    vast: &dyn VastApi,
+    repo: &Path,
+    events: &Events,
+    issue: Option<&str>,
+    ends_pods: bool,
+) -> Result<Option<String>> {
+    let check = |account: Option<&str>| check_vast_accounts(repo, account);
+    settle_account(
+        vast.account(),
+        "the Vast key's account",
+        check,
+        events,
+        issue,
+        ends_pods,
+    )
+}
+
+fn settle_account(
+    read: Result<Option<String>, CloudError>,
+    what: &str,
+    check: impl Fn(Option<&str>) -> Result<()>,
     events: &Events,
     issue: Option<&str>,
     ends_pods: bool,
@@ -169,10 +235,10 @@ pub fn key_account(
         let detail = format!("{e:#}; ending pods anyway, and no ledger write under this key books one as gone");
         events.emit(issue, Kind::Warn, json!({ "detail": detail }));
     };
-    let account = match cloud.account() {
+    let account = match read {
         Ok(account) => account,
         Err(e) => {
-            let e = anyhow!(e).context("reading the key's RunPod organization");
+            let e = anyhow!(e).context(format!("reading {what}"));
             if !ends_pods {
                 return Err(e);
             }
@@ -180,7 +246,7 @@ pub fn key_account(
             None
         }
     };
-    if let Err(e) = check_accounts(repo, account.as_deref()) {
+    if let Err(e) = check(account.as_deref()) {
         if !ends_pods {
             return Err(e);
         }
@@ -217,15 +283,17 @@ pub fn is_pod_of(issue: &str, name: &str) -> bool {
 /// A pod of this issue that the ledger does not track was made by another checkout or before a git revert of the
 /// ledger. Its reservation lives in a ledger this process cannot see, so reserving beside it would spend the
 /// budget twice.
-fn refuse_untracked(issue: &str, ledger: &Ledger, pods: &[Pod]) -> Result<()> {
+fn refuse_untracked(issue: &str, ledger: &Ledger, provider: Provider, pods: &[Pod]) -> Result<()> {
     let untracked = pods.iter().find(|pod| {
-        pod.status != PodStatus::Terminated && is_pod_of(issue, &pod.name) && !ledger.tracks(&pod.id, &pod.name)
+        pod.status != PodStatus::Terminated
+            && is_pod_of(issue, &pod.name)
+            && !ledger.tracks_on(provider, &pod.id, &pod.name)
     });
     if let Some(pod) = untracked {
         bail!(
-            "RunPod lists pod {} (id {}, {:?}) for issue {issue}, but issues/{issue}/harness-ledger.json does not \
-             track it; most likely another checkout made it or the ledger was reverted. Nothing was reserved. Its \
-             watchdog ends it at its deadline; restore the ledger that holds it, or wait for that, before `up`",
+            "{provider} lists pod {} (id {}, {:?}) for issue {issue}, but issues/{issue}/harness-ledger.json does \
+             not track it; most likely another checkout made it or the ledger was reverted. Nothing was reserved. \
+             Its watchdog ends it at its deadline; restore the ledger that holds it, or wait for that, before `up`",
             pod.name,
             pod.id,
             pod.status
@@ -238,36 +306,44 @@ fn refuse_untracked(issue: &str, ledger: &Ledger, pods: &[Pod]) -> Result<()> {
 /// is ahead of the real one.
 const MAX_CLOCK_SKEW: SignedDuration = SignedDuration::from_secs(120);
 
-fn refuse_clock_skew(ctx: &Ctx, issue: &str) -> Result<()> {
-    let Some(skew) = ctx.cloud.clock_skew() else {
+fn refuse_clock_skew(ctx: &Ctx, issue: &str, provider: Provider) -> Result<()> {
+    let Some(skew) = ctx.cloud_on(provider)?.clock_skew() else {
         ctx.warn(
             issue,
-            "RunPod sent no Date header, so the laptop clock went unchecked".into(),
+            format!("{provider} sent no Date header, so the laptop clock went unchecked"),
         );
         return Ok(());
     };
     ensure!(
         skew.abs() <= MAX_CLOCK_SKEW,
-        "this laptop's clock is {} s off RunPod's, and the pod's watchdog deadline is set from it; fix the clock \
+        "this laptop's clock is {} s off {provider}'s, and the pod's watchdog deadline is set from it; fix the clock \
          (System Settings > Date & Time, or `sudo sntp -sS time.apple.com`) before `up`. Nothing was reserved",
         -skew.as_secs()
     );
     Ok(())
 }
 
-pub fn create_request(spec: &IssueSpec, entry: &PodEntry, data_centers: &[String]) -> CreatePodRequest {
-    let mut apt: Vec<&str> = REQUIRED_APT.to_vec();
+/// Vast runs its own sshd, which a reinstall of openssh-server could disturb, so a Vast box goes without it.
+fn apt_packages(spec: &IssueSpec, provider: Provider) -> String {
+    let mut apt: Vec<&str> = REQUIRED_APT
+        .into_iter()
+        .filter(|package| provider == Provider::Runpod || *package != "openssh-server")
+        .collect();
     for package in &spec.pod.apt {
         if !apt.contains(&package.as_str()) {
             apt.push(package);
         }
     }
+    apt.join(" ")
+}
+
+pub fn create_request(spec: &IssueSpec, entry: &PodEntry, data_centers: &[String]) -> CreatePodRequest {
     let mut env = BTreeMap::from([
         (
             "HARNESS_DEADLINE_EPOCH".to_string(),
             entry.deadline.as_second().to_string(),
         ),
-        ("HARNESS_APT".to_string(), apt.join(" ")),
+        ("HARNESS_APT".to_string(), apt_packages(spec, Provider::Runpod)),
         ("HF_HOME".to_string(), "/workspace/hf".to_string()),
     ]);
     if spec.pod.needs_hf_token {
@@ -296,6 +372,59 @@ pub fn create_request(spec: &IssueSpec, entry: &PodEntry, data_centers: &[String
         },
         start_ssh: true,
     }
+}
+
+/// entrypoint.sh with Vast's part spliced in before its last line, `main`, so Vast's definitions replace RunPod's
+/// while the watchdog stays one piece of code, and RunPod pods keep running the file as it is.
+pub fn vast_entrypoint() -> Result<String> {
+    let body = ENTRYPOINT
+        .strip_suffix("\nmain\n")
+        .context("entrypoint.sh no longer ends with `main`, so Vast's part has nowhere to go")?;
+    Ok(format!("{body}\n{ENTRYPOINT_VAST}\nmain\n"))
+}
+
+/// The create body for a Vast offer. `entrypoint_b64` is `vast_entrypoint` in base64, made once before any
+/// reservation so that nothing can fail between the reservation and the create.
+pub fn vast_create_request(spec: &IssueSpec, entry: &PodEntry, entrypoint_b64: &str) -> VastCreateRequest {
+    let env = BTreeMap::from([
+        (
+            "HARNESS_DEADLINE_EPOCH".to_string(),
+            entry.deadline.as_second().to_string(),
+        ),
+        ("HARNESS_APT".to_string(), apt_packages(spec, Provider::Vast)),
+        ("HF_HOME".to_string(), "/workspace/hf".to_string()),
+        ("HARNESS_ENTRYPOINT_B64".to_string(), entrypoint_b64.to_string()),
+    ]);
+    VastCreateRequest {
+        client_id: "me".into(),
+        image: spec.pod.image.clone(),
+        env,
+        disk: spec.pod.vast_disk_gb(),
+        label: entry.name.clone(),
+        onstart: VAST_ONSTART.into(),
+        runtype: VAST_RUNTYPE.into(),
+        cancel_unavail: true,
+    }
+}
+
+/// Standard base64 with padding, as `base64 -d` on the box reads it.
+pub fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = chunk
+            .iter()
+            .enumerate()
+            .fold(0u32, |n, (i, b)| n | u32::from(*b) << (16 - 8 * i));
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(char::from(ALPHABET[(n >> (18 - 6 * i) & 63) as usize]));
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
 }
 
 /// What `nvidia-smi topo -m` prints between two GPUs that share no NVLink; NVLink pairs show NV1, NV2, ...
@@ -403,6 +532,43 @@ pub fn check_gpus_idle(reply: &str) -> Result<()> {
     Ok(())
 }
 
+/// Fails closed like the topology gate: the matrix must name exactly GPU0..GPU{count-1}, and every pair must read
+/// OK. Any other reading (NS, CNS, GNS, TNS, U) means no peer access between those two GPUs, where NCCL with P2P
+/// on has hung PCIe boxes before.
+pub fn check_p2p(matrix: &str, count: u32) -> Result<()> {
+    let text = strip_ansi(matrix);
+    let rows: Vec<Vec<&str>> = text
+        .lines()
+        .map(|line| line.split_whitespace().collect::<Vec<_>>())
+        .filter(|cells| cells.first().is_some_and(|first| is_device(first, "GPU")))
+        .collect();
+    // The header names GPUs only; a row follows its GPU's name with readings.
+    let is_header = |cells: &Vec<&str>| cells.iter().all(|cell| is_device(cell, "GPU"));
+    let expected: Vec<String> = (0..count).map(|i| format!("GPU{i}")).collect();
+    let header: Option<&Vec<&str>> = rows.iter().find(|cells| is_header(cells));
+    let body: Vec<&Vec<&str>> = rows.iter().filter(|cells| !is_header(cells)).collect();
+    let row_names: Vec<&str> = body.iter().map(|cells| cells[0]).collect();
+    ensure!(
+        header.is_some_and(|header| *header == expected) && row_names == expected,
+        "{P2P} does not show exactly the {count} GPUs this pod rents, so the P2P check cannot pass:\n{matrix}"
+    );
+    for row in body {
+        for (column, peer) in expected.iter().enumerate() {
+            let cell = row.get(column + 1).copied().unwrap_or("");
+            let wanted = if row[0] == peer { "X" } else { "OK" };
+            ensure!(
+                cell == wanted,
+                "{P2P} shows {cell:?} between {} and {peer}, and this repro needs P2P on every pair:\n{matrix}",
+                row[0]
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Read only on a pod whose issue sets `require_p2p`.
+pub const P2P: &str = "timeout 60 nvidia-smi topo -p2p r";
+
 /// A GPU that a process outside the container still holds passes the topology gate, then fails the first variant's
 /// idle wait minutes later, after setup has paid for the weights. nvidia-smi lists no process for it, since the
 /// holder lives in another PID namespace.
@@ -437,17 +603,34 @@ pub fn up(ctx: &Ctx, spec: &IssueSpec, run_setup: bool, after_failure: AfterFail
     }
     let remaining = ledger.remaining_usd()?;
     ctx.remote.preflight()?;
-    let offers = find_offers(ctx.cloud, &spec.pod)?;
-    ensure!(
-        !offers.is_empty(),
-        "nothing in the preference list of issues/{issue}/harness.toml is in stock"
-    );
-    budget::emit_quote(ctx, spec, &offers, Some(remaining))?;
-    refuse_untracked(issue, &ledger, &ctx.cloud.list_pods()?)?;
-    refuse_clock_skew(ctx, issue)?;
-    let (entry, pod) = create_first_available(ctx, spec, &offers)?;
-    let ready = wait_ready(ctx, issue, &entry, pod, &spec.pod.avoid_data_centers)
-        .and_then(|target| gate_and_copy(ctx, spec, &entry, &target).map(|()| target));
+    let candidates = find_candidates(ctx.cloud, &spec.pod)?;
+    if candidates.is_empty() {
+        return Err(NothingInStock {
+            issue: issue.to_string(),
+        }
+        .into());
+    }
+    budget::emit_quote(ctx, spec, &candidates, Some(remaining))?;
+    let on_vast = candidates.iter().any(|c| c.provider() == Provider::Vast);
+    let providers: Vec<Provider> = Provider::ALL
+        .into_iter()
+        .filter(|p| *p == Provider::Runpod || on_vast)
+        .collect();
+    for &provider in &providers {
+        refuse_untracked(issue, &ledger, provider, &ctx.cloud_on(provider)?.list_pods()?)?;
+    }
+    for &provider in &providers {
+        refuse_clock_skew(ctx, issue, provider)?;
+    }
+    let Created {
+        entry,
+        pod,
+        provider,
+        cloud,
+    } = create_first_available(ctx, spec, &candidates)?;
+    let ready = first_read(cloud, provider, pod)
+        .and_then(|pod| wait_ready(ctx, cloud, provider, issue, &entry, pod, &spec.pod.avoid_data_centers))
+        .and_then(|target| gate_and_copy(ctx, spec, &entry, &target, provider).map(|()| target));
     let target = match ready {
         Ok(target) => target,
         Err(e) => {
@@ -456,7 +639,7 @@ pub fn up(ctx: &Ctx, spec: &IssueSpec, run_setup: bool, after_failure: AfterFail
                 issue,
                 format!("up failed before the pod was usable: {e:#}; terminating {}", entry.name),
             );
-            return match terminate(ctx, issue, &entry) {
+            return match terminate(ctx, issue, &entry, provider) {
                 Ok(()) => Err(e),
                 Err(stop) => {
                     let e = e.context(format!("then terminating it failed: {stop:#}"));
@@ -480,42 +663,104 @@ pub fn up(ctx: &Ctx, spec: &IssueSpec, run_setup: bool, after_failure: AfterFail
     }
 }
 
-fn create_first_available(ctx: &Ctx, spec: &IssueSpec, offers: &[Offer]) -> Result<(PodEntry, Pod)> {
+/// `up` found no choice in stock. `watch` keeps looking after it; every other command stops.
+#[derive(Debug)]
+pub struct NothingInStock {
+    pub issue: String,
+}
+
+impl fmt::Display for NothingInStock {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "nothing in the preference list of issues/{}/harness.toml is in stock",
+            self.issue
+        )
+    }
+}
+
+impl std::error::Error for NothingInStock {}
+
+/// A pod `up` created and the ledger tracks, with the client of the provider it is on.
+struct Created<'c> {
+    entry: PodEntry,
+    pod: Pod,
+    provider: Provider,
+    cloud: &'c dyn Cloud,
+}
+
+fn reserve_fields(name: &str, candidate: &Candidate, entry: &PodEntry) -> serde_json::Value {
+    match candidate {
+        Candidate::Runpod(offer) => json!({
+            "pod": name, "gpu": offer.gpu, "cloud": offer.cloud, "count": offer.count,
+            "rate_usd_hr": offer.rate_usd_hr, "reserved_usd": cents(entry.reserved_usd), "deadline": entry.deadline,
+        }),
+        Candidate::Vast(offer) => json!({
+            "pod": name, "gpu": offer.gpu, "provider": Provider::Vast, "machine": offer.machine_id,
+            "offer": offer.offer_id, "count": offer.count, "rate_usd_hr": offer.rate_usd_hr,
+            "reserved_usd": cents(entry.reserved_usd), "deadline": entry.deadline,
+        }),
+    }
+}
+
+/// Everything a create needs that could fail is ready before the reservation, so a reservation is always followed by
+/// a create.
+fn create_first_available<'c>(ctx: &Ctx<'c>, spec: &IssueSpec, candidates: &[Candidate]) -> Result<Created<'c>> {
     let issue = spec.issue.as_str();
     let store = ctx.ledger(issue);
+    let vast_entrypoint = if candidates.iter().any(|c| c.provider() == Provider::Vast) {
+        base64(vast_entrypoint()?.as_bytes())
+    } else {
+        String::new()
+    };
     let mut rejections = Vec::new();
-    for offer in offers {
+    for candidate in candidates {
         ctx.check_interrupted()?;
+        let provider = candidate.provider();
+        let cloud = ctx
+            .cloud
+            .on(provider)
+            .with_context(|| format!("{provider}: {NO_VAST_KEY}"))?;
         let name = pod_name(issue)?;
         let now = ctx.clock.now();
-        let entry = store.update(|ledger| ledger.reserve(&name, offer, spec.planned_hours, now))?;
-        ctx.events.emit(
-            Some(issue),
-            Kind::Reserve,
-            json!({
-                "pod": name, "gpu": offer.gpu, "cloud": offer.cloud, "count": offer.count,
-                "rate_usd_hr": offer.rate_usd_hr, "reserved_usd": cents(entry.reserved_usd), "deadline": entry.deadline,
-            }),
-        );
-        match ctx.cloud.create_pod(&create_request(spec, &entry, &offer.data_centers)) {
+        let entry = store.update(|ledger| ledger.reserve_candidate(&name, candidate, spec.planned_hours, now))?;
+        ctx.events
+            .emit(Some(issue), Kind::Reserve, reserve_fields(&name, candidate, &entry));
+        let created = match candidate {
+            Candidate::Runpod(offer) => cloud.create_pod(&create_request(spec, &entry, &offer.data_centers)),
+            Candidate::Vast(offer) => create_on_vast(ctx, spec, &entry, offer, &vast_entrypoint),
+        };
+        match created {
             Ok(pod) => {
-                let entry = track(ctx, &store, &name, &pod.id)?;
+                let entry = track(cloud, &store, &name, &pod.id)?;
                 ctx.events
                     .emit(Some(issue), Kind::Create, json!({"pod": name, "id": pod.id}));
-                return Ok((entry, pod));
+                return Ok(Created {
+                    entry,
+                    pod,
+                    provider,
+                    cloud,
+                });
             }
-            Err(e) if e.create_outcome_unknown() => return adopt_by_name(ctx, &store, &entry, e),
+            Err(e) if e.create_outcome_unknown() => {
+                let (entry, pod) = adopt_by_name(ctx, cloud, &store, &entry, e)?;
+                return Ok(Created {
+                    entry,
+                    pod,
+                    provider,
+                    cloud,
+                });
+            }
             Err(e) => {
                 store.update(|ledger| ledger.entry_mut(&name)?.mark_create_failed())?;
-                // RunPod answers 400 both for a broken request and for no capacity on this GPU; the next choice
-                // tells the two apart.
-                if e.status() != Some(400) {
+                if !refusal_moves_on(candidate, &e) {
                     return Err(e).context(format!("creating {name}"));
                 }
-                ctx.warn(
-                    issue,
-                    format!("{} on {} was refused: {e}", offer.gpu, offer.cloud.as_str()),
-                );
+                let what = match candidate {
+                    Candidate::Runpod(offer) => format!("{} on {}", offer.gpu, offer.cloud.as_str()),
+                    Candidate::Vast(offer) => offer.describe(),
+                };
+                ctx.warn(issue, format!("{what} was refused: {e}"));
                 rejections.push(e.to_string());
             }
         }
@@ -523,9 +768,53 @@ fn create_first_available(ctx: &Ctx, spec: &IssueSpec, offers: &[Offer]) -> Resu
     bail!("every in-stock choice was refused: {}", rejections.join(" | "))
 }
 
+/// RunPod answers 400 both for a broken request and for no capacity on this GPU; the next choice tells the two
+/// apart. Vast refuses an offer someone else took first, in a shape its docs do not pin down, so any refusal but a
+/// rejected key or a rate limit moves on; the same offer is never tried twice.
+fn refusal_moves_on(candidate: &Candidate, error: &CloudError) -> bool {
+    match candidate {
+        Candidate::Runpod(_) => error.status() == Some(400),
+        Candidate::Vast(_) => !matches!(error.status(), Some(401 | 403 | 429)),
+    }
+}
+
+/// A new Vast instance as the neutral view, before Vast reports anything about it; `first_read` replaces it.
+fn create_on_vast(
+    ctx: &Ctx,
+    spec: &IssueSpec,
+    entry: &PodEntry,
+    offer: &VastOffer,
+    entrypoint_b64: &str,
+) -> Result<Pod, CloudError> {
+    let vast = ctx
+        .cloud
+        .vast()
+        .ok_or_else(|| CloudError::Protocol(NO_VAST_KEY.into()).vast())?;
+    let request = vast_create_request(spec, entry, entrypoint_b64);
+    let id = vast.create_instance(offer.offer_id, &request)?;
+    Ok(Pod {
+        id,
+        name: entry.name.clone(),
+        status: PodStatus::Provisioning,
+        cost: None,
+        ssh: None,
+        runtime: None,
+        data_center_id: None,
+    })
+}
+
+/// RunPod's create reply is a full pod. Vast's names only the id, so its first read comes from the API, and a read
+/// that fails ends `up` the way a failed wait does.
+fn first_read(cloud: &dyn Cloud, provider: Provider, pod: Pod) -> Result<Pod> {
+    match provider {
+        Provider::Runpod => Ok(pod),
+        Provider::Vast => Ok(cloud.get_pod(&pod.id)?.unwrap_or(pod)),
+    }
+}
+
 /// Records a new pod's id. A pod the ledger cannot record is deleted at once: nothing would show it billing, and
 /// `run`'s teardown could not find it to end it.
-fn track(ctx: &Ctx, store: &LedgerStore, name: &str, id: &str) -> Result<PodEntry> {
+fn track(cloud: &dyn Cloud, store: &LedgerStore, name: &str, id: &str) -> Result<PodEntry> {
     let recorded = store.update(|ledger| {
         let entry = ledger.entry_mut(name)?;
         entry.mark_live(id)?;
@@ -534,7 +823,7 @@ fn track(ctx: &Ctx, store: &LedgerStore, name: &str, id: &str) -> Result<PodEntr
     let Err(e) = recorded else {
         return recorded;
     };
-    let outcome = match ctx.cloud.delete_pod(id) {
+    let outcome = match cloud.delete_pod(id) {
         Ok(()) => "deleted it".to_string(),
         Err(delete) => format!("could not delete it ({delete}); its watchdog ends it at its deadline"),
     };
@@ -544,7 +833,13 @@ fn track(ctx: &Ctx, store: &LedgerStore, name: &str, id: &str) -> Result<PodEntr
     )))
 }
 
-fn adopt_by_name(ctx: &Ctx, store: &LedgerStore, entry: &PodEntry, error: CloudError) -> Result<(PodEntry, Pod)> {
+fn adopt_by_name(
+    ctx: &Ctx,
+    cloud: &dyn Cloud,
+    store: &LedgerStore,
+    entry: &PodEntry,
+    error: CloudError,
+) -> Result<(PodEntry, Pod)> {
     let issue = store.issue();
     ctx.warn(
         issue,
@@ -558,10 +853,10 @@ fn adopt_by_name(ctx: &Ctx, store: &LedgerStore, entry: &PodEntry, error: CloudE
         if attempt > 0 {
             ctx.clock.sleep(POLL);
         }
-        match ctx.cloud.list_pods() {
+        match cloud.list_pods() {
             Ok(pods) => {
                 if let Some(pod) = pods.into_iter().find(|pod| pod.name == entry.name) {
-                    let entry = track(ctx, store, &entry.name, &pod.id)?;
+                    let entry = track(cloud, store, &entry.name, &pod.id)?;
                     ctx.events.emit(
                         Some(issue),
                         Kind::Create,
@@ -583,13 +878,20 @@ fn adopt_by_name(ctx: &Ctx, store: &LedgerStore, entry: &PodEntry, error: CloudE
 
 /// The deadline was sized for the quoted rate, so a pod that bills above it, or whose rate cannot be read, could
 /// outspend its reservation before the watchdog fires.
-fn check_rate(ctx: &Ctx, issue: &str, entry: &PodEntry, pod: &Pod, warned: &mut bool) -> Result<()> {
+fn check_rate(
+    ctx: &Ctx,
+    issue: &str,
+    provider: Provider,
+    entry: &PodEntry,
+    pod: &Pod,
+    warned: &mut bool,
+) -> Result<()> {
     let reserved_rate = entry.reserved_rate_usd_hr();
     if pod.cost.is_none() && !*warned {
         *warned = true;
         ctx.warn(
             issue,
-            format!("RunPod's reply for pod {} has no cost field", entry.name),
+            format!("{provider}'s reply for pod {} has no cost field", entry.name),
         );
     }
     match pod.cost {
@@ -599,12 +901,12 @@ fn check_rate(ctx: &Ctx, issue: &str, entry: &PodEntry, pod: &Pod, warned: &mut 
         ),
         // RunPod reports 0 only for a pod that is not running, so a running pod at 0 means the rate is unknown.
         Some(cost) if cost <= 0.0 && pod.status == PodStatus::Running => bail!(
-            "pod {} is RUNNING but RunPod reports its cost as ${cost}/hr, so its rate cannot be checked against the \
-             ${reserved_rate:.3}/hr its deadline was sized for",
+            "pod {} is RUNNING but {provider} reports its cost as ${cost}/hr, so its rate cannot be checked against \
+             the ${reserved_rate:.3}/hr its deadline was sized for",
             entry.name
         ),
         None if pod.status == PodStatus::Running => bail!(
-            "pod {} is RUNNING but RunPod reports no cost, so its rate cannot be checked against the \
+            "pod {} is RUNNING but {provider} reports no cost, so its rate cannot be checked against the \
              ${reserved_rate:.3}/hr its deadline was sized for",
             entry.name
         ),
@@ -624,14 +926,22 @@ fn check_placement(entry: &PodEntry, pod: &Pod, avoid: &[String]) -> Result<()> 
     }
 }
 
-fn wait_ready(ctx: &Ctx, issue: &str, entry: &PodEntry, mut pod: Pod, avoid: &[String]) -> Result<Target> {
+fn wait_ready(
+    ctx: &Ctx,
+    cloud: &dyn Cloud,
+    provider: Provider,
+    issue: &str,
+    entry: &PodEntry,
+    mut pod: Pod,
+    avoid: &[String],
+) -> Result<Target> {
     let started = ctx.clock.now();
     let mut warned_no_cost = false;
     let mut warned_no_container = false;
     let mut proxy_only_since = None;
     let mut placed = false;
     loop {
-        check_rate(ctx, issue, entry, &pod, &mut warned_no_cost)?;
+        check_rate(ctx, issue, provider, entry, &pod, &mut warned_no_cost)?;
         check_placement(entry, &pod, avoid)?;
         placed |= pod.data_center_id.is_some();
         let now = ctx.clock.now();
@@ -662,7 +972,7 @@ fn wait_ready(ctx: &Ctx, issue: &str, entry: &PodEntry, mut pod: Pod, avoid: &[S
                         let since = *proxy_only_since.get_or_insert(now);
                         ensure!(
                             now.duration_since(since) < NO_DIRECT_SSH,
-                            "pod {}: RunPod gave no direct SSH endpoint (proxy-only host) within {} min of its \
+                            "pod {}: {provider} gave no direct SSH endpoint (proxy-only host) within {} min of its \
                              container starting; runtime ports: {}",
                             entry.name,
                             NO_DIRECT_SSH.as_mins(),
@@ -701,8 +1011,7 @@ fn wait_ready(ctx: &Ctx, issue: &str, entry: &PodEntry, mut pod: Pod, avoid: &[S
         );
         ctx.clock.sleep(POLL);
         let id = &pod.id;
-        pod = ctx
-            .cloud
+        pod = cloud
             .get_pod(id)?
             .with_context(|| format!("pod {id} disappeared while starting"))?;
     }
@@ -748,11 +1057,16 @@ fi"#
     )
 }
 
+const WATCHDOG_LOG: &str = "/workspace/harness-watchdog.log";
+
 /// The watchdog is what ends the pod once the laptop is gone. An image ENTRYPOINT or an API change that skips
 /// entrypoint.sh leaves a pod that only `down` or a later reaper pass can end, so such a pod is ended before use.
 /// The script also sources the container env the entrypoint wrote, which fails the same way.
-fn check_watchdog(ctx: &Ctx, entry: &PodEntry, target: &Target) -> Result<()> {
-    let script = watchdog_check_script(entry.deadline, "/workspace/harness-watchdog.log", "/proc");
+fn check_watchdog(ctx: &Ctx, issue: &str, entry: &PodEntry, target: &Target, provider: Provider) -> Result<()> {
+    if provider == Provider::Vast {
+        return wait_vast_watchdog(ctx, issue, entry, target);
+    }
+    let script = watchdog_check_script(entry.deadline, WATCHDOG_LOG, "/proc");
     let reply = ctx.remote.run(target, &script).context("checking the pod's watchdog")?;
     ensure!(
         reply.lines().any(|line| line == "WATCHDOG_ARMED"),
@@ -765,10 +1079,130 @@ fn check_watchdog(ctx: &Ctx, entry: &PodEntry, target: &Target) -> Result<()> {
     Ok(())
 }
 
-fn gate_and_copy(ctx: &Ctx, spec: &IssueSpec, entry: &PodEntry, target: &Target) -> Result<()> {
-    check_watchdog(ctx, entry, target)?;
+/// What Vast's part of the entrypoint logs once it holds what it needs to destroy this very instance.
+fn vast_ready_line(id: &str) -> String {
+    format!("vast self-destruct ready for instance {id}")
+}
+
+/// Logged once apt is done, since Vast's own sshd answers before the box has the packages the jobs use.
+const VAST_SETUP_DONE: &str = "box setup done";
+/// The start of the line that reports a read of this instance with its own key: evidence the key works, short of the
+/// destroy itself.
+const VAST_PROBE: &str = "vast key reads instance";
+/// The loader starts the entrypoint seconds after the container; past this there is none.
+const VAST_ARM_WAIT: SignedDuration = SignedDuration::from_mins(5);
+const VAST_SETUP_WAIT: SignedDuration = SignedDuration::from_mins(15);
+
+/// On Vast the entrypoint runs from the instance's onstart, beside Vast's own init, so it cannot be the container's
+/// main process, and something that kills it leaves the box running until `down` or the reaper. It counts as armed
+/// while the pid that logged the armed line is alive and runs the entrypoint, and the entrypoint reported the key and
+/// id to destroy this instance. Prints SETUP_RUNNING while apt still runs.
+fn vast_watchdog_check_script(deadline: Timestamp, id: &str, log: &str, proc: &str) -> String {
+    let armed = watchdog_armed_prefix(deadline);
+    let ready = vast_ready_line(id);
+    format!(
+        r#"log={log}; proc={proc}
+pid=$(sed -nE 's/^[^ ]* {armed}([0-9]+)$/\1/p' "$log" 2>/dev/null | tail -n 1)
+own=""
+if [[ -n $pid && -r $proc/$pid/cmdline ]]; then
+    own=$(tr '\0' ' ' <"$proc/$pid/cmdline" 2>/dev/null)
+fi
+if [[ $own != "/bin/bash -c #!/usr/bin/env bash"* ]] || ! grep -qx '[^ ]* {ready}' "$log" 2>/dev/null; then
+    echo WATCHDOG_MISSING
+    tail -n 5 "$log" 2>/dev/null || true
+    ps -eo pid,ppid,user,args --forest 2>/dev/null | head -n 30 | cut -c1-160 || true
+elif ! grep -q ' {VAST_SETUP_DONE}' "$log" 2>/dev/null; then
+    echo SETUP_RUNNING
+else
+    echo WATCHDOG_ARMED
+fi
+grep ' {VAST_PROBE} ' "$log" 2>/dev/null | tail -n 1 || true"#
+    )
+}
+
+/// Vast's sshd answers before the onstart has run, so the check repeats until the watchdog reports itself armed
+/// and the box set up, or a limit passes; a failed check (no container env yet) counts as not yet.
+fn wait_vast_watchdog(ctx: &Ctx, issue: &str, entry: &PodEntry, target: &Target) -> Result<()> {
+    let id = entry.id.as_deref().context("live pod without an id")?;
+    let script = vast_watchdog_check_script(entry.deadline, id, WATCHDOG_LOG, "/proc");
+    let started = ctx.clock.now();
+    loop {
+        let (state, last) = match ctx.remote.run(target, &script) {
+            Ok(reply) => (reply.lines().next().unwrap_or("").to_string(), reply),
+            Err(e) => (String::new(), format!("{e:#}")),
+        };
+        let waited = ctx.clock.now().duration_since(started);
+        match state.as_str() {
+            "WATCHDOG_ARMED" => {
+                report_vast_probe(ctx, issue, entry, &last);
+                return Ok(());
+            }
+            "SETUP_RUNNING" => ensure!(
+                waited < VAST_SETUP_WAIT,
+                "pod {}: apt on the box ran past {} min; the watchdog log ends: {:?}",
+                entry.name,
+                VAST_SETUP_WAIT.as_mins(),
+                last.trim()
+            ),
+            _ => ensure!(
+                waited < VAST_ARM_WAIT,
+                "pod {} shows no watchdog armed for its deadline {} with the key to destroy instance {id} within {} \
+                 min, so nothing on the box would end it; the last check: {:?}",
+                entry.name,
+                entry.deadline,
+                VAST_ARM_WAIT.as_mins(),
+                last.trim()
+            ),
+        }
+        ctx.check_interrupted()?;
+        ctx.clock.sleep(POLL);
+    }
+}
+
+/// Not a gate: a read can fail for reasons a destroy would not, and the reaper ends the box past its deadline either
+/// way. It is the one sign before the deadline that the instance key works, so its absence is said out loud.
+fn report_vast_probe(ctx: &Ctx, issue: &str, entry: &PodEntry, reply: &str) {
+    let probe = reply.lines().find(|line| line.contains(VAST_PROBE));
+    if probe.is_some_and(|line| line.contains(": http 2")) {
+        return;
+    }
+    let seen = probe.map_or("no read logged yet".to_string(), |line| line.trim().to_string());
+    ctx.warn(
+        issue,
+        format!(
+            "pod {}: the box's own Vast key did not read its instance ({seen}), so its self-destruct may be refused; \
+             `harness down {issue}` or the reaper still ends it",
+            entry.name
+        ),
+    );
+}
+
+/// The matrix of a box that failed the P2P check, kept as the results of that box, since nothing else of it is.
+fn gate_p2p(ctx: &Ctx, spec: &IssueSpec, entry: &PodEntry, target: &Target) -> Result<()> {
+    let matrix = ctx.remote.run(target, P2P)?;
+    let Err(e) = check_p2p(&matrix, spec.pod.count) else {
+        return Ok(());
+    };
+    let dir = ctx.repo.join("results").join(&spec.issue);
+    let saved = fs::create_dir_all(&dir).and_then(|()| {
+        fs::write(
+            dir.join("env.txt"),
+            format!("## P2P on pod {} ({P2P})\n{matrix}", entry.name),
+        )
+    });
+    if let Err(write) = saved {
+        ctx.warn(&spec.issue, format!("saving the P2P matrix failed: {write}"));
+    }
+    Err(e)
+}
+
+fn gate_and_copy(ctx: &Ctx, spec: &IssueSpec, entry: &PodEntry, target: &Target, provider: Provider) -> Result<()> {
+    check_watchdog(ctx, &spec.issue, entry, target, provider)?;
     if spec.pod.require_pcie() {
         check_pcie_topology(&ctx.remote.run(target, TOPOLOGY)?, spec.pod.count)?;
+    }
+    if spec.pod.require_p2p {
+        gate_p2p(ctx, spec, entry, target)?;
     }
     check_gpus_idle(&ctx.remote.run(target, GPU_MEMORY)?)?;
     let issue_dir = format!("issues/{}", spec.issue);
@@ -812,19 +1246,19 @@ pub fn pull_paths(ctx: &Ctx, issue: &str, target: &Target, paths: &[String], lim
     Ok(())
 }
 
-fn live_entry(ctx: &Ctx, issue: &str) -> Result<Option<PodEntry>> {
-    Ok(ctx
-        .ledger(issue)
-        .load()?
+fn live_entry(ctx: &Ctx, issue: &str) -> Result<Option<(PodEntry, Provider)>> {
+    let ledger = ctx.ledger(issue).load()?;
+    Ok(ledger
         .pods
-        .into_iter()
-        .find(|p| p.state == PodState::Live))
+        .iter()
+        .find(|p| p.state == PodState::Live)
+        .map(|entry| (entry.clone(), ledger.provider_of(&entry.name))))
 }
 
-fn target_for(ctx: &Ctx, issue: &str, entry: &PodEntry) -> Result<Target> {
+fn target_for(ctx: &Ctx, issue: &str, entry: &PodEntry, provider: Provider) -> Result<Target> {
     let id = entry.id.as_deref().context("live pod without an id")?;
     let pod = ctx
-        .cloud
+        .cloud_on(provider)?
         .get_pod(id)?
         .with_context(|| format!("pod {id} is no longer listed"))?;
     let endpoint = pod
@@ -834,50 +1268,55 @@ fn target_for(ctx: &Ctx, issue: &str, entry: &PodEntry) -> Result<Target> {
 }
 
 pub fn live_pod(ctx: &Ctx, issue: &str) -> Result<LivePod> {
-    let entry =
+    let (entry, provider) =
         live_entry(ctx, issue)?.with_context(|| format!("issue {issue} has no live pod; run `harness up {issue}`"))?;
-    let target = target_for(ctx, issue, &entry)?;
+    let target = target_for(ctx, issue, &entry, provider)?;
     Ok(LivePod { entry, target })
 }
 
 pub fn down(ctx: &Ctx, issue: &str) -> Result<()> {
-    let Some(entry) = live_entry(ctx, issue)? else {
+    let Some((entry, provider)) = live_entry(ctx, issue)? else {
         // A reservation whose create outcome is unknown may still have made a pod, so it is not "down".
-        if let Some(reserved) = ctx.ledger(issue).load()?.active() {
+        let ledger = ctx.ledger(issue).load()?;
+        if let Some(reserved) = ledger.active() {
             bail!(
-                "pod {} is reserved without an id; `harness reap` adopts and ends it once RunPod lists it, or \
-                 releases it {} min after {}",
+                "pod {} is reserved without an id; `harness reap` adopts and ends it once {} lists it, or releases \
+                 it {} min after {}",
                 reserved.name,
+                ledger.provider_of(&reserved.name),
                 ADOPT_WINDOW.as_mins(),
                 reserved.reserved_at
             );
         }
         return Ok(());
     };
-    let pulled = target_for(ctx, issue, &entry).and_then(|target| pull(ctx, issue, &target, PULL_BEFORE_DELETE));
+    let pulled =
+        target_for(ctx, issue, &entry, provider).and_then(|target| pull(ctx, issue, &target, PULL_BEFORE_DELETE));
     if let Err(e) = pulled {
         ctx.warn(issue, format!("pull before terminate failed: {e:#}"));
     }
-    terminate(ctx, issue, &entry).map_err(|e| e.context(StillLive::of(issue, &entry)))
+    terminate(ctx, issue, &entry, provider).map_err(|e| e.context(StillLive::of(issue, &entry)))
 }
 
-/// Deletes the pod, waits until RunPod no longer lists it, then books the estimate and any billing record.
-pub fn terminate(ctx: &Ctx, issue: &str, entry: &PodEntry) -> Result<()> {
-    end_pod(ctx, issue, entry, false)
+/// Deletes the pod (on Vast, destroys it: never a stop, which keeps billing the disk), waits until its provider no
+/// longer lists it, then books the estimate and any billing record.
+pub fn terminate(ctx: &Ctx, issue: &str, entry: &PodEntry, provider: Provider) -> Result<()> {
+    end_pod(ctx, issue, entry, provider, false)
 }
 
 /// The reaper's delete of a pod past its deadline: as `terminate`, with the estimate capped at the reservation.
-pub fn terminate_overdue(ctx: &Ctx, issue: &str, entry: &PodEntry) -> Result<()> {
-    end_pod(ctx, issue, entry, true)
+pub fn terminate_overdue(ctx: &Ctx, issue: &str, entry: &PodEntry, provider: Provider) -> Result<()> {
+    end_pod(ctx, issue, entry, provider, true)
 }
 
-fn end_pod(ctx: &Ctx, issue: &str, entry: &PodEntry, overdue: bool) -> Result<()> {
+fn end_pod(ctx: &Ctx, issue: &str, entry: &PodEntry, provider: Provider, overdue: bool) -> Result<()> {
     let id = entry
         .id
         .as_deref()
         .with_context(|| format!("pod {} has no id to terminate", entry.name))?;
-    ctx.cloud.delete_pod(id)?;
-    confirm_gone(ctx, id)?;
+    let cloud = ctx.cloud_on(provider)?;
+    cloud.delete_pod(id)?;
+    confirm_gone(ctx, cloud, id)?;
     let at = ctx.clock.now();
     let entry = ctx.ledger(issue).update(|ledger| {
         let entry = ledger.entry_mut(&entry.name)?;
@@ -889,7 +1328,7 @@ fn end_pod(ctx: &Ctx, issue: &str, entry: &PodEntry, overdue: bool) -> Result<()
         }
         Ok(entry.clone())
     })?;
-    let entry = record_billing(ctx, issue, entry);
+    let entry = record_billing(ctx, cloud, issue, entry);
     ctx.events.emit(
         Some(issue),
         Kind::Terminate,
@@ -903,19 +1342,19 @@ fn still_billing(pod: Option<Pod>) -> Option<PodStatus> {
         .filter(|status| *status != PodStatus::Terminated)
 }
 
-/// RunPod answers 404 both for a deleted pod and for one this key cannot see, so a GET that says gone counts only
-/// when the full pod list agrees.
-fn confirm_gone(ctx: &Ctx, id: &str) -> Result<()> {
+/// RunPod answers 404, and Vast an empty reply, both for a deleted pod and for one this key cannot see, so a GET
+/// that says gone counts only when the full pod list agrees.
+fn confirm_gone(ctx: &Ctx, cloud: &dyn Cloud, id: &str) -> Result<()> {
     let mut seen = String::new();
     for check in 0..GONE_CHECKS {
         if check > 0 {
             ctx.clock.sleep(POLL);
         }
-        if let Some(status) = still_billing(ctx.cloud.get_pod(id)?) {
+        if let Some(status) = still_billing(cloud.get_pod(id)?) {
             seen = format!("GET shows it {status:?}");
             continue;
         }
-        let pods = ctx.cloud.list_pods()?;
+        let pods = cloud.list_pods()?;
         match still_billing(pods.into_iter().find(|pod| pod.id == id)) {
             Some(status) => seen = format!("GET finds no pod, but the pod list shows it {status:?}"),
             None => return Ok(()),
@@ -932,7 +1371,9 @@ pub fn mark_gone(ctx: &Ctx, issue: &str, name: &str) -> Result<()> {
         bail!("ledger for {issue} has no pod named {name}");
     };
     let id = entry.id.as_deref().context("live pod without an id")?;
-    if let Some(status) = still_billing(ctx.cloud.get_pod(id)?) {
+    let provider = ledger.provider_of(name);
+    let cloud = ctx.cloud_on(provider)?;
+    if let Some(status) = still_billing(cloud.get_pod(id)?) {
         bail!(
             "pod {name} ({id}) is missing from the pod list but GET shows it {status:?}; it stays live in the ledger"
         );
@@ -947,22 +1388,22 @@ pub fn mark_gone(ctx: &Ctx, issue: &str, name: &str) -> Result<()> {
         }
         Ok(entry.clone())
     })?;
-    let entry = record_billing(ctx, issue, entry);
+    let entry = record_billing(ctx, cloud, issue, entry);
     ctx.events.emit(
         Some(issue),
         Kind::Terminate,
-        json!({"pod": entry.name, "id": entry.id, "detail": "no longer listed by RunPod",
+        json!({"pod": entry.name, "id": entry.id, "detail": format!("no longer listed by {provider}"),
                "cost_usd": entry.cost_usd.map(cents), "cost_source": entry.cost_source}),
     );
     Ok(())
 }
 
-fn record_billing(ctx: &Ctx, issue: &str, entry: PodEntry) -> PodEntry {
+fn record_billing(ctx: &Ctx, cloud: &dyn Cloud, issue: &str, entry: PodEntry) -> PodEntry {
     let now = ctx.clock.now();
     let Some(id) = entry.id.clone().filter(|_| entry.needs_billing(now)) else {
         return entry;
     };
-    let billed = match ctx.cloud.pod_billing_usd(&id) {
+    let billed = match cloud.pod_billing_usd(&id) {
         Ok(Some(billed)) => billed,
         Ok(None) => return entry,
         Err(e) => {
@@ -987,9 +1428,20 @@ fn record_billing(ctx: &Ctx, issue: &str, entry: PodEntry) -> PodEntry {
 /// Upgrades estimates to billing records where RunPod has them; `budget show` calls it every time.
 pub fn reconcile_billing(ctx: &Ctx, issue: &str) -> Result<()> {
     let now = ctx.clock.now();
-    for entry in ctx.ledger(issue).load()?.pods {
-        if entry.needs_billing(now) {
-            record_billing(ctx, issue, entry);
+    let ledger = ctx.ledger(issue).load()?;
+    for entry in ledger.pods.iter().filter(|entry| entry.needs_billing(now)) {
+        let provider = ledger.provider_of(&entry.name);
+        match ctx.cloud.on(provider) {
+            Some(cloud) => {
+                record_billing(ctx, cloud, issue, entry.clone());
+            }
+            None => ctx.warn(
+                issue,
+                format!(
+                    "pod {} keeps its estimate: its billing is on {provider}, and {NO_VAST_KEY}",
+                    entry.name
+                ),
+            ),
         }
     }
     Ok(())
@@ -1139,6 +1591,207 @@ mod tests {
         let nested = [(1, 0, docker_init.as_str()), (300, 1, ENTRY), (497, 300, ENTRY)];
         assert_eq!(watchdog_check(&[&armed(497)], &nested), "WATCHDOG_MISSING");
         assert_eq!(watchdog_check(&[], &runpod), "WATCHDOG_MISSING");
+    }
+
+    /// `nvidia-smi topo -p2p r` with one pair set to `pair` and the header underlined as nvidia-smi does on a tty.
+    fn p2p_matrix(count: usize, pair: Option<(usize, usize, &str)>) -> String {
+        let names: Vec<String> = (0..count).map(|i| format!("GPU{i}")).collect();
+        let mut out = format!(" \t\u{1b}[4m{}\t\u{1b}[0m\n", names.join("\t"));
+        for row in 0..count {
+            let cells: Vec<&str> = (0..count)
+                .map(|col| match pair {
+                    _ if row == col => "X",
+                    Some((a, b, cell)) if (row, col) == (a, b) || (row, col) == (b, a) => cell,
+                    _ => "OK",
+                })
+                .collect();
+            out.push_str(&format!(" GPU{row}\t{}\t\n", cells.join("\t")));
+        }
+        out + "\nLegend:\n\n  X    = Self\n  OK   = Status Ok\n  CNS  = Chipset not supported\n  NS   = Not supported\n"
+    }
+
+    #[test]
+    fn a_matrix_where_every_pair_reads_ok_passes_the_p2p_gate() {
+        check_p2p(&p2p_matrix(8, None), 8).unwrap();
+        check_p2p(&p2p_matrix(2, None), 2).unwrap();
+        check_p2p(&p2p_matrix(1, None), 1).unwrap();
+    }
+
+    #[test]
+    fn any_pair_without_p2p_fails_the_gate() {
+        for cell in ["NS", "CNS", "GNS", "TNS", "U"] {
+            let err = format!("{:#}", check_p2p(&p2p_matrix(8, Some((2, 7, cell))), 8).unwrap_err());
+            assert!(
+                err.contains(&format!("shows \"{cell}\" between GPU2 and GPU7")),
+                "{err}"
+            );
+            assert!(err.contains("Legend:"), "the error carries the matrix: {err}");
+        }
+    }
+
+    #[test]
+    fn a_p2p_reply_that_proves_nothing_fails_the_gate() {
+        for garbled in [
+            String::new(),
+            "NVIDIA-SMI has failed because it couldn't communicate with the NVIDIA driver.\n".into(),
+            p2p_matrix(4, None),
+            p2p_matrix(8, None).replace(" GPU7\tOK", " GPU7\t"),
+            p2p_matrix(8, None).replacen("\tX\t", "\tOK\t", 1),
+        ] {
+            assert!(check_p2p(&garbled, 8).is_err(), "{garbled:?} passed");
+        }
+    }
+
+    #[test]
+    fn base64_matches_the_standard_alphabet_and_padding() {
+        for (plain, encoded) in [
+            ("", ""),
+            ("f", "Zg=="),
+            ("fo", "Zm8="),
+            ("foo", "Zm9v"),
+            ("foobar", "Zm9vYmFy"),
+            ("\u{0}\u{ff}?>", "AMO/Pz4="),
+        ] {
+            assert_eq!(base64(plain.as_bytes()), encoded, "{plain:?}");
+        }
+    }
+
+    #[test]
+    fn vasts_entrypoint_is_runpods_with_vasts_part_before_main() {
+        let script = vast_entrypoint().unwrap();
+        let body = ENTRYPOINT.strip_suffix("\nmain\n").unwrap();
+        assert!(script.starts_with(body) && script.ends_with(&format!("{ENTRYPOINT_VAST}\nmain\n")));
+        assert!(script.starts_with("#!/usr/bin/env bash\n"));
+        assert!(script.contains("log \"watchdog armed for epoch $deadline in pid $$\""));
+        assert!(ENTRYPOINT_VAST.contains(&format!("log \"{}", vast_ready_line("$vast_id"))));
+        assert!(ENTRYPOINT_VAST.contains(&format!("log \"{VAST_SETUP_DONE}\"")));
+        assert!(ENTRYPOINT_VAST.contains(&format!("log \"{VAST_PROBE} $vast_id: http $vast_code\"")));
+    }
+
+    fn entry() -> PodEntry {
+        PodEntry {
+            name: "sm120-harness-test-vast-0a0b0c".into(),
+            id: None,
+            state: PodState::Reserved,
+            gpu: "GTX 1650".into(),
+            count: 1,
+            cloud: crate::spec::CloudTier::Community,
+            rate_usd_hr: 0.05,
+            reserved_usd: 0.0137,
+            reserved_at: "2026-11-04T17:00:00Z".parse().unwrap(),
+            deadline: "2026-11-04T17:15:00Z".parse().unwrap(),
+            terminated_at: None,
+            cost_usd: None,
+            cost_source: None,
+        }
+    }
+
+    #[test]
+    fn the_vast_create_carries_the_deadline_the_label_and_the_loader() {
+        let spec = IssueSpec::parse(
+            include_str!("../../issues/harness-test-vast/harness.toml"),
+            "harness-test-vast",
+            |_| true,
+        )
+        .unwrap();
+        let request = vast_create_request(&spec, &entry(), "ZW50cnk=");
+        assert_eq!(request.label, "sm120-harness-test-vast-0a0b0c");
+        assert_eq!(request.env["HARNESS_DEADLINE_EPOCH"], "1793812500");
+        assert_eq!(request.env["HARNESS_ENTRYPOINT_B64"], "ZW50cnk=");
+        assert_eq!(request.env["HARNESS_APT"], "curl procps patch");
+        assert!(!request.env.contains_key("HF_TOKEN"));
+        assert_eq!(request.disk, spec.pod.vast_disk_gb());
+        assert!(request.cancel_unavail);
+        assert_eq!(
+            (request.client_id.as_str(), request.runtype.as_str()),
+            ("me", "ssh_direc ssh_proxy")
+        );
+        // Each harness variable is read by the loader or the entrypoint under the same name.
+        let script = vast_entrypoint().unwrap();
+        for key in request.env.keys().filter(|key| key.starts_with("HARNESS_")) {
+            let read = format!("${key}");
+            let braced = format!("${{{key}");
+            assert!(
+                [&request.onstart, &script]
+                    .iter()
+                    .any(|text| text.contains(&read) || text.contains(&braced)),
+                "nothing on the box reads {key}"
+            );
+        }
+    }
+
+    fn vast_check(log_lines: &[&str], procs: &[(u32, &str)]) -> Vec<String> {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!("sm120-vast-watchdog-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for (pid, cmdline) in procs {
+            let p = dir.join("proc").join(pid.to_string());
+            std::fs::create_dir_all(&p).unwrap();
+            std::fs::write(p.join("cmdline"), cmdline.replace(' ', "\0") + "\0").unwrap();
+        }
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("watchdog.log");
+        std::fs::write(&log, log_lines.join("\n") + "\n").unwrap();
+        let deadline: Timestamp = "2026-10-16T20:03:00Z".parse().unwrap();
+        let script = vast_watchdog_check_script(
+            deadline,
+            "31000001",
+            log.to_str().unwrap(),
+            dir.join("proc").to_str().unwrap(),
+        );
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(format!("set -euo pipefail\n{script}"))
+            .output()
+            .unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        String::from_utf8(out.stdout)
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn the_vast_watchdog_counts_once_alive_holding_the_key_for_this_instance_and_set_up() {
+        const ENTRY: &str = "/bin/bash -c #!/usr/bin/env bash\n# Pod entrypoint";
+        let armed = "2026-10-16T19:48:00Z watchdog armed for epoch 1792180980 in pid 812";
+        let ready = "2026-10-16T19:48:00Z vast self-destruct ready for instance 31000001";
+        let done = "2026-10-16T19:49:10Z box setup done";
+        let probe = "2026-10-16T19:48:01Z vast key reads instance 31000001: http 200";
+        let alive = [(812, ENTRY)];
+        let reply = vast_check(&[ready, armed, probe, done], &alive);
+        assert_eq!(reply, ["WATCHDOG_ARMED", probe]);
+        assert_eq!(vast_check(&[ready, armed], &alive)[0], "SETUP_RUNNING");
+        for (lines, procs) in [
+            // the key or the id never reached the entrypoint
+            (vec![armed, done], &alive[..]),
+            // ready for some other instance
+            (
+                vec![
+                    "2026-10-16T19:48:00Z vast self-destruct ready for instance 310000012",
+                    armed,
+                    done,
+                ],
+                &alive[..],
+            ),
+            // the watchdog has died since it logged
+            (vec![ready, armed, done], &[][..]),
+            // a pid that is not the entrypoint
+            (vec![ready, armed, done], &[(812, "sshd: /usr/sbin/sshd")][..]),
+            // a deadline that is not the ledger's
+            (
+                vec![
+                    ready,
+                    "2026-10-16T19:48:00Z watchdog armed for epoch 1792180000 in pid 812",
+                    done,
+                ],
+                &alive[..],
+            ),
+        ] {
+            assert_eq!(vast_check(&lines, procs)[0], "WATCHDOG_MISSING", "{lines:?}");
+        }
     }
 
     #[test]

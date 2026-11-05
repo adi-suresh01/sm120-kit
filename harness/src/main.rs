@@ -8,16 +8,17 @@ use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand};
 use serde_json::json;
 use sm120_harness::clock::SystemClock;
-use sm120_harness::cloud::{API_BASE, RunpodRest};
+use sm120_harness::cloud::{API_BASE, Providers, RunpodRest};
 use sm120_harness::events::{Events, Kind};
 use sm120_harness::ledger::LedgerStore;
 use sm120_harness::pod::{self, AfterFailure, Ctx};
 use sm120_harness::session::{SshRemote, TRANSFER_LIMIT};
 use sm120_harness::spec::{IssueSpec, is_slug};
+use sm120_harness::vast::{self, VastApi, VastRest};
 use sm120_harness::{budget, exec, reap};
 
-/// Rents a RunPod pod for an issue, runs server variants on it, pulls the results, and terminates it, within the
-/// GPU budget recorded for the issue.
+/// Rents a RunPod pod or a Vast box for an issue, runs server variants on it, pulls the results, and terminates it,
+/// within the GPU budget recorded for the issue.
 #[derive(Parser)]
 #[command(name = "harness")]
 struct Cli {
@@ -53,7 +54,7 @@ enum Command {
     Down { issue: String },
     /// up, exec (every variant when none are named), then down, which runs on every way out
     Run { issue: String, variants: Vec<String> },
-    /// Settle every ledger against RunPod; every other command does this first
+    /// Settle every ledger against RunPod and Vast; every other command does this first
     Reap,
     /// Run a command on the live pod, in the kit directory with the container environment loaded
     Ssh {
@@ -72,7 +73,7 @@ enum BudgetAction {
         #[arg(long)]
         note: String,
     },
-    /// Print spent, reserved, and remaining, after reconciling with RunPod billing
+    /// Print spent, reserved, and remaining, after reconciling with RunPod and Vast billing
     Show { issue: String },
 }
 
@@ -153,30 +154,68 @@ fn run(cli: Cli) -> Result<()> {
         let _ = writeln!(io::stderr().lock(), "{notice}");
     })
     .context("installing the signal handler")?;
+    let vast_key = vast::configured_key()?;
     let clock = SystemClock;
-    let cloud = RunpodRest::new(API_BASE, &api_key, &clock);
+    let runpod = RunpodRest::new(API_BASE, &api_key, &clock);
+    let vast = vast_key.map(|key| VastRest::new(vast::API_BASE, &key, &clock));
     let events = Events::new(&repo.join("results"), &clock, true);
-    let result = dispatch(&repo, &cloud, &clock, &events, &interrupted, cli.command);
+    let result = dispatch(
+        &repo,
+        &runpod,
+        vast.as_ref(),
+        &clock,
+        &events,
+        &interrupted,
+        cli.command,
+    );
     if let Err(e) = &result {
         pod::report_error(&events, issue.as_deref(), e);
     }
     result
 }
 
+/// The Vast client, once its key's account checks out against every ledger. A command that only ends pods keeps it
+/// either way, as with RunPod; any other command sets it aside on a failed check, so a Vast outage or a stray key
+/// never stops a RunPod-only command, and nothing on Vast is touched.
+fn usable_vast<'v>(
+    vast: Option<&'v VastRest<'v>>,
+    repo: &Path,
+    events: &Events,
+    issue: Option<&str>,
+    ends_pods: bool,
+) -> Option<(&'v VastRest<'v>, Option<String>)> {
+    let vast = vast?;
+    match pod::vast_key_account(vast, repo, events, issue, ends_pods) {
+        Ok(account) => Some((vast, account)),
+        Err(e) => {
+            let detail = format!("Vast is set aside for this command, and its pods are left alone: {e:#}");
+            events.emit(issue, Kind::Warn, json!({ "detail": detail }));
+            None
+        }
+    }
+}
+
 fn dispatch(
     repo: &Path,
-    cloud: &RunpodRest,
+    runpod: &RunpodRest,
+    vast: Option<&VastRest>,
     clock: &SystemClock,
     events: &Events,
     interrupted: &AtomicBool,
     command: Command,
 ) -> Result<()> {
     let ends_pods = matches!(command, Command::Down { .. } | Command::Reap);
-    let account = pod::key_account(cloud, repo, events, command.issue(), ends_pods)?;
+    let account = pod::key_account(runpod, repo, events, command.issue(), ends_pods)?;
+    let (vast, vast_account) = usable_vast(vast, repo, events, command.issue(), ends_pods).unzip();
+    let clouds = Providers {
+        runpod,
+        vast: vast.map(|vast| vast as &dyn VastApi),
+        vast_account: vast_account.flatten(),
+    };
     let remote = SshRemote::from_env();
     let ctx = Ctx {
         repo,
-        cloud,
+        cloud: &clouds,
         remote: &remote,
         clock,
         events,

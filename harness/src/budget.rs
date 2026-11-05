@@ -1,11 +1,11 @@
 use anyhow::{Result, bail, ensure};
 use serde_json::json;
 
-use crate::cloud::{Offer, find_offers};
+use crate::cloud::{Candidate, find_candidates};
 use crate::events::Kind;
 use crate::ledger::{Budget, plan_reservation};
-use crate::pod::{Ctx, cents, reconcile_billing};
-use crate::spec::{IssueSpec, is_slug};
+use crate::pod::{Ctx, NothingInStock, cents, reconcile_billing};
+use crate::spec::{IssueSpec, Provider, is_slug};
 
 /// Records Aditya's approval. A budget cut below what is already spent and reserved does not shorten a live
 /// pod's deadline: the watchdog already holds it, so the warning says how to end the pod sooner.
@@ -54,8 +54,13 @@ pub fn show(ctx: &Ctx, issue: &str) -> Result<()> {
         .pods
         .iter()
         .map(|p| {
-            json!({"pod": p.name, "state": p.state, "gpu": p.gpu, "rate_usd_hr": p.rate_usd_hr,
-                   "deadline": p.deadline, "cost_usd": p.cost_usd.map(cents), "cost_source": p.cost_source})
+            let mut pod = json!({"pod": p.name, "state": p.state, "gpu": p.gpu, "rate_usd_hr": p.rate_usd_hr,
+                   "deadline": p.deadline, "cost_usd": p.cost_usd.map(cents), "cost_source": p.cost_source});
+            if let Some(placement) = ledger.vast.pods.get(&p.name) {
+                pod["provider"] = json!(Provider::Vast);
+                pod["machine"] = json!(placement.machine);
+            }
+            pod
         })
         .collect();
     ctx.events.emit(
@@ -72,48 +77,55 @@ pub fn show(ctx: &Ctx, issue: &str) -> Result<()> {
 
 /// Works before any budget exists, since its figures are what Aditya approves the budget from.
 pub fn quote(ctx: &Ctx, spec: &IssueSpec) -> Result<()> {
-    let offers = find_offers(ctx.cloud, &spec.pod)?;
-    if offers.is_empty() {
-        bail!(
-            "nothing in the preference list of issues/{}/harness.toml is in stock",
-            spec.issue
-        );
+    let candidates = find_candidates(ctx.cloud, &spec.pod)?;
+    if candidates.is_empty() {
+        return Err(NothingInStock {
+            issue: spec.issue.clone(),
+        }
+        .into());
     }
     let remaining = ctx.ledger(&spec.issue).load()?.remaining_usd().ok();
-    emit_quote(ctx, spec, &offers, remaining)
+    emit_quote(ctx, spec, &candidates, remaining)
 }
 
-/// What a reservation for the first offer would hold. With no budget, the planned hours alone set the deadline,
-/// so the worst case is rate x margin x planned hours and what remains is unknown.
-pub fn emit_quote(ctx: &Ctx, spec: &IssueSpec, offers: &[Offer], remaining: Option<f64>) -> Result<()> {
-    let Some(first) = offers.first() else {
+/// What a reservation for the first candidate would hold. With no budget, the planned hours alone set the
+/// deadline, so the worst case is rate x margin x planned hours and what remains is unknown.
+pub fn emit_quote(ctx: &Ctx, spec: &IssueSpec, candidates: &[Candidate], remaining: Option<f64>) -> Result<()> {
+    let Some(first) = candidates.first() else {
         bail!("no offer to quote for {}", spec.issue);
     };
     let plan = plan_reservation(
         ctx.clock.now(),
         spec.planned_hours,
         remaining.unwrap_or(f64::INFINITY),
-        first.rate_usd_hr,
+        first.rate_usd_hr(),
     )?;
-    let fallbacks: Vec<String> = offers[1..]
-        .iter()
-        .map(|o| {
-            let mut line = format!("{} {} ${:.2}/hr", o.gpu, o.cloud.as_str(), o.rate_usd_hr);
-            if !o.data_centers.is_empty() {
-                line.push_str(&format!(" in {}", o.data_centers.join(", ")));
+    let fallbacks: Vec<String> = candidates[1..].iter().map(Candidate::describe).collect();
+    let fields = match first {
+        Candidate::Runpod(first) => {
+            let mut fields = json!({
+                "gpu": first.gpu, "cloud": first.cloud, "count": first.count, "rate_usd_hr": first.rate_usd_hr,
+                "deadline": plan.deadline, "worst_case_usd": cents(plan.reserved_usd),
+                "remaining_usd": remaining.map(cents), "fallbacks": fallbacks,
+            });
+            if !first.data_centers.is_empty() {
+                fields["data_centers"] = json!(first.data_centers);
             }
-            line
-        })
-        .collect();
-    let mut fields = json!({
-        "gpu": first.gpu, "cloud": first.cloud, "count": first.count, "rate_usd_hr": first.rate_usd_hr,
-        "deadline": plan.deadline, "worst_case_usd": cents(plan.reserved_usd),
-        "remaining_usd": remaining.map(cents), "fallbacks": fallbacks,
-    });
-    if !first.data_centers.is_empty() {
-        fields["data_centers"] = json!(first.data_centers);
-    }
+            fields
+        }
+        // Downloads bill on top of the hourly rate the reservation covers, so their price is part of the quote.
+        Candidate::Vast(first) => json!({
+            "gpu": first.gpu, "provider": Provider::Vast, "count": first.count, "rate_usd_hr": first.rate_usd_hr,
+            "machine": first.machine_id, "offer": first.offer_id, "reliability": first.reliability(),
+            "inet_down_mbps": first.inet_down, "download_usd_tb": first.internet_down_cost_per_tb,
+            "location": first.geolocation, "deadline": plan.deadline, "worst_case_usd": cents(plan.reserved_usd),
+            "remaining_usd": remaining.map(cents), "fallbacks": fallbacks,
+        }),
+    };
     ctx.events.emit(Some(&spec.issue), Kind::Quote, fields);
+    let Candidate::Runpod(first) = first else {
+        return Ok(());
+    };
     if !first.unlisted_avoided.is_empty() {
         ctx.warn(
             &spec.issue,
