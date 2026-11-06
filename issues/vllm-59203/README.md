@@ -210,4 +210,51 @@ NCCL); a torch profile window per arm, as xzwgit took, would show it.
 
 ## Results
 
-None yet.
+### 2026-11-06, 8x RTX PRO 6000 Server Edition, Vast machine 57498 (California)
+
+Box: dual-socket AMD EPYC 9554, 2 NUMA nodes, GPUs 0-3 on socket 0 and 4-7 on socket 1 (`NODE` within a socket,
+`SYS` across), driver 580.105.08, `topo -p2p r` OK on all 28 pairs, 1.45 TB RAM. vLLM v0.33.0 plus the #60762
+backport, TP8, CUDA graphs, DSpark off. Weights came down at 246 MB/s; setup took 40 min. Boots: b0 567 s (cold),
+b2 231 s, b1 151 s. Every request in every row completed (0 failed), GSM8K 48/50 in all three arms. One rep per arm,
+paired on this box only; c=1 rows are 8 requests, the 32K row 6. 1.24 h on this box, $17.51 (estimate); the issue
+spent $23.67 including three boxes that failed before setup (one slow HF download, two SSH key-mode refusals that
+harness ad3cf4c now repairs).
+
+| Arm | Row | Median ITL (ms) | vs b0 | Output tok/s | vs b0 | Median TTFT (ms) | vs b0 |
+|---|---|---|---|---|---|---|---|
+| b0 defaults (SHM) | 1K/512 c=1 | 10.56 | | 92.7 | | 129 | |
+| b0 | c=8 | 16.32 | | 465.8 | | 520 | |
+| b0 | c=32 | 29.04 | | 978.2 | | 1,292 | |
+| b0 | c=64 | 44.50 | | 1,249.9 | | 1,334 | |
+| b0 | 32K/256 c=1 | 10.63 | | 57.6 | | 1,775 | |
+| b2 SYS + FlashInfer PCIe IPC | 1K/512 c=1 | 8.33 | -21.1% | 116.9 | +26.1% | 126 | -3.0% |
+| b2 | c=8 | 15.42 | -5.5% | 488.9 | +5.0% | 591 | +13.7% |
+| b2 | c=32 | 24.51 | -15.6% | 1,118.1 | +14.3% | 1,546 | +19.7% |
+| b2 | c=64 | 37.70 | -15.3% | 1,393.2 | +11.5% | 1,618 | +21.3% |
+| b2 | 32K/256 c=1 | 8.39 | -21.1% | 60.8 | +5.6% | 2,101 | +18.4% |
+| b1 SYS (P2P) | 1K/512 c=1 | 9.48 | -10.2% | 103.1 | +11.2% | 125 | -3.4% |
+| b1 | c=8 | 14.77 | -9.5% | 502.9 | +8.0% | 594 | +14.2% |
+| b1 | c=32 | 25.52 | -12.1% | 1,067.7 | +9.1% | 1,381 | +7.0% |
+| b1 | c=64 | 40.51 | -9.0% | 1,312.0 | +5.0% | 2,046 | +53.4% |
+| b1 | 32K/256 c=1 | 9.54 | -10.3% | 57.0 | -1.0% | 2,093 | +17.9% |
+
+Transports (server NCCL INFO): b0 `SHM/direct` on every connection, b1 and b2 `P2P/CUMEM`. b2's TP group dispatch
+list starts `FLASHINFER_PCIE_IPC` and logged `Initialized FlashInfer PCIe IPC all-reduce for TP8`. Setup's eager
+probe: pynccl at batch 1 34.9 us (b0) vs 18.9 us (b1), FlashInfer 13.4 us (b2); at batch 8192 (80 MiB) 4,545 us over
+SHM vs 6,288 us over P2P.
+
+- H0 holds: the stack boots and serves at TP8 on sm_120 with the backport, GSM8K 0.96.
+- H1 holds: both levers cut c=1 median ITL 21% (10.56 to 8.33 ms), +26% single-stream tok/s, and still 15% at c=32-64.
+- H2 holds: `NCCL_P2P_LEVEL=SYS` alone cuts decode ITL 9-12% at TP8, against 2-3% at TP4 (issues/sglang-33422).
+- H3 holds: FlashInfer's lead over plain P2P is 12% at c=1 and about 4% at c=32; at c=8 plain P2P was ahead.
+- H4 is killed on this host: prefill got slower with P2P, not faster. The 32K TTFT rose 18% in both P2P arms, and
+  the probe shows why: an 80 MiB all-reduce takes 6.3 ms over P2P against 4.5 ms over SHM on this dual-socket box,
+  while issues/sglang-33422's single-socket 4x box had P2P ahead at 32 MiB (1.3 vs 2.9 ms). Cross-socket P2P wins for
+  decode-size messages and loses for prefill-size ones here. TTFT at c=8-64 also includes queueing behind prefill,
+  so those deltas mix both effects.
+- H5 holds: 48/50 in every arm, no failed request.
+- H6 holds: b2 ran FlashInfer.
+
+Not run: b3 (FlashInfer alone, NCCL left on SHM). It is the arm that could keep b2's decode gain without the prefill
+loss, since FlashInfer only takes decode-size inputs and NCCL would stay on SHM for prefill. Setup said it fit; the
+unattended chain ran only the default three.

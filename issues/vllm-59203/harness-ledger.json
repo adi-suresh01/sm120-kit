@@ -1,0 +1,97 @@
+{
+  "issue": "vllm-59203",
+  "budget": {
+    "usd": 70.0,
+    "approved_at": "2026-11-06T02:46:04Z",
+    "note": "Approved by Aditya 2026-11-05 PT: Vast 8x RTX PRO 6000 (Max-Q/S/WS; S quoted $14.04/hr Texas, cap $15/hr), planned 3.5 h, stage-2 TP8 decode arms b0-default, b2-sys-fi, b1-p2p-sys on DeepSeek-V4.1-Flash, vLLM v0.33.0, unattended via harness watch; expected ~$46, worst case ~$55.5 per box; credit topped up to $69"
+  },
+  "pods": [
+    {
+      "name": "sm120-vllm-59203-ba7b0d",
+      "provider": "vast",
+      "id": "59356349",
+      "state": "terminated",
+      "gpu": "RTX PRO 6000 S",
+      "count": 8,
+      "cloud": "SECURE",
+      "rate_usd_hr": 14.044444444444448,
+      "reserved_usd": 55.50471111111113,
+      "reserved_at": "2026-11-06T02:46:13Z",
+      "deadline": "2026-11-06T06:16:13Z",
+      "terminated_at": "2026-11-06T02:55:35Z",
+      "cost_usd": 2.1924938271604946,
+      "cost_source": "estimate",
+      "placement": {
+        "offer": 55456390,
+        "machine": 153643,
+        "host": 620186
+      }
+    },
+    {
+      "name": "sm120-vllm-59203-101fc8",
+      "provider": "vast",
+      "id": "59357335",
+      "state": "terminated",
+      "gpu": "RTX PRO 6000 Max-Q",
+      "count": 8,
+      "cloud": "COMMUNITY",
+      "rate_usd_hr": 13.274074074074074,
+      "reserved_usd": 65.30844444444445,
+      "reserved_at": "2026-11-06T02:59:10Z",
+      "deadline": "2026-11-06T05:59:10Z",
+      "terminated_at": "2026-11-06T03:07:12Z",
+      "cost_usd": 1.7772510288065841,
+      "cost_source": "estimate",
+      "placement": {
+        "offer": 59315876,
+        "machine": 137973,
+        "host": 520617
+      }
+    },
+    {
+      "name": "sm120-vllm-59203-948cff",
+      "provider": "vast",
+      "id": "59360417",
+      "state": "terminated",
+      "gpu": "RTX PRO 6000 S",
+      "count": 8,
+      "cloud": "COMMUNITY",
+      "rate_usd_hr": 14.103703703703708,
+      "reserved_usd": 45.02581481481483,
+      "reserved_at": "2026-11-06T03:28:58Z",
+      "deadline": "2026-11-06T06:22:58Z",
+      "terminated_at": "2026-11-06T03:38:17Z",
+      "cost_usd": 2.189991769547326,
+      "cost_source": "estimate",
+      "placement": {
+        "offer": 49181770,
+        "machine": 57498,
+        "host": 721504
+      }
+    },
+    {
+      "name": "sm120-vllm-59203-f4300a",
+      "provider": "vast",
+      "id": "59362265",
+      "state": "terminated",
+      "gpu": "RTX PRO 6000 S",
+      "count": 8,
+      "cloud": "COMMUNITY",
+      "rate_usd_hr": 14.103703703703708,
+      "reserved_usd": 45.02581481481483,
+      "reserved_at": "2026-11-06T03:48:26Z",
+      "deadline": "2026-11-06T06:42:26Z",
+      "terminated_at": "2026-11-06T05:02:56Z",
+      "cost_usd": 17.512098765432103,
+      "cost_source": "estimate",
+      "placement": {
+        "offer": 49181770,
+        "machine": 57498,
+        "host": 721504
+      }
+    }
+  ],
+  "vast": {
+    "account": "vast:843318"
+  }
+}
