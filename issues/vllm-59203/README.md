@@ -259,6 +259,40 @@ SHM vs 6,288 us over P2P.
 - H5 holds: 48/50 in every arm, no failed request.
 - H6 holds: b2 ran FlashInfer.
 
-Not run: b3 (FlashInfer alone, NCCL left on SHM). It is the arm that could keep b2's decode gain without the prefill
-loss, since FlashInfer only takes decode-size inputs and NCCL would stay on SHM for prefill. Setup said it fit; the
-unattended chain ran only the default three.
+### 2026-11-06, second rental: b3 on the same host
+
+The watch rented machine 57498 again, so these rows share a host with the run above. Weights came down at 305 MB/s;
+setup took 35 min. Boots: b0 572 s (cold), b3 236 s, b2 150 s. Every request completed, GSM8K 49/50 (b0, b3) and 48/50
+(b2). One rep per arm. 1.14 h, $16.01 (estimate); the issue has spent $39.68.
+
+| Arm | Row | Median ITL (ms) | vs b0 | Output tok/s | vs b0 | Median TTFT (ms) | vs b0 |
+|---|---|---|---|---|---|---|---|
+| b0 defaults (SHM) | 1K/512 c=1 | 10.28 | | 95.3 | | 122 | |
+| b0 | c=8 | 16.38 | | 462.3 | | 498 | |
+| b0 | c=32 | 29.97 | | 961.0 | | 1,307 | |
+| b0 | c=64 | 43.87 | | 1,266.5 | | 1,687 | |
+| b0 | 32K/256 c=1 | 10.35 | | 58.5 | | 1,769 | |
+| b3 FlashInfer PCIe IPC, NCCL on SHM | 1K/512 c=1 | 8.21 | -20.1% | 118.5 | +24.3% | 126 | +3.5% |
+| b3 | c=8 | 15.26 | -6.8% | 505.0 | +9.2% | 504 | +1.2% |
+| b3 | c=32 | 24.37 | -18.7% | 1,135.9 | +18.2% | 1,108 | -15.3% |
+| b3 | c=64 | 36.82 | -16.1% | 1,470.2 | +16.1% | 1,764 | +4.6% |
+| b3 | 32K/256 c=1 | 8.29 | -19.9% | 66.5 | +13.7% | 1,769 | +0.0% |
+| b2 SYS + FlashInfer PCIe IPC | 1K/512 c=1 | 8.16 | -20.6% | 119.1 | +25.0% | 129 | +6.2% |
+| b2 | c=8 | 15.19 | -7.3% | 491.9 | +6.4% | 597 | +19.7% |
+| b2 | c=32 | 24.04 | -19.8% | 1,127.8 | +17.4% | 1,385 | +6.0% |
+| b2 | c=64 | 35.93 | -18.1% | 1,429.9 | +12.9% | 1,609 | -4.6% |
+| b2 | 32K/256 c=1 | 8.22 | -20.6% | 61.3 | +4.8% | 2,111 | +19.3% |
+
+Transports: b0 and b3 `SHM/direct` on every connection, b2 `P2P/CUMEM`. b3 logged `Initialized FlashInfer PCIe IPC
+all-reduce for TP8` and its dispatch list starts `FLASHINFER_PCIE_IPC`. Probe at batch 8192 (80 MiB): pynccl 4,527 us
+(b0), 4,548 us (b3), 6,262 us (b2); FlashInfer at batch 1 13.4 us (b3) and 13.2 us (b2).
+
+- b3 keeps b2's decode gain: c=1 median ITL -20.1% against b2's -20.6%, and -16 to -19% at c=32-64 against -18 to
+  -20%.
+- b3 has no prefill cost: the 32K TTFT matches b0 (1,769 ms both) while b2 is 19% slower, as H4 predicted. FlashInfer
+  takes only decode-size inputs, and NCCL stays on SHM for prefill-size ones.
+- So on this dual-socket host the setting is `VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC=1` alone. `NCCL_P2P_LEVEL=SYS`
+  adds nothing to decode once FlashInfer is on, and costs prefill.
+- The first run replicates: b0 c=1 ITL 10.28 vs 10.56 ms and 32K TTFT 1,769 vs 1,775 ms; b2 c=1 -20.6% vs -21.1%.
+- TTFT at c=8-64 is noisy with one rep (b3 c=32 -15.3%, b2 c=64 -4.6% here against +21.3% in the first run), since it
+  includes queueing behind other requests' prefill; the 32K c=1 row is the clean prefill measure.
