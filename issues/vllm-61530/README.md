@@ -109,7 +109,9 @@ downloads. Setup about 5 min plus the download (25 min at 300 MB/s), a0 about 30
 the last exec and down: about 1.5 h for a0 and a1. `planned_hours = 2.0`.
 
 On 2026-11-06 no Vast offer met the floors (the four 4x offers were either $39-41/TB downloads or 569 Mbps), and
-`harness quote` gave RunPod US-NE-1 at $9.96/hr, $21.91 worst case. Budget: $22.
+`harness quote` gave RunPod US-NE-1 at $9.96/hr, $21.91 worst case. Budget: $22. RunPod refused every create from
+18:32 to 19:06Z (listed stock, no instance); a Vast 4x Max-Q at $7.15/hr with $4.10/TB downloads and 8.5 Gbps then met the
+floors and rented (Results).
 
 ## Run
 
@@ -149,4 +151,67 @@ Never leave the names out: `exec` with none runs every variant in file order unt
 
 ## Results
 
-Not run yet.
+Run 2026-11-06 19:14-19:42Z on Vast machine 150216: 4x RTX PRO 6000 Blackwell **Max-Q** Workstation Edition
+(300 W default, 325 W set), driver 595.91.07, 2x AMD EPYC 9255, 755 GiB host RAM (512 GiB container limit). GPUs 0-1
+sit on NUMA 0 and 2-3 on NUMA 1, so this TP4 crosses the socket (SYS between the halves), which a TP4 per NUMA half
+of an 8x box does not. P2P read OK on 12/12 pairs; NCCL ran its ring over SHM/direct. The 429 GB checkpoint
+downloaded in 6 min. 28 min rented, **$4.83** of the $22 budget.
+
+| Arm | Verdict | Boot | GSM8K 50 | Weights / GPU | CUDA graphs | KV cache | KV tokens (128K requests) |
+|---|---|---:|---:|---:|---:|---:|---:|
+| a0-fp8idx | OK | 411 s (cold) | 49/50 | 75.32 GiB | 1.12 GiB | 8.21 GiB | 1,319,738 (10.07x) |
+| a1-fp8idx-fi | OK | 281 s (warm page cache) | 48/50 | 75.32 GiB | 1.03 GiB | 8.21 GiB | 1,478,167 (11.28x) |
+
+a0's boot: weights 219 s (Engram tables pinned within the first minute), then 142 s of profiling, TileLang and JIT
+warmup, and graph capture. nvidia-smi after GSM8K: 91,350 MiB on GPU 0 and 90,594 MiB on the others, of 97,887.
+Both arms report the same 8.21 GiB and the same KV group layout (`(32, 32, 32, 32, 32, 32, 32, 64, 8)`, 64-token
+blocks) but different token counts; the logs do not say why.
+
+Decode (`decode_bench.py`, one rep per row; ITL and TTFT are medians):
+
+| Row | a0 tok/s | a0 ITL ms | a1 tok/s | a1 ITL ms | ITL a1 vs a0 | a0 TTFT ms | a1 TTFT ms |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 1K/512 c=1 | 118.0 | 8.32 | 130.6 | 7.50 | -9.9% | 88.5 | 86.9 |
+| 1K/512 c=8 | 593.6 | 12.59 | 604.1 | 12.40 | -1.5% | 435.1 | 434.4 |
+| 1K/512 c=32 | 1277.6 | 21.92 | 1318.5 | 20.97 | -4.3% | 941.3 | 942.1 |
+| 32K/256 c=1 | 68.7 | 8.38 | 72.9 | 7.56 | -9.8% | 1606.7 | 1596.8 |
+
+Every request completed (0 failed). a1 logged `Initialized FlashInfer PCIe IPC all-reduce for TP4, hidden_dim=5120,
+dtype=torch.bfloat16, max_tokens=256`.
+
+Host memory, from the container's cgroup every 5 s (`memory.jsonl`) and the snapshot after GSM8K:
+
+| GiB | a0 | a1 |
+|---|---:|---:|
+| Engram pinned, from the log (8 lines of 12.16 GiB, two per rank) | 97.3 | 97.3 |
+| cgroup shmem, peak | 97.6 | 97.6 |
+| cgroup anon, peak | 18.6 | 17.1 |
+| anon + shmem, peak (not reclaimable) | 116.3 | 114.7 |
+| page cache, peak (reclaimable, the weights read through) | 358.4 | 359.1 |
+| RSS per TP worker | 29.2 | 28.8 |
+
+The memory guard never fired (93% of 512 GiB).
+
+### Hypotheses
+
+- H1 holds: with #61530 the checkpoint loads and serves at TP4 on sm_120, GSM8K 49/50 and 48/50.
+- H2 holds: 75.32 GiB of weights per GPU, inside 74-81, and a KV cache for about ten 128K requests at 0.92.
+- H3 holds: one TP4 engine pins 97.3 GiB of Engram tables and holds 116 GiB of host memory it cannot give back. Two
+  independent TP4 engines need about 230 GiB, so they do not fit a 125 GiB host with the tables in host memory;
+  even one engine leaves about 9 GiB of such a host for everything else.
+- H4 holds at half the TP8 size: FlashInfer's PCIe IPC all-reduce cut c=1 ITL 9.9% (TP8 on a dual-socket 8x box:
+  20%) with 32K TTFT unchanged.
+- H5 not tested: a0 fit, so f0 and f1 did not run.
+
+### What the 125 GiB host could use instead (vLLM source at 4fab5a07, none of it run)
+
+- `cpu_offload=false` puts 24.3 GiB of Engram tables per GPU back on top of 75.3, more than the card's 95.6 GiB.
+- `disk_offload` is rejected for anything but Qwen4Exp (`vllm/config/engram.py:90-94`).
+- `dp_shared_memory` needs `data_parallel_size > 1` (`engram.py:108-110`): one DP2 x TP4 server holding one host copy
+  (97.6 GiB) plus eight workers' anon memory (about 37 GiB at the 4.6 GiB per worker measured here), about 135 GiB,
+  and one server is not two independent engines. `embedding_across_dp` shards the tables over all 8 ranks for the
+  same one copy and adds an Engram collective per step across the halves.
+
+The speed rows come from 300 W cards on a TP4 that crosses the socket; the memory rows carry to the 600 W Server
+Edition (same 97,887 MiB). Not covered: reasoning-effort, tool, streaming, and vision smokes, contexts past 128K, MTP,
+c=16.
