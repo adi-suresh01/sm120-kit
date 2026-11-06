@@ -1,0 +1,127 @@
+issue = "vllm-61530"
+# DeepSeek-V4.1-Flash-1017 at TP4 on four PCIe-only RTX PRO 6000s, from NVIDIA's NVFP4 checkpoint (about 400 GiB),
+# which needs vllm#61530 for its MXFP4 Engram tables and was validated only on GB300. The question is whether the
+# model fits on half of an 8x box, with how much GPU and host memory left (README.md). Setup is about 5 min plus the
+# 429 GB download (about 25 min at the 300 MB/s vllm-59203's host gave); a0 takes about 30 min with its cold boot and
+# every later arm about 25. 2.0 h covers setup, a0, and a1 with a download twice as slow, or a0 failing to fit and
+# f0 and f1 in its place; setup.sh stops a download that cannot end 65 min before the deadline.
+planned_hours = 2.0
+
+[pod]
+# vLLM main at 4fab5a07 (2026-11-06 nightly, CUDA 13.0 build), 42 commits past the commit #61530 is rebased on, with
+# no change to the one file it edits. v0.33.0 is 868 commits behind that base.
+image = "vllm/vllm-openai:nightly-4fab5a07475822c6eaa971dceb2e2220d0446808@sha256:48c0a41e8268faf50317ab83dc12c54fe6549b1131b38d06abe5ed15e3009700"
+count = 4
+min_cuda = "13.0"
+# The image (about 28 GB unpacked), 429.0 GB of weights (setup.sh keeps them on container disk), and the JIT and
+# compile caches. Vast adds the volume to the same disk.
+container_disk_gb = 520
+# HF_HOME's small files and the logs.
+volume_gb = 20
+needs_hf_token = false
+# a0 needs no peer access; a1's FlashInfer PCIe IPC all-reduce does, and setup.sh leaves a1 out on a box without it,
+# so requiring P2P here would only shrink the offers.
+require_p2p = false
+# 153643 (Texas) gave HF 47 MB/s; 137973 (Norway) never accepted the account SSH key (vllm-59203, 11-06).
+avoid_machines = [153643, 137973]
+# The image (9.6 GB compressed) and the checkpoint at the pinned revision (429.0 GB in 48 shards).
+expected_download_gb = 440
+# Server Edition first: it is the card in the 8x boxes this question is about. The host RAM floor (GiB) matches
+# setup.sh's: about 215 GiB at the end of the load in the worst case (setup.sh, RAM) has to stay under the memory
+# guard's 93% kill line, and a box under the floor would be rented and then refused. Downloads are capped at $10/TB
+# so the checkpoint costs at most $4.3; on 11-06 the fast 4x hosts charged $39-41/TB, $17 for the checkpoint alone.
+# RunPod's Server Edition comes last: no download charge, and its 4x container held 702 GiB on vllm-56771's TP4 run.
+# The $7.5/hr cap keeps watch's reservation (cap x hours x 1.1 plus downloads at the cap, $20.9) inside the $22
+# budget.
+gpus = [
+  { provider = "vast", id = "RTX PRO 6000 S", max_usd_hr = 7.5, min_reliability = 0.95, min_inet_down_mbps = 1500, max_download_usd_tb = 10.0, min_cpu_ram_gb = 280 },
+  { provider = "vast", id = "RTX PRO 6000 WS", max_usd_hr = 7.5, min_reliability = 0.95, min_inet_down_mbps = 1500, max_download_usd_tb = 10.0, min_cpu_ram_gb = 280 },
+  { provider = "vast", id = "RTX PRO 6000 Max-Q", max_usd_hr = 7.5, min_reliability = 0.95, min_inet_down_mbps = 1500, max_download_usd_tb = 10.0, min_cpu_ram_gb = 280 },
+  { id = "NVIDIA RTX PRO 6000 Blackwell Server Edition", cloud = "SECURE" },
+]
+# Its one 4x host reached HF at 15 MB/s on 10-16 (issues/vllm-56771).
+avoid_data_centers = ["EUR-IS-2"]
+
+[server]
+package = "vllm"
+model = "nvidia/DeepSeek-V4.1-Flash-1017-NVFP4"
+launch = ["vllm", "serve", "nvidia/DeepSeek-V4.1-Flash-1017-NVFP4"]
+# NVIDIA's model-card command (four GB300s) with what an RTX PRO 6000 needs instead: no FLASHINFER_MLA_SPARSE_DSV41
+# pin, no indexer_sparse_logits (SM100 only, vllm/config/attention.py at 4fab5a07), and the fp8 indexer cache, since
+# vLLM refuses mxfp4 there outside sm_10x (v1/attention/backends/mla/indexer.py:101-106). Context capped at 128K, as
+# on our TP8 runs (issues/vllm-59203), so the KV cache does not have to hold the 1M default. The memory flags are per
+# variant. The revision is main on 2026-11-06.
+base_flags = [
+  "--revision", "3ae9c0d3fbbea5370bd06e679d22044db15883f1",
+  "--trust-remote-code",
+  "--tensor-parallel-size", "4",
+  "--tokenizer-mode", "deepseek_v41",
+  "--kv-cache-dtype", "fp8",
+  "--attention-config", '{"indexer_kv_dtype":"fp8"}',
+  "--engram-config.cpu_offload", "true",
+  "--max-model-len", "131072",
+  "--max-num-seqs", "128",
+  "--enable-auto-tool-choice",
+  "--tool-call-parser", "deepseek_v41",
+  "--reasoning-parser", "deepseek_v41",
+]
+port = 8000
+# "peer access is not supported" is FlashInfer's PCIe IPC workspace on a pair without P2P; "No common block size" is
+# the sm_120 block-size negotiation. Each ends the boot at once instead of at the timeout.
+fail_pattern = "illegal memory access|cudaErrorIllegalAddress|CUDA error: |peer access is not supported|No common block size"
+# A cold boot reads 400 GiB, pins about 97 GiB of Engram tables, and JIT-compiles; vllm-59203's 8x cold boot took
+# 572 s at 475 GiB.
+boot_timeout_s = 2400
+
+# Every arm: #61530 on the nightly, exact-size pinned Engram tables (torch otherwise rounds each pinned slice up to a
+# power of two), NCCL's INFO lines to a line-buffered file per rank (hooks.sh), and GSM8K 50 before the rows, so a
+# checkpoint that loads but decodes wrong cannot pass.
+
+# The deployment shape: vision on (a server that takes images pays for the encoder too), 0.92 of each GPU, NCCL's
+# defaults.
+[variants.a0-fp8idx]
+flags = ["--gpu-memory-utilization", "0.92"]
+patches = ["pr61530-mxfp4-engram"]
+[variants.a0-fp8idx.env]
+PYTORCH_ALLOC_CONF = "pinned_max_round_threshold_mb:64"
+NCCL_DEBUG = "INFO"
+NCCL_DEBUG_SUBSYS = "INIT,ENV,GRAPH"
+[variants.a0-fp8idx.quality]
+gsm8k = 50
+
+# a0 plus FlashInfer's PCIe IPC all-reduce for the CUDA graph batches, the setting that cut c=1 ITL 20% at TP8 on a
+# dual-socket 8x box with prefill unchanged (issues/vllm-59203, b3).
+[variants.a1-fp8idx-fi]
+flags = ["--gpu-memory-utilization", "0.92"]
+patches = ["pr61530-mxfp4-engram"]
+[variants.a1-fp8idx-fi.env]
+PYTORCH_ALLOC_CONF = "pinned_max_round_threshold_mb:64"
+NCCL_DEBUG = "INFO"
+NCCL_DEBUG_SUBSYS = "INIT,ENV,GRAPH"
+VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC = "1"
+[variants.a1-fp8idx-fi.quality]
+gsm8k = 50
+
+# Only when a0 cannot fit its KV cache: weights could take 74-81 GiB of the 87.4 GiB that 0.92 leaves (README.md,
+# Memory), so this drops the vision encoder and its profiling and gives vLLM 0.95 of each GPU, 2.8 GiB more.
+[variants.f0-fp8idx-lm]
+flags = ["--gpu-memory-utilization", "0.95", "--language-model-only"]
+patches = ["pr61530-mxfp4-engram"]
+[variants.f0-fp8idx-lm.env]
+PYTORCH_ALLOC_CONF = "pinned_max_round_threshold_mb:64"
+NCCL_DEBUG = "INFO"
+NCCL_DEBUG_SUBSYS = "INIT,ENV,GRAPH"
+[variants.f0-fp8idx-lm.quality]
+gsm8k = 50
+
+# f0 plus FlashInfer, a1's question on f0's memory settings.
+[variants.f1-fp8idx-lm-fi]
+flags = ["--gpu-memory-utilization", "0.95", "--language-model-only"]
+patches = ["pr61530-mxfp4-engram"]
+[variants.f1-fp8idx-lm-fi.env]
+PYTORCH_ALLOC_CONF = "pinned_max_round_threshold_mb:64"
+NCCL_DEBUG = "INFO"
+NCCL_DEBUG_SUBSYS = "INIT,ENV,GRAPH"
+VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC = "1"
+[variants.f1-fp8idx-lm-fi.quality]
+gsm8k = 50

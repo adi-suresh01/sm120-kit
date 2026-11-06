@@ -1,0 +1,9 @@
+{
+  "issue": "vllm-61530",
+  "budget": {
+    "usd": 22.0,
+    "approved_at": "2026-11-06T17:38:08Z",
+    "note": "Approved by Aditya 2026-11-06 09:40 PT: 4x RTX PRO 6000 (Vast S/WS/Max-Q with cheap fast downloads if in stock, else RunPod SECURE Server Edition US-NE-1 at 9.96/hr), planned 2.0 h, worst case 21.91; DSv4.1-Flash-1017 NVFP4 TP4 on nightly 4fab5a07 + vllm#61530, arms a0-fp8idx then a1-fp8idx-fi (if P2P OK) then o1-mxfp4idx if time; RunPod credit 24.92, Vast 31.04"
+  },
+  "pods": []
+}
