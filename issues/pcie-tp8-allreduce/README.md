@@ -177,6 +177,34 @@ no box live it does nothing.
 | `pairwise/<a>-<b>.log`, `jobs/setup.log` | per-pair logs; setup's own log |
 | `<run log stem>.nccl.<host>.<pid>.log` | NCCL INFO for that run: transports, and for the default arm topology, graph, and tuning |
 
+## Check your own box
+
+Two checks on any multi-GPU PCIe box, a few minutes, no model download: whether NCCL is using GPU peer-to-peer, and
+what it would buy.
+
+1. Peer access: `nvidia-smi topo -p2p r` should read `OK` for every pair. A pair that reads `NS` has no P2P to
+   enable, so `NCCL_P2P_LEVEL=SYS` can't help it, and vLLM's `VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC=1` aborts the
+   boot on such a host until vllm#65192 (a fallback to NCCL) lands.
+2. Transport and time, in the `vllm/vllm-openai` image (or any image with nvcc, make, and NCCL), with
+   `build_nccl_tests.sh` from this folder:
+
+```bash
+bash build_nccl_tests.sh /tmp/nt
+export LD_LIBRARY_PATH=$(cat /tmp/nt/nccl_lib_dir)${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+n=$(nvidia-smi -L | wc -l)
+# PXB is NCCL's own default above 2 GPUs; SYS allows P2P between GPUs that meet at a CPU root port or across sockets.
+for level in PXB SYS; do
+  NCCL_P2P_LEVEL=$level NCCL_DEBUG=INFO NCCL_DEBUG_FILE=/tmp/nccl.$level.%h.%p.log \
+    /tmp/nt/bin/all_reduce_perf -t "$n" -g 1 -b 8K -e 1M -f 2 -d bfloat16 -o sum
+  grep -ho 'via [A-Za-z0-9/]*' /tmp/nccl.$level.*.log | sort | uniq -c
+done
+```
+
+`via SHM/direct` means NCCL stages GPU-to-GPU traffic through host memory; `via P2P/IPC` or `via P2P/CUMEM` means
+peer-to-peer. On the box below, the default read SHM on every pair, and `NCCL_P2P_LEVEL=SYS` made decode-size
+all-reduces 1.5-2.2x faster. Serving engines take the same variable. P2P across root ports isn't safe on every host
+(one split-NUMA host hung at NCCL init with it on), so run this before serving with it.
+
 ## Results
 
 ### 2026-11-05, 8x RTX PRO 6000 Server Edition, Vast machine 142634 (Bulgaria)
