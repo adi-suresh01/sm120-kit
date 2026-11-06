@@ -1,0 +1,130 @@
+issue = "vllm-59203"
+# Stage 2 of the TP8 all-reduce study (stage 1: issues/pcie-tp8-allreduce): DeepSeek-V4.1-Flash served at TP8 on 8
+# PCIe-only RTX PRO 6000s, one boot per all-reduce arm, nothing but the env changing between arms. Up about 12 min,
+# setup about 86 (probes, then 510 GB at the ~110 MB/s a 1 Gbps host gives), b0 30 (cold boot), b2 27, b1 27, a second
+# exec and down 6: about 188 min (README.md), with 22 to spare for boots slower than estimated. setup.sh stops a
+# download that cannot end 75 min before the deadline, which keeps b0 and b2; the optional arms run only when setup
+# ends early enough (its last lines say).
+planned_hours = 3.5
+
+[pod]
+# The same release as stage 1 (2026-11-02): vLLM 0.33.0, torch 2.14.0, FlashInfer 0.7.2.post1, pynccl's NCCL 2.31.2.
+image = "vllm/vllm-openai:v0.33.0@sha256:d825baf9ce4b1b6bfc5ecc7b79880c7e6748c65a72d697ce3d47607aafa84c6e"
+count = 8
+min_cuda = "13.0"
+# Vast gives one disk of both: the image (about 30 GB unpacked), 510.3 GB of weights, the JIT and compile caches,
+# and the logs.
+container_disk_gb = 620
+volume_gb = 20
+needs_hf_token = false
+# NCCL_P2P_LEVEL=SYS and FlashInfer's PCIe IPC kernels need peer access on every pair; FlashInfer aborts the boot
+# without it (vllm#65192 is the open fallback), and stage 1's numbers come from a box that read OK on all 28.
+require_p2p = true
+# The image (9.7 GB compressed) and the checkpoint at the pinned revision (510.3 GB in 48 shards).
+expected_download_gb = 525
+# Server Edition first: stage 1's box and the vllm#59203 trace are both 8x Server Edition. The Workstation Edition is
+# the same 600 W GB202; the Max-Q (300 W, the sglang#33422 production card) decodes slower, so its rows are labeled
+# by card. Every 8x offer on 11-06 listed 0.86-1.6 Gbps, so the floor admits them and setup.sh measures what HF
+# actually delivers. 525 GB at the $10/TB cap is $5.25.
+gpus = [
+  { provider = "vast", id = "RTX PRO 6000 S", max_usd_hr = 15.0, min_reliability = 0.95, min_inet_down_mbps = 800, max_download_usd_tb = 10.0 },
+  { provider = "vast", id = "RTX PRO 6000 WS", max_usd_hr = 15.0, min_reliability = 0.95, min_inet_down_mbps = 800, max_download_usd_tb = 10.0 },
+  { provider = "vast", id = "RTX PRO 6000 Max-Q", max_usd_hr = 15.0, min_reliability = 0.95, min_inet_down_mbps = 800, max_download_usd_tb = 10.0 },
+]
+
+[server]
+package = "vllm"
+model = "deepseek-ai/DeepSeek-V4.1-Flash"
+launch = ["vllm", "serve", "deepseek-ai/DeepSeek-V4.1-Flash"]
+# xzwgit's TP8 command on vllm#59203 (09-30, the one the profiler trace ran), minus the local path, served name, API
+# key, host, and port, with the block-size triple our TP4 run booted with (issues/vllm-56771) in place of its
+# attention backend pin. No speculative config: the step stays a plain decode step. The revision is the one
+# issues/vllm-56771 served.
+base_flags = [
+  "--revision", "314113f8a7dadb388215396ba5fbee2c610a04d6",
+  "--trust-remote-code",
+  "--tensor-parallel-size", "8",
+  "--tokenizer-mode", "deepseek_v41",
+  "--block-size", "64",
+  "--kv-cache-dtype", "fp8",
+  "--attention-config", '{"indexer_kv_dtype":"fp8"}',
+  "--engram-config.cpu_offload", "true",
+  "--max-model-len", "131072",
+  "--max-num-seqs", "128",
+  "--gpu-memory-utilization", "0.92",
+  "--language-model-only",
+  "--enable-auto-tool-choice",
+  "--tool-call-parser", "deepseek_v41",
+  "--reasoning-parser", "deepseek_v41",
+]
+port = 8000
+# "peer access is not supported" is how FlashInfer's PCIe IPC workspace aborts on a pair without P2P (vllm#59203,
+# 11-06), and "No common block size" is the v0.33.0 negotiation failing without the patch: either ends the boot at
+# once instead of at the timeout.
+fail_pattern = "illegal memory access|cudaErrorIllegalAddress|CUDA error: |peer access is not supported|No common block size"
+# A cold boot reads 475 GiB, pins about 189 GiB of Engram tables, and JIT-compiles TileLang, DeepGEMM, and
+# torch.compile; Lei-010's 0.32.0 TP8 boot took 872 s and the 0.32.0 negotiation failure came 16.5 min in.
+boot_timeout_s = 2400
+
+# Every arm: v0.33.0 plus the vllm#60762 backport (DSV4.1 cannot negotiate a block size on sm_120 without it),
+# exact-size pinned Engram tables (torch otherwise rounds each slice up to a power of two: about 256 GiB instead of 189
+# at TP8), and NCCL's INFO lines, which hooks.sh sends to a line-buffered file per rank. With COLL left out NCCL logs
+# when it builds communicators and connections, not per collective. GSM8K 50 on each arm before the rows, so a fast
+# but wrong all-reduce cannot pass. b0 runs alone first, then b2 and b1 if it booted (README.md, Run); setup.sh refuses a box
+# where any of their probes fails or hangs.
+
+# NCCL's defaults: pynccl over whatever transport NCCL picks, SHM on stage 1's box.
+[variants.b0-default]
+patches = ["pr60762-dsv41-block64"]
+[variants.b0-default.env]
+PYTORCH_ALLOC_CONF = "pinned_max_round_threshold_mb:64"
+NCCL_DEBUG = "INFO"
+NCCL_DEBUG_SUBSYS = "INIT,ENV,GRAPH"
+[variants.b0-default.quality]
+gsm8k = 50
+
+# Both levers: FlashInfer's PCIe IPC all-reduce for the CUDA graph batches, NCCL over P2P for everything larger.
+[variants.b2-sys-fi]
+patches = ["pr60762-dsv41-block64"]
+[variants.b2-sys-fi.env]
+PYTORCH_ALLOC_CONF = "pinned_max_round_threshold_mb:64"
+NCCL_DEBUG = "INFO"
+NCCL_DEBUG_SUBSYS = "INIT,ENV,GRAPH"
+NCCL_P2P_LEVEL = "SYS"
+VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC = "1"
+[variants.b2-sys-fi.quality]
+gsm8k = 50
+
+# The zero-code lever alone: NCCL's default level (PXB) leaves out pairs that meet at a CPU root port.
+[variants.b1-p2p-sys]
+patches = ["pr60762-dsv41-block64"]
+[variants.b1-p2p-sys.env]
+PYTORCH_ALLOC_CONF = "pinned_max_round_threshold_mb:64"
+NCCL_DEBUG = "INFO"
+NCCL_DEBUG_SUBSYS = "INIT,ENV,GRAPH"
+NCCL_P2P_LEVEL = "SYS"
+[variants.b1-p2p-sys.quality]
+gsm8k = 50
+
+# Optional, first: FlashInfer alone, with prefill and large batches left on NCCL's default (SHM), so b2's gain splits
+# into its two levers.
+[variants.b3-fi-only]
+patches = ["pr60762-dsv41-block64"]
+[variants.b3-fi-only.env]
+PYTORCH_ALLOC_CONF = "pinned_max_round_threshold_mb:64"
+NCCL_DEBUG = "INFO"
+NCCL_DEBUG_SUBSYS = "INIT,ENV,GRAPH"
+VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC = "1"
+[variants.b3-fi-only.quality]
+gsm8k = 50
+
+# Optional, second: b0 again, last, so drift over the run (clocks, thermals, a neighbour on the host) shows as the gap
+# between the two b0 rows.
+[variants.b0-repeat]
+patches = ["pr60762-dsv41-block64"]
+[variants.b0-repeat.env]
+PYTORCH_ALLOC_CONF = "pinned_max_round_threshold_mb:64"
+NCCL_DEBUG = "INFO"
+NCCL_DEBUG_SUBSYS = "INIT,ENV,GRAPH"
+[variants.b0-repeat.quality]
+gsm8k = 50

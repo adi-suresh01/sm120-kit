@@ -1,0 +1,38 @@
+diff --git a/vllm/models/deepseek_v41/nvidia/flashinfer_sparse.py b/vllm/models/deepseek_v41/nvidia/flashinfer_sparse.py
+index a5ab092..8fa5b9d 100644
+--- a/vllm/models/deepseek_v41/nvidia/flashinfer_sparse.py
++++ b/vllm/models/deepseek_v41/nvidia/flashinfer_sparse.py
+@@ -25,6 +25,7 @@ from vllm.models.deepseek_v41.sparse_mla import (
+     DeepseekV4SparseMLAMetadataBuilder,
+     DeepseekV41SparseSWAMetadataBuilder,
+ )
++from vllm.platforms import current_platform
+ from vllm.platforms.interface import DeviceCapability
+ from vllm.utils.flashinfer import flashinfer_trtllm_batch_decode_sparse_mla_dsv4
+ from vllm.v1.attention.backend import (
+@@ -115,6 +116,10 @@ class DeepseekV4FlashInferMLASparseBackend(DeepseekV4SparseMLABackend):
+
+     @staticmethod
+     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
++        # SM12x kernels only instantiate 64-token sparse-MLA blocks (128
++        # trips the block_kv assert, #59203).
++        if current_platform.is_device_capability_family(120):
++            return [64]
+         return [128]
+
+     @staticmethod
+diff --git a/vllm/v1/attention/backends/mla/indexer.py b/vllm/v1/attention/backends/mla/indexer.py
+index c353a1f..47f011d 100644
+--- a/vllm/v1/attention/backends/mla/indexer.py
++++ b/vllm/v1/attention/backends/mla/indexer.py
+@@ -364,6 +364,10 @@ class DeepseekV41IndexerBackend(DeepseekV4IndexerBackend):
+
+     @staticmethod
+     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
++        # SM12x kernels only instantiate 64-token sparse-MLA blocks (128
++        # trips the block_kv assert, #59203).
++        if current_platform.is_device_capability_family(120):
++            return [64]
+         return [64 if current_platform.is_device_capability_family(90) else 128]
+
+
