@@ -2,11 +2,11 @@ issue = "vllm-59203"
 # Stage 2 of the TP8 all-reduce study (stage 1: issues/pcie-tp8-allreduce): DeepSeek-V4.1-Flash served at TP8 on 8
 # PCIe-only RTX PRO 6000s, one boot per all-reduce arm, nothing but the env changing between arms. Up about 12 min,
 # setup about 86 (probes, then 510 GB at the ~115 MB/s HF gave a 2.9 Gbps Vast host on 11-05), b0 30 (cold boot), b2
-# 27, b1 27, a second exec and down 6: about 188 min (README.md). 3.25 h is what the budget left after the first box
+# 27, b1 27, a second exec and down 6: about 188 min (README.md). 3.0 h is what the budget left after the first box
 # covers at the 3 Gbps host's rate and download fee; a download near 115 MB/s can cost b1, never b0 or b2, since
 # setup.sh stops a download that cannot end 75 min before the deadline. The optional arms run only when setup ends
 # early enough (its last lines say).
-planned_hours = 3.25
+planned_hours = 3.0
 
 [pod]
 # The same release as stage 1 (2026-11-02): vLLM 0.33.0, torch 2.14.0, FlashInfer 0.7.2.post1, pynccl's NCCL 2.31.2.
@@ -26,12 +26,13 @@ expected_download_gb = 525
 # Server Edition first: stage 1's box and the vllm#59203 trace are both 8x Server Edition. The Workstation Edition is
 # the same 600 W GB202; the Max-Q (300 W, the sglang#33422 production card) decodes slower, so its rows are labeled
 # by card. The first box (Texas, listed 856 Mbps) gave HF 47 MB/s, too slow for 510 GB before the deadline, so the
-# floor is 2.5 Gbps; on 11-06 only hosts that charge about $41/TB for downloads cleared it, so the cap is $45/TB
+# floor is 2.5 Gbps; on 11-06 only hosts that charge about $41/TB for downloads cleared it, so the cap is $42/TB
 # (525 GB is about $21.5). They charge about $27/TB up too; results are a few GB, so that cap is $30.
+# The $13.5/hr cap keeps watch's worst-case reserve (cap x hours x 1.1 plus downloads at the cap) inside the budget.
 gpus = [
-  { provider = "vast", id = "RTX PRO 6000 S", max_usd_hr = 15.0, min_reliability = 0.95, min_inet_down_mbps = 2500, max_download_usd_tb = 45.0, max_upload_usd_tb = 30.0 },
-  { provider = "vast", id = "RTX PRO 6000 WS", max_usd_hr = 15.0, min_reliability = 0.95, min_inet_down_mbps = 2500, max_download_usd_tb = 45.0, max_upload_usd_tb = 30.0 },
-  { provider = "vast", id = "RTX PRO 6000 Max-Q", max_usd_hr = 15.0, min_reliability = 0.95, min_inet_down_mbps = 2500, max_download_usd_tb = 45.0, max_upload_usd_tb = 30.0 },
+  { provider = "vast", id = "RTX PRO 6000 S", max_usd_hr = 13.5, min_reliability = 0.95, min_inet_down_mbps = 2500, max_download_usd_tb = 42.0, max_upload_usd_tb = 30.0 },
+  { provider = "vast", id = "RTX PRO 6000 WS", max_usd_hr = 13.5, min_reliability = 0.95, min_inet_down_mbps = 2500, max_download_usd_tb = 42.0, max_upload_usd_tb = 30.0 },
+  { provider = "vast", id = "RTX PRO 6000 Max-Q", max_usd_hr = 13.5, min_reliability = 0.95, min_inet_down_mbps = 2500, max_download_usd_tb = 42.0, max_upload_usd_tb = 30.0 },
 ]
 
 [server]
