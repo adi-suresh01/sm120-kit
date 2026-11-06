@@ -43,6 +43,7 @@ pub fn offer(offer_id: u64, machine_id: u64, rate_usd_hr: f64) -> VastOffer {
         cuda_max_good: Some(13.2),
         geolocation: Some("Texas, US".into()),
         hosting_type: Some(0),
+        cpu_ram: Some(257973.0),
     }
 }
 

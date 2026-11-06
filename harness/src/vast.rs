@@ -82,7 +82,12 @@ pub struct VastOffer {
     /// 1 for a datacenter host, 0 for any other.
     #[serde(default)]
     pub hosting_type: Option<i64>,
+    #[serde(default)]
+    pub cpu_ram: Option<f64>,
 }
+
+/// Vast's `cpu_ram` is MiB (Vast calls them MB, and its CLI divides by 1000 to print GB), while the floor is GiB.
+const MIB_PER_GIB: f64 = 1024.0;
 
 impl VastOffer {
     pub fn reliability(&self) -> Option<f64> {
@@ -112,6 +117,10 @@ impl VastOffer {
         f64::from(gb) / 1000.0 * self.internet_down_cost_per_tb.unwrap_or(0.0)
     }
 
+    pub fn cpu_ram_gib(&self) -> Option<f64> {
+        self.cpu_ram.map(|mib| mib / MIB_PER_GIB)
+    }
+
     pub fn describe(&self) -> String {
         let mut line = format!(
             "{} x{} on Vast machine {} ${:.2}/hr",
@@ -122,6 +131,9 @@ impl VastOffer {
         }
         if let Some(per_tb) = self.internet_down_cost_per_tb {
             line.push_str(&format!(", downloads ${per_tb:.2}/TB"));
+        }
+        if let Some(gib) = self.cpu_ram_gib() {
+            line.push_str(&format!(", {gib:.0} GiB RAM"));
         }
         if let Some(place) = self
             .geolocation
@@ -147,6 +159,7 @@ pub struct OfferQuery {
     pub max_download_usd_tb: f64,
     pub max_upload_usd_tb: f64,
     pub min_cuda: f64,
+    pub min_cpu_ram_gb: f64,
 }
 
 /// Vast prices downloads per GB in `inet_down_cost` and reports `internet_down_cost_per_tb` as 1024 times that.
@@ -165,13 +178,20 @@ impl OfferQuery {
             max_upload_usd_tb: choice.max_upload_usd_tb,
             // The spec validates min_cuda as major.minor, which parses as a float.
             min_cuda: pod.min_cuda.parse().unwrap_or(f64::INFINITY),
+            min_cpu_ram_gb: choice.min_cpu_ram_gb,
         }
+    }
+
+    /// No floor is no filter, so a choice without one searches and admits exactly as before, hosts that report no
+    /// RAM included.
+    fn ram_floor_mib(&self) -> Option<f64> {
+        (self.min_cpu_ram_gb > 0.0).then_some(self.min_cpu_ram_gb * MIB_PER_GIB)
     }
 
     /// The body of `POST /bundles/`: the CLI's default filters plus this choice's limits. `allocated_storage` makes
     /// `dph_total` include the disk at the size the create asks for, so the rate reserved is the rate billed.
     pub fn body(&self) -> Value {
-        json!({
+        let mut body = json!({
             "verified": {"eq": true},
             "external": {"eq": false},
             "rentable": {"eq": true},
@@ -189,7 +209,11 @@ impl OfferQuery {
             "type": "on-demand",
             "limit": SEARCH_LIMIT,
             "allocated_storage": self.disk_gb,
-        })
+        });
+        if let Some(mib) = self.ram_floor_mib() {
+            body["cpu_ram"] = json!({"gte": mib});
+        }
+        body
     }
 
     /// Checked again here because a filter the server ignores or reads differently would otherwise rent the wrong
@@ -211,6 +235,9 @@ impl OfferQuery {
                 .is_some_and(|per_tb| per_tb <= self.max_upload_usd_tb + 1e-9)
             && offer.disk_space >= f64::from(self.disk_gb)
             && offer.cuda_max_good.is_some_and(|cuda| cuda + 1e-9 >= self.min_cuda)
+            && self
+                .ram_floor_mib()
+                .is_none_or(|floor| offer.cpu_ram.is_some_and(|mib| mib >= floor))
             && !avoid_machines.contains(&offer.machine_id)
     }
 }
@@ -748,6 +775,7 @@ pub(crate) fn sample_offer(rate_usd_hr: f64) -> VastOffer {
         cuda_max_good: Some(13.2),
         geolocation: None,
         hosting_type: Some(0),
+        cpu_ram: Some(773532.0),
     }
 }
 
@@ -775,6 +803,7 @@ mod tests {
             max_download_usd_tb: 50.0,
             max_upload_usd_tb: 50.0,
             min_cuda: 13.0,
+            min_cpu_ram_gb: 0.0,
         }
     }
 
@@ -802,6 +831,9 @@ mod tests {
                 .starts_with("RTX PRO 6000 Max-Q x8 on Vast machine 70005 $21.34/hr")
         );
         assert!(eight.describe().contains("downloads $40.00/TB"), "{}", eight.describe());
+        // 773532 MiB: a 768 GiB box, less what the kernel keeps.
+        assert_eq!((first.cpu_ram, eight.cpu_ram), (Some(64391.0), Some(773532.0)));
+        assert!(eight.describe().contains(", 755 GiB RAM"), "{}", eight.describe());
     }
 
     #[test]
@@ -845,6 +877,7 @@ mod tests {
             max_download_usd_tb: 50.0,
             max_upload_usd_tb: 50.0,
             min_cuda: 12.8,
+            min_cpu_ram_gb: 0.0,
         };
         assert_eq!(pick(&query("GTX 1650"), cheap.clone(), &[]).len(), 1);
         assert_eq!(cheap[1].cuda_max_good, Some(12.2));
@@ -878,6 +911,26 @@ mod tests {
     }
 
     #[test]
+    fn a_ram_floor_admits_only_hosts_that_report_enough() {
+        let mut q = query(1, 2.0);
+        // 64391 MiB, 62.9 GiB: a 64 GiB box as the host reports it.
+        let base = maxq().remove(0);
+        let mut unreported = base.clone();
+        unreported.cpu_ram = None;
+        // No floor asks nothing of the field, so a choice without one admits what it always did.
+        assert!(q.admits(&base, &[]) && q.admits(&unreported, &[]));
+        q.min_cpu_ram_gb = 62.5;
+        assert!(q.admits(&base, &[]));
+        assert!(!q.admits(&unreported, &[]));
+        q.min_cpu_ram_gb = 64.0;
+        assert!(!q.admits(&base, &[]));
+        // Of the two 1x offers that pass every other limit, only the 94.4 GiB host clears 90.
+        q.min_cpu_ram_gb = 90.0;
+        let ids: Vec<u64> = pick(&q, maxq(), &[]).iter().map(|o| o.offer_id).collect();
+        assert_eq!(ids, [9100002]);
+    }
+
+    #[test]
     fn the_search_asks_for_the_choice_and_prices_the_disk() {
         let body = query(8, 17.0).body();
         assert_eq!(body["gpu_name"], json!({"eq": "RTX PRO 6000 Max-Q"}));
@@ -896,6 +949,11 @@ mod tests {
         // $50 per TB is $0.0488 per GB, the unit Vast's filter takes.
         assert_eq!(body["inet_down_cost"], json!({"lte": 50.0 / 1024.0}));
         assert_eq!(body["inet_up_cost"], json!({"lte": 50.0 / 1024.0}));
+        assert!(body.get("cpu_ram").is_none(), "{body}");
+        let mut roomy = query(8, 17.0);
+        roomy.min_cpu_ram_gb = 240.0;
+        // Vast's cpu_ram is MiB.
+        assert_eq!(roomy.body()["cpu_ram"], json!({"gte": 245760.0}));
     }
 
     #[test]

@@ -434,7 +434,8 @@ impl Candidate {
             Self::Vast { offer, .. } => serde_json::json!({
                 "gpu": offer.gpu, "provider": Provider::Vast, "machine": offer.machine_id, "offer": offer.offer_id,
                 "count": offer.count, "rate_usd_hr": offer.rate_usd_hr, "reliability": offer.reliability(),
-                "inet_down_mbps": offer.inet_down, "download_usd_tb": offer.internet_down_cost_per_tb,
+                "inet_down_mbps": offer.inet_down, "cpu_ram_gb": offer.cpu_ram_gib(),
+                "download_usd_tb": offer.internet_down_cost_per_tb,
                 "upload_usd_tb": offer.internet_up_cost_per_tb, "location": offer.geolocation,
             }),
         };

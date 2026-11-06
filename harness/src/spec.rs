@@ -190,6 +190,9 @@ pub struct VastChoice {
     pub max_download_usd_tb: f64,
     /// The same per TB uploaded: results and logs leave the box, and a host may price them like downloads.
     pub max_upload_usd_tb: f64,
+    /// GiB, the unit setup.sh's RAM gates compute: a host too small for what the server pins would only be refused
+    /// after it bills. 0 asks nothing.
+    pub min_cpu_ram_gb: f64,
 }
 
 const DEFAULT_MIN_RELIABILITY: f64 = 0.95;
@@ -230,6 +233,7 @@ struct RawChoice {
     min_inet_down_mbps: Option<f64>,
     max_download_usd_tb: Option<f64>,
     max_upload_usd_tb: Option<f64>,
+    min_cpu_ram_gb: Option<f64>,
 }
 
 impl TryFrom<RawChoice> for Choice {
@@ -244,6 +248,7 @@ impl TryFrom<RawChoice> for Choice {
                     ("min_inet_down_mbps", raw.min_inet_down_mbps.is_some()),
                     ("max_download_usd_tb", raw.max_download_usd_tb.is_some()),
                     ("max_upload_usd_tb", raw.max_upload_usd_tb.is_some()),
+                    ("min_cpu_ram_gb", raw.min_cpu_ram_gb.is_some()),
                 ];
                 if let Some((key, _)) = vast_keys.iter().find(|(_, set)| *set) {
                     return Err(format!(
@@ -267,6 +272,7 @@ impl TryFrom<RawChoice> for Choice {
                     min_inet_down_mbps: raw.min_inet_down_mbps.unwrap_or(DEFAULT_MIN_INET_DOWN_MBPS),
                     max_download_usd_tb: raw.max_download_usd_tb.unwrap_or(DEFAULT_MAX_DOWNLOAD_USD_TB),
                     max_upload_usd_tb: raw.max_upload_usd_tb.unwrap_or(DEFAULT_MAX_UPLOAD_USD_TB),
+                    min_cpu_ram_gb: raw.min_cpu_ram_gb.unwrap_or(0.0),
                 }))
             }
         }
@@ -562,6 +568,10 @@ impl PodSpec {
             ensure!(
                 choice.max_upload_usd_tb.is_finite() && choice.max_upload_usd_tb >= 0.0,
                 "Vast choice {id:?}: max_upload_usd_tb must not be negative"
+            );
+            ensure!(
+                choice.min_cpu_ram_gb.is_finite() && choice.min_cpu_ram_gb >= 0.0,
+                "Vast choice {id:?}: min_cpu_ram_gb must not be negative"
             );
         }
         let has_vast = self.vast_choices().next().is_some();
@@ -1060,7 +1070,7 @@ smoke_concurrency = 13
     fn mixed_providers_keep_their_order_and_runpods_catalog_sees_only_its_own() {
         let text = with_choices(&format!(
             "{VAST_8X}  {{ id = \"NVIDIA RTX PRO 6000 Blackwell Server Edition\", cloud = \"SECURE\" }},\n  \
-             {{ provider = \"vast\", id = \"RTX 5090\", max_usd_hr = 9.5 }},\n"
+             {{ provider = \"vast\", id = \"RTX 5090\", max_usd_hr = 9.5, min_cpu_ram_gb = 240 }},\n"
         ))
         .replace(
             "count = 1",
@@ -1081,9 +1091,13 @@ smoke_concurrency = 13
                 min_inet_down_mbps: 500.0,
                 max_download_usd_tb: 20.0,
                 max_upload_usd_tb: 20.0,
+                min_cpu_ram_gb: 0.0,
             }
         );
-        assert_eq!((vast[1].min_reliability, vast[1].max_usd_hr), (0.95, 9.5));
+        assert_eq!(
+            (vast[1].min_reliability, vast[1].max_usd_hr, vast[1].min_cpu_ram_gb),
+            (0.95, 9.5, 240.0)
+        );
         assert!(spec.pod.require_p2p);
         assert_eq!(spec.pod.avoid_machines, [156482, 43934]);
         assert_eq!(spec.pod.vast_disk_gb(), 120);
@@ -1106,6 +1120,8 @@ smoke_concurrency = 13
         assert!(error_of(&with_choices(runpod)).contains("max_download_usd_tb is for provider = \"vast\""));
         let runpod = "  { id = \"NVIDIA GeForce RTX 5090\", cloud = \"SECURE\", max_upload_usd_tb = 9.0 },\n";
         assert!(error_of(&with_choices(runpod)).contains("max_upload_usd_tb is for provider = \"vast\""));
+        let runpod = "  { id = \"NVIDIA GeForce RTX 5090\", cloud = \"SECURE\", min_cpu_ram_gb = 240 },\n";
+        assert!(error_of(&with_choices(runpod)).contains("min_cpu_ram_gb is for provider = \"vast\""));
         let other = "  { provider = \"verda\", id = \"RTX 5090\", max_usd_hr = 9.5 },\n";
         assert!(error_of(&with_choices(other)).contains("unknown variant `verda`"));
         let typo = "  { provider = \"vast\", id = \"RTX 5090\", max_usd_hr = 9.5, min_reliabilty = 0.9 },\n";
@@ -1132,6 +1148,14 @@ smoke_concurrency = 13
             (
                 "max_usd_hr = 9.5, max_upload_usd_tb = -1.0",
                 "max_upload_usd_tb must not be negative",
+            ),
+            (
+                "max_usd_hr = 9.5, min_cpu_ram_gb = -1.0",
+                "min_cpu_ram_gb must not be negative",
+            ),
+            (
+                "max_usd_hr = 9.5, min_cpu_ram_gb = inf",
+                "min_cpu_ram_gb must not be negative",
             ),
         ] {
             let choice = format!("  {{ provider = \"vast\", id = \"RTX 5090\", {bad} }},\n");

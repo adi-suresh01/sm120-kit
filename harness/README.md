@@ -101,6 +101,12 @@ expected_download_gb = 700      # Vast only: what setup downloads, held in the r
   1000 GB, shown as `download_reserved_usd` in the quote and reserve events.
 - `min_reliability` (default 0.95) and `min_inet_down_mbps` (default 500, since setup downloads the weights on every
   box) are floors. The host's driver must also support `min_cuda`.
+- `min_cpu_ram_gb` (default 0, no floor) is a floor on the host's RAM in GiB, the unit setup.sh's RAM gates compute,
+  so a box too small for what the server pins is never rented only to be refused. Vast reports `cpu_ram` in MiB
+  (its CLI prints that divided by 1000 as GB), a few GiB under the installed size: a 256 GiB box reads about 252.
+  The search filters on it and every returned offer is checked again, where a host that reports no RAM fails; with
+  no floor neither happens. `quote` prints the host's figure as `cpu_ram_gb`. A container limit under the host's RAM
+  still needs setup.sh's own gate.
 - Vast has no separate volume: the box gets one disk of `container_disk_gb + volume_gb`, and a host with less free
   is no offer.
 - `needs_hf_token` is refused with a Vast choice: the RunPod secret it passes means nothing to Vast.

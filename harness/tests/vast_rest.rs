@@ -126,6 +126,7 @@ fn query() -> OfferQuery {
         max_download_usd_tb: 50.0,
         max_upload_usd_tb: 50.0,
         min_cuda: 12.8,
+        min_cpu_ram_gb: 0.0,
     }
 }
 
