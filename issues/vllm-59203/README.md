@@ -198,7 +198,7 @@ leave the names out: `exec` with none runs every variant in file order until the
 
 | File | Holds |
 |---|---|
-| `summary.md` | `summarize.py`'s tables: arm x row (median ITL, mean TPOT, output tok/s, median TTFT, each vs b0; GSM8K and the server's NCCL transport per arm), then per arm the verdict, boot time, vLLM's all-reduce dispatch list, FlashInfer initialized or not, and the probe's eager times |
+| `summary.md` | `summarize.py`'s GPU line (the card, from `env.txt`) and tables: arm x row (median ITL, mean TPOT, output tok/s, median TTFT, each vs b0; GSM8K and the server's NCCL transport per arm; an arm's verdict beside its name unless OK, and a row's completions beside it when some failed), then per arm the verdict, boot time, vLLM's all-reduce dispatch list, FlashInfer initialized or not, and the probe's eager times |
 | `<arm>/decode_rows.csv`, `<arm>/bench/<row>.json` | one line per row; the client's full result with per-request TTFTs and ITLs |
 | `<arm>/server.log`, `verdict.json`, `gsm8k.txt`, `gsm8k_responses.jsonl` | the harness's per-variant record |
 | `<arm>/nccl.log`, `nccl_transport.txt`, `nccl.<host>.<pid>.log` | NCCL's INFO lines per rank, and condensed |

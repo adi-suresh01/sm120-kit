@@ -1,7 +1,7 @@
-"""The run as markdown: every arm by every decode row, with each arm's GSM8K and the NCCL transport its connections
-took beside the numbers, then what each arm actually ran (vLLM's all-reduce backends, whether FlashInfer's workspace
-initialized, setup's probe). An arm is read by what its logs show, never by its env alone. Run on the laptop after
-`harness down`; also writes <results_dir>/summary.md.
+"""The run as markdown: the box's GPUs, every arm by every decode row, with each arm's GSM8K and the NCCL transport its
+connections took beside the numbers, then what each arm actually ran (vLLM's all-reduce backends, whether FlashInfer's
+workspace initialized, setup's probe). An arm is read by what its logs show, never by its env alone. Run on the laptop
+after `harness down`; also writes <results_dir>/summary.md.
 Usage: summarize.py <results_dir>
 """
 
@@ -48,6 +48,23 @@ def table_row(cells: list[str]) -> str:
     return "| " + " | ".join(cells) + " |"
 
 
+def gpus(env: Path) -> str:
+    """The cards from env_report.sh's GPU table: a Max-Q box decodes slower, so its rows must not pass for a Server
+    Edition's."""
+    if not env.exists():
+        return "no env.txt"
+    lines = env.read_text(errors="replace").splitlines()
+    if "## GPUs" not in lines:
+        return "no GPU table in env.txt"
+    names = Counter()
+    for line in lines[lines.index("## GPUs") + 2:]:
+        fields = [field.strip() for field in line.split(",")]
+        if len(fields) < 2 or not fields[0].isdigit():
+            break
+        names[fields[1]] += 1
+    return ", ".join(f"{n}x {name}" for name, n in names.items()) or "no GPU rows in env.txt"
+
+
 def probe(path: Path) -> str:
     if not path.exists():
         return "not run"
@@ -81,14 +98,21 @@ def main() -> None:
         verdict = json.loads(verdict_path.read_text()) if verdict_path.exists() else {}
         gsm8k = verdict.get("gsm8k")
         arm_cols = [f"{gsm8k:.2f}" if gsm8k is not None else "-", transports(results / arm / "nccl.log")]
+        # decode_bench.py writes a row before it checks the row's completions, and post_smoke runs after a failed
+        # GSM8K, so a failed arm can still have rows; its cells say so rather than read as a clean run.
+        status = verdict.get("verdict", "no verdict")
+        arm_cell = arm if status == "OK" else f"{arm} ({status})"
         for i, row in enumerate(rows[arm] or [{"row": "no rows"}]):
             b = base.get(row["row"])
+            row_cell = row["row"]
+            if "completed" in row and row["completed"] != row["prompts"]:
+                row_cell += f" ({row['completed']}/{row['prompts']} completed)"
             cells = ["-"] * 7
             if "median_itl_ms" in row:
                 cells = [row["median_itl_ms"], delta(row, b, "median_itl_ms"), row["mean_tpot_ms"],
                          row["output_tok_s"], delta(row, b, "output_tok_s"), row["median_ttft_ms"],
                          delta(row, b, "median_ttft_ms")]
-            lines.append(table_row([arm, row["row"], *cells, *(arm_cols if i == 0 else ["", ""])]))
+            lines.append(table_row([arm_cell, row_cell, *cells, *(arm_cols if i == 0 else ["", ""])]))
         picked, fi = backends(results / arm / "server.log")
         probe_arm = BASELINE if arm == "b0-repeat" else arm
         boot_s = verdict.get("boot_s")
@@ -97,7 +121,7 @@ def main() -> None:
 
     lines.insert(1, "|" + "---|" * 11)
     facts.insert(1, "|" + "---|" * 6)
-    text = "\n".join(lines + [""] + facts) + "\n"
+    text = "\n".join([f"GPUs: {gpus(results / 'env.txt')}", ""] + lines + [""] + facts) + "\n"
     (results / "summary.md").write_text(text)
     print(text, end="")
 
