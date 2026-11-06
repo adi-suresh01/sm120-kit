@@ -46,10 +46,21 @@ body_var=FAKE_CURL_BODY_$method
 printf '%s' "${!body_var:-}"
 printf '%s' "${format//%\{http_code\}/$code}"
 EOF
-for tool in apt-get runpodctl sshd ssh-keygen; do
+# chown is faked too: the test is not root, and the call is the evidence.
+for tool in apt-get runpodctl sshd ssh-keygen chown; do
     # shellcheck disable=SC2016  # expanded when the fake runs
     printf '#!/usr/bin/env bash\nprintf "%s %%s\\n" "$*" >>"$FAKE_DIR/calls.log"\n' "$tool" >"$work/bin/$tool"
 done
+# The box has GNU stat; BSD stat (macOS) spells the same fields -f '%u:%g %Lp %HT'.
+cat >"$work/bin/stat" <<'EOF'
+#!/usr/bin/env bash
+if [[ $1 == -c ]] && ! /usr/bin/stat -c '' / >/dev/null 2>&1; then
+    format=${2//%a/%Lp}
+    shift 2
+    exec /usr/bin/stat -f "${format//%F/%HT}" "$@"
+fi
+exec /usr/bin/stat "$@"
+EOF
 chmod +x "$work/bin/"*
 # A PATH with no curl at all, as on a slim image whose apt failed.
 mkdir -p "$work/nocurl"
@@ -99,6 +110,9 @@ log_has() {
 alive() {
     kill -0 "${box_pid[$1]}" 2>/dev/null
 }
+mode_of() {
+    "$work/bin/stat" -c %a "$1"
+}
 # Waits up to 10 s for a line in a box's watchdog log.
 wait_log() {
     local _
@@ -108,6 +122,17 @@ wait_log() {
     done
     return 1
 }
+
+# A host whose key injection left the key file and both directories above it writable by others, and one whose key
+# file is a symlink to a file outside them.
+home=$work/sshfix/root/root
+mkdir -p "$home/.ssh" "$work/sshlink/root/root/.ssh"
+printf 'ssh-ed25519 AAAAsecret harness\n' >"$home/.ssh/authorized_keys"
+chmod 777 "$home" "$home/.ssh"
+chmod 666 "$home/.ssh/authorized_keys"
+printf 'ssh-ed25519 AAAAsecret harness\n' >"$work/sshlink/elsewhere"
+chmod 666 "$work/sshlink/elsewhere"
+ln -s "$work/sshlink/elsewhere" "$work/sshlink/root/root/.ssh/authorized_keys"
 
 now=$(date +%s)
 past=$((now - 60))
@@ -125,6 +150,8 @@ start_box notmine "$((now + 600))" FAKE_CURL_BODY_GET='{"instances": null}'
 start_box other "$((now + 600))" FAKE_CURL_BODY_GET='{"instances": {"id": 310000012}}'
 start_box nopy "$((now + 600))" PATH="$work/nopy" FAKE_CURL_BODY_GET='{"instances":{"machine_id":5,"id":31000001}}'
 start_box nopyother "$((now + 600))" PATH="$work/nopy" FAKE_CURL_BODY_GET='{"instances":{"id":310000012,"x":31000001}}'
+start_box sshfix "$((now + 600))"
+start_box sshlink "$((now + 600))"
 
 leaked=""
 for ((i = 0; i < 8; i++)); do
@@ -203,6 +230,39 @@ log_has destroy 'box setup done' || fail "setup never reported done"
 grep -q '^apt-get install' "$work/destroy/calls.log" || fail "apt did not install the packages"
 ! grep -q -e '^sshd' -e '^ssh-keygen' "$work/destroy/calls.log" || fail "Vast's own sshd was started again"
 echo "ok: the key stays out of argv and container_env.sh; setup installs packages and leaves sshd to Vast"
+
+id='[0-9][0-9]*:[0-9][0-9]*'
+id_mode="$id [0-7][0-7]*"
+wait_log sshfix "ssh key modes: /root $id 777 .*, /root/.ssh $id 777 .*, /root/.ssh/authorized_keys $id 666 " ||
+    fail "the modes the host left are not logged"
+wait_log sshfix "ssh key modes: /root $id 755 .*, /root/.ssh $id 700 .*, /root/.ssh/authorized_keys $id 600 " ||
+    fail "the repaired modes are not logged"
+[[ $(mode_of "$home") == 755 && $(mode_of "$home/.ssh") == 700 && $(mode_of "$home/.ssh/authorized_keys") == 600 ]] ||
+    fail "sshd's modes were not repaired"
+for path in "$home" "$home/.ssh" "$home/.ssh/authorized_keys"; do
+    grep -qxF "chown 0 $path" "$work/sshfix/calls.log" || fail "$path was not given to root"
+done
+log_has destroy "ssh key modes: /root $id_mode .*, /root/.ssh missing, /root/.ssh/authorized_keys missing$" ||
+    fail "missing paths are not logged as missing"
+echo "ok: the key file's modes are logged, then repaired for sshd; missing paths are only logged"
+
+# Vast writing the key file again later.
+chmod 664 "$home/.ssh/authorized_keys"
+for _ in $(seq 100); do
+    [[ $(mode_of "$home/.ssh/authorized_keys") == 600 ]] && break
+    sleep 0.1
+done
+[[ $(mode_of "$home/.ssh/authorized_keys") == 600 ]] || fail "a later write of the key file was not repaired"
+! grep -rq AAAAsecret "$work/sshfix/box.out" "$work/sshfix/root/workspace" ||
+    fail "the key file's contents reached the log"
+echo "ok: the repair repeats, and the log never holds the key"
+
+[[ $(mode_of "$work/sshlink/elsewhere") == 666 ]] || fail "the repair followed a symlink to another file"
+! grep -q "^chown 0 .*/authorized_keys$" "$work/sshlink/calls.log" || fail "chown ran on a symlinked key file"
+[[ $(mode_of "$work/sshlink/root/root/.ssh") == 700 ]] || fail "the .ssh above a symlinked key file was not repaired"
+grep -qi "/root/.ssh/authorized_keys $id_mode symbolic link" "$work/sshlink/root/workspace/harness-watchdog.log" ||
+    fail "a symlinked key file is not logged as one"
+echo "ok: a symlinked key file is logged and left alone"
 
 for name in "${!box_pid[@]}"; do
     alive "$name" || fail "$name: the entrypoint exited"

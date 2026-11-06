@@ -99,6 +99,47 @@ sys.exit(0 if isinstance(found, dict) and str(found.get("id")) == sys.argv[1] el
     fi
 }
 
+# sshd's StrictModes refuses every key while authorized_keys, or /root/.ssh or /root above it, belongs to another user
+# or is writable by group or others, and some Vast hosts inject the account's key that way: two of three on 2026-11-06
+# logged "bad ownership or modes for file /root/.ssh/authorized_keys" for every login, and `up` destroyed both.
+# Only what stat says goes to the log, never what the files hold.
+ssh_modes() {
+    local path said=""
+    for path in /root /root/.ssh /root/.ssh/authorized_keys; do
+        if [[ -e $root$path || -L $root$path ]]; then
+            said+=", $path $(stat -c '%u:%g %a %F' "$root$path" 2>&1)"
+        else
+            said+=", $path missing"
+        fi
+    done
+    printf '%s' "${said#, }"
+}
+
+# A symlink is left alone, since chown and chmod would change the file it points to instead.
+fix_ssh_mode() {
+    [[ -e $root$1 && ! -L $root$1 ]] || return 0
+    chown 0 "$root$1" 2>/dev/null
+    chmod "$2" "$root$1" 2>/dev/null
+}
+
+# Vast may write the key file after this starts, or again later, so the repair repeats every 3 s, inside the 10 s
+# between `up`'s checks, for 20 min: `up` needs SSH from its first check until apt is done, up to 15 min
+# (VAST_SETUP_WAIT in vast_box.rs), and starts checking soon after the container does. The modes are logged whenever
+# they differ from the last round's, so the log shows what the host left, what the repair made of it, and a later write.
+keep_ssh_modes() {
+    local round modes last=""
+    for ((round = 0; round < 400; round++)); do
+        modes=$(ssh_modes)
+        [[ $modes == "$last" ]] || log "ssh key modes: $modes"
+        last=$modes
+        fix_ssh_mode /root go-w
+        fix_ssh_mode /root/.ssh 700
+        fix_ssh_mode /root/.ssh/authorized_keys 600
+        sleep 3
+    done
+}
+keep_ssh_modes &
+
 if [[ -n $vast_id && -n $vast_key ]]; then
     log "vast self-destruct ready for instance $vast_id"
 else

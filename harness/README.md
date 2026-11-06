@@ -279,7 +279,10 @@ The same layers, mapped:
    sign before the deadline that the destroy can work, not proof that it does. The same check reads the box's clock,
    which the watchdog compares the deadline with, and a box more than 2 min off the laptop's is destroyed. Since
    nothing ties the box's life to the watchdog's, the check runs again before each variant and after any failed
-   poll, and a box whose watchdog is gone is destroyed then; a check that cannot run only warns.
+   poll, and a box whose watchdog is gone is destroyed then; a check that cannot run only warns. Some hosts inject the
+   account key with an owner or mode sshd's StrictModes refuses, so for its first 20 min the box gives `/root`,
+   `/root/.ssh`, and `authorized_keys` to root every 3 s, with `go-w`, 700, and 600 (a symlink is left alone), and
+   logs their owner and mode whenever those change.
 3. **Reaper.** Lists Vast's instances (all pages, or an error) beside RunPod's, whenever a Vast key is set and some
    ledger holds a Vast pod that is not settled (live, reserved, abandoned, or with a bill that may still change), or
    the command's issue has a Vast choice; other commands never read the Vast key or call Vast, so a hung Vast API
