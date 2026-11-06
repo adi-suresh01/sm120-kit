@@ -184,6 +184,10 @@ booted; its rows up to the failure are kept). When someone is watching, read the
 `results/vllm-59203/jobs/setup.log` instead, which adds b3 and b0-repeat to the second exec only when they fit. Never
 leave the names out: `exec` with none runs every variant in file order until the deadline.
 
+The second rental (b3) runs the same chain with `harness exec vllm-59203 b3-fi-only b2-sys-fi` as the second exec, so
+b3 and b2 are read against a b0 from the same host; the first rental's results moved to
+`results/vllm-59203-run1-ca57498/`.
+
 ## Stop rules
 
 - Any setup check or a b0/b2/b1 probe fails or hangs: setup exits 1 before the download; `watch` destroys the box
