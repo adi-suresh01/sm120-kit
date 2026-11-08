@@ -24,6 +24,10 @@ all-reduce env, to answer what the threads now ask: what do `NCCL_P2P_LEVEL=SYS`
   NCCL's default `p2pLevel = PATH_PXB` (`src/graph/paths.cc:356`) leaves out pairs that meet at a CPU root port, so on
   a box without PCIe switches "P2P on" runs over SHM, and vLLM turns its own custom all-reduce off above 2 PCIe GPUs.
 - **TP4 on SGLang** (`issues/sglang-33422`, 11-05): `NCCL_P2P_LEVEL=SYS` cut TTFT 25-30% but median ITL only 2-3%.
+- **Same transport split on a 4-NUMA box.** Lei-010's 8x RTX PRO 6000 Max-Q (325 W, 4 NUMA domains, no 4-GPU set
+  inside one node, `topo -p2p r` OK on every pair; SGLang `dev-dsv41`, TP8): `NCCL_DEBUG=INFO` showed 119 `via SHM`
+  and 0 `via P2P` connections under the defaults, and 0 SHM / 120 `via P2P/IPC` with `NCCL_P2P_LEVEL=SYS`, the same
+  counts in five windows (sglang#33422, issuecomment-6713264214). No throughput rows from that box.
 - **Production with FlashInfer IPC.** Lei-010 (8x Max-Q, TP8, vLLM dev253, DSpark k=3, V2 runner) measured c=8
   651.0 -> 689.5 tok/s and batch_iter 30.40 -> 25.07 ms with `VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC=1` (vllm#60762
   thread, 10-27). Speculation was on, so the plain decode step was never isolated.
