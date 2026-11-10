@@ -1,6 +1,6 @@
 """All-reduce at decode sizes on 8 PCIe GPUs through vLLM v0.33.0's own communicators, in CUDA graphs, checked exactly.
 
-setup.sh runs one backend per torchrun, so a hang in one cannot take the others with it:
+setup.sh and run_sweep.sh run one backend per torchrun, so a hang in one cannot take the others with it:
 
   probe        which all-reduce vLLM picks by itself at TP8 on this box, and why; forces nothing
   nccl         pynccl (what vLLM uses here) and torch.distributed; run once per NCCL env arm
@@ -12,11 +12,15 @@ adds (rank + 1) times a small integer pattern that changes on every replay, so t
 sum is exact in bf16, and a rank that reads a peer's previous buffer shows up as a mismatch. Some replays start late on
 some ranks, so the barriers also see ranks arrive out of order.
 
+Sizes are nccl-tests' powers of two from 4 KB to 4 MB plus decode batches 1 to 256 at --hidden, the served model's
+hidden size; FlashInfer accepts only the decode shapes.
+
 Rank 0 appends one JSON row per backend and size to <out>/rows.jsonl. Each rank arms faulthandler before every step:
 a step that runs past its limit writes every thread's stack to <out>/<arm>.fault.rank<N>.txt, under a line naming the
 step, and exits, so a hang is recorded instead of holding the box.
 
-Usage: torchrun --standalone --nproc_per_node=8 vllm_ar_bench.py --backend nccl --arm nccl-default --out <dir>
+Usage: torchrun --standalone --nproc_per_node=8 vllm_ar_bench.py --backend nccl --arm nccl-default --out <dir> \
+           [--hidden 5120]
 """
 
 import argparse
@@ -33,7 +37,7 @@ from pathlib import Path
 import torch
 import torch.distributed as dist
 
-HIDDEN = 5120  # DeepSeek-V4.1-Flash, the model of the public TP8 trace (vllm#59203)
+DEFAULT_HIDDEN = 5120  # DeepSeek-V4.1-Flash, the model of the public TP8 trace (vllm#59203)
 DECODE_BATCHES = (1, 2, 4, 8, 16, 32, 64, 128, 256)
 POW2_BYTES = tuple(4096 << i for i in range(11))  # 4 KB .. 4 MB, nccl-tests' ladder
 LAYERS = 8
@@ -93,8 +97,8 @@ def comm_env() -> dict:
     return {k: v for k, v in sorted(os.environ.items()) if k.startswith(("NCCL_", "VLLM_", "CUDA_"))}
 
 
-def shapes() -> list[tuple[int, int]]:
-    decode = [(b, HIDDEN) for b in DECODE_BATCHES]
+def shapes(hidden: int) -> list[tuple[int, int]]:
+    decode = [(b, hidden) for b in DECODE_BATCHES]
     return sorted(decode + [(1, n // 2) for n in POW2_BYTES], key=lambda s: s[0] * s[1])
 
 
@@ -173,7 +177,7 @@ def measure(run: Run, reduce_fn: Callable, shape: tuple[int, int], capture_ctx: 
 
 def sweep(run: Run, name: str, reduce_fn: Callable, accepts: Callable, capture_ctx: Callable, inplace: bool) -> bool:
     """Returns False after an error, when the communicator can no longer be trusted."""
-    for shape in shapes():
+    for shape in shapes(run.args.hidden):
         rows, cols = shape
         row = {"backend": name, "size_bytes": rows * cols * 2, "rows": rows, "cols": cols, "graph": True,
                "inplace": inplace}
@@ -282,7 +286,7 @@ def run_fi_pcie_ipc(run: Run) -> None:
 
     # vLLM builds it on the TP group's NCCL group and tunes on the CPU group (cuda_communicator.py:139-148), then sets
     # it up before graph capture from the model's hidden size and the capture sizes
-    # (flashinfer_pcie_ipc_all_reduce.py:202-239). Only (batch, HIDDEN) inputs reach it; the rest are declined.
+    # (flashinfer_pcie_ipc_all_reduce.py:202-239). Only (batch, hidden) inputs reach it; the rest are declined.
     comm = fi_ipc.FlashInferPcieIpcAllReduce(group=run.nccl_group, tune_group=run.cpu_group, device=run.device)
     # destroy() does nothing without a workspace, and frees one a failed tune left behind.
     run.closers.append(comm.destroy)
@@ -291,7 +295,7 @@ def run_fi_pcie_ipc(run: Run) -> None:
         run.dog.arm(FI_SETUP_LIMIT_S, "fi_pcie_ipc setup and tune")
         start = time.monotonic()
         try:
-            comm.setup(hidden_dim=HIDDEN, dtype=torch.bfloat16, capture_sizes=DECODE_BATCHES,
+            comm.setup(hidden_dim=run.args.hidden, dtype=torch.bfloat16, capture_sizes=DECODE_BATCHES,
                        tune_cache=run.out / "fi_pcie_ipc_tune.json")
         except Exception as e:
             # A JIT build, topology probe, or tune that fails is the answer for this backend. FlashInfer raises
@@ -316,6 +320,7 @@ def main() -> None:
     parser.add_argument("--backend", choices=sorted(BACKENDS), required=True)
     parser.add_argument("--arm", required=True)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--hidden", type=int, default=DEFAULT_HIDDEN, help="the served model's hidden size")
     parser.add_argument("--check-iters", type=int, default=200)
     parser.add_argument("--trials", type=int, default=5)
     parser.add_argument("--replays", type=int, default=100)

@@ -208,6 +208,27 @@ all-reduces 1.5-2.2x faster. Read the large sizes too: on a dual-socket 8x box, 
 faster over P2P at 32 MiB as well (1.3 ms vs 2.9 ms). Serving engines take the same variable. P2P across root ports isn't safe on every host
 (one split-NUMA host hung at NCCL init with it on), so run this before serving with it.
 
+`NCCL_P2P_LEVEL` takes LOC, NVL, NVB, C2C, PIX, PXB, P2C, PXN, PHB or SYS (NCCL 2.30.7, `src/graph/paths.cc`,
+`ncclGetLevel`). Any other word, such as `nvidia-smi topo -m`'s `NODE`, is ignored without a warning and NCCL keeps its
+defaults; NCCL's name for that level is `PHB`.
+
+### FlashInfer at your model's decode sizes
+
+`run_sweep.sh` runs `vllm_ar_bench.py` three times on every GPU of the box, about 15 minutes and 30 at most, with no
+model download: the probe (what vLLM picks by itself), vLLM's NCCL path at the box's P2P level, and the FlashInfer
+PCIe IPC all-reduce, every result checked exactly. `--hidden` is the served model's hidden size, so the decode sizes
+match it (6144 gives 12, 24, 48 KiB and up). Stop serving first; it refuses to start while a GPU holds over 2 GiB.
+
+```bash
+docker run --rm --gpus all --ipc=host -v "$PWD":/w -w /w --entrypoint bash vllm/vllm-openai:v0.33.0 \
+    run_sweep.sh --hidden 6144
+```
+
+It prints `table.txt`: microseconds per all-reduce for NCCL and FlashInfer at each size, FlashInfer over NCCL, the
+wrong-value count per backend, the FlashInfer setup profile, and NCCL's transports. FlashInfer picks its profile from
+the topology it finds; the box in the results below has no PCIe switches and got `rootcplx-noswitch` ("no switch-local
+pair observed"), so on a box with two GPUs per switch it may choose a profile these results do not cover.
+
 ## Results
 
 ### 2026-11-05, 8x RTX PRO 6000 Server Edition, Vast machine 142634 (Bulgaria)
