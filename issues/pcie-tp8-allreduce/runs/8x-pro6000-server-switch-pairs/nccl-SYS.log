@@ -1,0 +1,106 @@
+W1110 19:36:42.474000 293 torch/distributed/run.py:982] 
+W1110 19:36:42.474000 293 torch/distributed/run.py:982] *****************************************
+W1110 19:36:42.474000 293 torch/distributed/run.py:982] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+W1110 19:36:42.474000 293 torch/distributed/run.py:982] *****************************************
+[rank2]:W1110 19:36:49.441000 364 torch/_opaque_base.py:6] torch._opaque_base is deprecated, use torch._custom_class_base instead
+[rank2]:W1110 19:36:49.442000 364 torch/_library/opaque_object.py:288] register_opaque_type is deprecated, use register_custom_class instead
+[rank2]:W1110 19:36:49.442000 364 torch/_library/opaque_object.py:211] typ='value' is deprecated, use typ='constant' instead
+[rank5]:W1110 19:36:49.528000 367 torch/_opaque_base.py:6] torch._opaque_base is deprecated, use torch._custom_class_base instead
+[rank5]:W1110 19:36:49.528000 367 torch/_library/opaque_object.py:288] register_opaque_type is deprecated, use register_custom_class instead
+[rank5]:W1110 19:36:49.529000 367 torch/_library/opaque_object.py:211] typ='value' is deprecated, use typ='constant' instead
+[rank7]:W1110 19:36:49.534000 369 torch/_opaque_base.py:6] torch._opaque_base is deprecated, use torch._custom_class_base instead
+[rank7]:W1110 19:36:49.534000 369 torch/_library/opaque_object.py:288] register_opaque_type is deprecated, use register_custom_class instead
+[rank7]:W1110 19:36:49.535000 369 torch/_library/opaque_object.py:211] typ='value' is deprecated, use typ='constant' instead
+[rank6]:W1110 19:36:49.555000 368 torch/_opaque_base.py:6] torch._opaque_base is deprecated, use torch._custom_class_base instead
+[rank6]:W1110 19:36:49.556000 368 torch/_library/opaque_object.py:288] register_opaque_type is deprecated, use register_custom_class instead
+[rank6]:W1110 19:36:49.556000 368 torch/_library/opaque_object.py:211] typ='value' is deprecated, use typ='constant' instead
+[rank3]:W1110 19:36:49.583000 365 torch/_opaque_base.py:6] torch._opaque_base is deprecated, use torch._custom_class_base instead
+[rank3]:W1110 19:36:49.583000 365 torch/_library/opaque_object.py:288] register_opaque_type is deprecated, use register_custom_class instead
+[rank3]:W1110 19:36:49.584000 365 torch/_library/opaque_object.py:211] typ='value' is deprecated, use typ='constant' instead
+[rank0]:W1110 19:36:49.634000 362 torch/_opaque_base.py:6] torch._opaque_base is deprecated, use torch._custom_class_base instead
+[rank0]:W1110 19:36:49.635000 362 torch/_library/opaque_object.py:288] register_opaque_type is deprecated, use register_custom_class instead
+[rank0]:W1110 19:36:49.635000 362 torch/_library/opaque_object.py:211] typ='value' is deprecated, use typ='constant' instead
+[rank4]:W1110 19:36:49.679000 366 torch/_opaque_base.py:6] torch._opaque_base is deprecated, use torch._custom_class_base instead
+[rank4]:W1110 19:36:49.679000 366 torch/_library/opaque_object.py:288] register_opaque_type is deprecated, use register_custom_class instead
+[rank4]:W1110 19:36:49.680000 366 torch/_library/opaque_object.py:211] typ='value' is deprecated, use typ='constant' instead
+[rank1]:W1110 19:36:49.686000 363 torch/_opaque_base.py:6] torch._opaque_base is deprecated, use torch._custom_class_base instead
+[rank1]:W1110 19:36:49.686000 363 torch/_library/opaque_object.py:288] register_opaque_type is deprecated, use register_custom_class instead
+[rank1]:W1110 19:36:49.687000 363 torch/_library/opaque_object.py:211] typ='value' is deprecated, use typ='constant' instead
+{"arm": "nccl-SYS", "backend": "pynccl", "event": "init", "disabled": false, "nccl": "2.31.2", "env": {"CUDA_DEVICE_ORDER": "PCI_BUS_ID", "CUDA_HOME": "/usr/local/cuda", "CUDA_VERSION": "13.0.2", "NCCL_DEBUG": "INFO", "NCCL_DEBUG_FILE": "/work/ar-sweep-20261110-193411/nccl-SYS.nccl.%h.%p.log", "NCCL_DEBUG_SUBSYS": "INIT,ENV", "NCCL_P2P_LEVEL": "SYS", "NCCL_SOCKET_IFNAME": "lo", "VLLM_BUILD_COMMIT": "4ba787ec9959e566d3b587a796dff07673324da5", "VLLM_BUILD_PIPELINE": "019d130e-464e-4ff7-b84b-492992c0c06b", "VLLM_BUILD_URL": "https://buildkite.com/vllm/release-v2/builds/9673", "VLLM_ENABLE_CUDA_COMPATIBILITY": "0", "VLLM_IMAGE_TAG": "vllm/vllm-openai:v0.33.0", "VLLM_USAGE_SOURCE": "production-docker-image"}}
+{"arm": "nccl-SYS", "backend": "pynccl", "size_bytes": 4096, "rows": 1, "cols": 2048, "graph": true, "inplace": false, "time_us": 20.06, "time_us_min": 19.89, "time_us_max": 20.13, "algbw_gbps": 0.204, "busbw_gbps": 0.357, "wrong": 0, "checked_elements": 26345472, "status": "ok"}
+{"arm": "nccl-SYS", "backend": "pynccl", "size_bytes": 8192, "rows": 1, "cols": 4096, "graph": true, "inplace": false, "time_us": 20.19, "time_us_min": 20.06, "time_us_max": 20.36, "algbw_gbps": 0.406, "busbw_gbps": 0.71, "wrong": 0, "checked_elements": 52690944, "status": "ok"}
+{"arm": "nccl-SYS", "backend": "pynccl", "size_bytes": 12288, "rows": 1, "cols": 6144, "graph": true, "inplace": false, "time_us": 21.02, "time_us_min": 20.92, "time_us_max": 21.14, "algbw_gbps": 0.585, "busbw_gbps": 1.023, "wrong": 0, "checked_elements": 79036416, "status": "ok"}
+{"arm": "nccl-SYS", "backend": "pynccl", "size_bytes": 16384, "rows": 1, "cols": 8192, "graph": true, "inplace": false, "time_us": 20.52, "time_us_min": 20.38, "time_us_max": 20.71, "algbw_gbps": 0.798, "busbw_gbps": 1.397, "wrong": 0, "checked_elements": 105381888, "status": "ok"}
+{"arm": "nccl-SYS", "backend": "pynccl", "size_bytes": 24576, "rows": 2, "cols": 6144, "graph": true, "inplace": false, "time_us": 21.36, "time_us_min": 21.28, "time_us_max": 21.54, "algbw_gbps": 1.151, "busbw_gbps": 2.014, "wrong": 0, "checked_elements": 158072832, "status": "ok"}
+{"arm": "nccl-SYS", "backend": "pynccl", "size_bytes": 32768, "rows": 1, "cols": 16384, "graph": true, "inplace": false, "time_us": 21.72, "time_us_min": 21.64, "time_us_max": 21.94, "algbw_gbps": 1.509, "busbw_gbps": 2.64, "wrong": 0, "checked_elements": 210763776, "status": "ok"}
+{"arm": "nccl-SYS", "backend": "pynccl", "size_bytes": 49152, "rows": 4, "cols": 6144, "graph": true, "inplace": false, "time_us": 22.87, "time_us_min": 22.77, "time_us_max": 23.22, "algbw_gbps": 2.149, "busbw_gbps": 3.76, "wrong": 0, "checked_elements": 316145664, "status": "ok"}
+{"arm": "nccl-SYS", "backend": "pynccl", "size_bytes": 65536, "rows": 1, "cols": 32768, "graph": true, "inplace": false, "time_us": 24.86, "time_us_min": 24.51, "time_us_max": 24.89, "algbw_gbps": 2.636, "busbw_gbps": 4.613, "wrong": 0, "checked_elements": 421527552, "status": "ok"}
+{"arm": "nccl-SYS", "backend": "pynccl", "size_bytes": 98304, "rows": 8, "cols": 6144, "graph": true, "inplace": false, "time_us": 27.55, "time_us_min": 27.42, "time_us_max": 28.05, "algbw_gbps": 3.568, "busbw_gbps": 6.244, "wrong": 0, "checked_elements": 632291328, "status": "ok"}
+{"arm": "nccl-SYS", "backend": "pynccl", "size_bytes": 131072, "rows": 1, "cols": 65536, "graph": true, "inplace": false, "time_us": 32.51, "time_us_min": 32.29, "time_us_max": 32.84, "algbw_gbps": 4.032, "busbw_gbps": 7.056, "wrong": 0, "checked_elements": 843055104, "status": "ok"}
+{"arm": "nccl-SYS", "backend": "pynccl", "size_bytes": 196608, "rows": 16, "cols": 6144, "graph": true, "inplace": false, "time_us": 43.11, "time_us_min": 42.69, "time_us_max": 43.24, "algbw_gbps": 4.56, "busbw_gbps": 7.98, "wrong": 0, "checked_elements": 1264582656, "status": "ok"}
+{"arm": "nccl-SYS", "backend": "pynccl", "size_bytes": 262144, "rows": 1, "cols": 131072, "graph": true, "inplace": false, "time_us": 53.31, "time_us_min": 52.68, "time_us_max": 53.69, "algbw_gbps": 4.918, "busbw_gbps": 8.606, "wrong": 0, "checked_elements": 1686110208, "status": "ok"}
+{"arm": "nccl-SYS", "backend": "pynccl", "size_bytes": 393216, "rows": 32, "cols": 6144, "graph": true, "inplace": false, "time_us": 78.22, "time_us_min": 77.44, "time_us_max": 78.91, "algbw_gbps": 5.027, "busbw_gbps": 8.797, "wrong": 0, "checked_elements": 2529165312, "status": "ok"}
+{"arm": "nccl-SYS", "backend": "pynccl", "size_bytes": 524288, "rows": 1, "cols": 262144, "graph": true, "inplace": false, "time_us": 105.61, "time_us_min": 105.24, "time_us_max": 106.23, "algbw_gbps": 4.965, "busbw_gbps": 8.688, "wrong": 0, "checked_elements": 3372220416, "status": "ok"}
+{"arm": "nccl-SYS", "backend": "pynccl", "size_bytes": 786432, "rows": 64, "cols": 6144, "graph": true, "inplace": false, "time_us": 96.95, "time_us_min": 96.66, "time_us_max": 97.5, "algbw_gbps": 8.112, "busbw_gbps": 14.195, "wrong": 0, "checked_elements": 5058330624, "status": "ok"}
+{"arm": "nccl-SYS", "backend": "pynccl", "size_bytes": 1048576, "rows": 1, "cols": 524288, "graph": true, "inplace": false, "time_us": 125.39, "time_us_min": 125.16, "time_us_max": 125.4, "algbw_gbps": 8.362, "busbw_gbps": 14.634, "wrong": 0, "checked_elements": 6744440832, "status": "ok"}
+{"arm": "nccl-SYS", "backend": "pynccl", "size_bytes": 1572864, "rows": 128, "cols": 6144, "graph": true, "inplace": false, "time_us": 174.23, "time_us_min": 173.84, "time_us_max": 175.02, "algbw_gbps": 9.027, "busbw_gbps": 15.798, "wrong": 0, "checked_elements": 10116661248, "status": "ok"}
+{"arm": "nccl-SYS", "backend": "pynccl", "size_bytes": 2097152, "rows": 1, "cols": 1048576, "graph": true, "inplace": false, "time_us": 218.13, "time_us_min": 217.53, "time_us_max": 218.35, "algbw_gbps": 9.614, "busbw_gbps": 16.825, "wrong": 0, "checked_elements": 13488881664, "status": "ok"}
+{"arm": "nccl-SYS", "backend": "pynccl", "size_bytes": 3145728, "rows": 256, "cols": 6144, "graph": true, "inplace": false, "time_us": 318.14, "time_us_min": 317.64, "time_us_max": 318.65, "algbw_gbps": 9.888, "busbw_gbps": 17.304, "wrong": 0, "checked_elements": 20233322496, "status": "ok"}
+{"arm": "nccl-SYS", "backend": "pynccl", "size_bytes": 4194304, "rows": 1, "cols": 2097152, "graph": true, "inplace": false, "time_us": 411.44, "time_us_min": 410.71, "time_us_max": 412.33, "algbw_gbps": 10.194, "busbw_gbps": 17.84, "wrong": 0, "checked_elements": 26977763328, "status": "ok"}
+{"arm": "nccl-SYS", "backend": "torch", "size_bytes": 4096, "rows": 1, "cols": 2048, "graph": true, "inplace": true, "time_us": 20.0, "time_us_min": 19.87, "time_us_max": 20.06, "algbw_gbps": 0.205, "busbw_gbps": 0.358, "wrong": 0, "checked_elements": 26214400, "status": "ok"}
+{"arm": "nccl-SYS", "backend": "torch", "size_bytes": 8192, "rows": 1, "cols": 4096, "graph": true, "inplace": true, "time_us": 20.03, "time_us_min": 19.99, "time_us_max": 20.32, "algbw_gbps": 0.409, "busbw_gbps": 0.716, "wrong": 0, "checked_elements": 52428800, "status": "ok"}
+{"arm": "nccl-SYS", "backend": "torch", "size_bytes": 12288, "rows": 1, "cols": 6144, "graph": true, "inplace": true, "time_us": 21.03, "time_us_min": 20.93, "time_us_max": 21.1, "algbw_gbps": 0.584, "busbw_gbps": 1.022, "wrong": 0, "checked_elements": 78643200, "status": "ok"}
+{"arm": "nccl-SYS", "backend": "torch", "size_bytes": 16384, "rows": 1, "cols": 8192, "graph": true, "inplace": true, "time_us": 20.5, "time_us_min": 20.33, "time_us_max": 20.61, "algbw_gbps": 0.799, "busbw_gbps": 1.398, "wrong": 0, "checked_elements": 104857600, "status": "ok"}
+{"arm": "nccl-SYS", "backend": "torch", "size_bytes": 24576, "rows": 2, "cols": 6144, "graph": true, "inplace": true, "time_us": 21.31, "time_us_min": 20.9, "time_us_max": 21.44, "algbw_gbps": 1.153, "busbw_gbps": 2.018, "wrong": 0, "checked_elements": 157286400, "status": "ok"}
+{"arm": "nccl-SYS", "backend": "torch", "size_bytes": 32768, "rows": 1, "cols": 16384, "graph": true, "inplace": true, "time_us": 21.68, "time_us_min": 21.63, "time_us_max": 21.86, "algbw_gbps": 1.512, "busbw_gbps": 2.645, "wrong": 0, "checked_elements": 209715200, "status": "ok"}
+{"arm": "nccl-SYS", "backend": "torch", "size_bytes": 49152, "rows": 4, "cols": 6144, "graph": true, "inplace": true, "time_us": 22.94, "time_us_min": 22.78, "time_us_max": 23.16, "algbw_gbps": 2.143, "busbw_gbps": 3.75, "wrong": 0, "checked_elements": 314572800, "status": "ok"}
+{"arm": "nccl-SYS", "backend": "torch", "size_bytes": 65536, "rows": 1, "cols": 32768, "graph": true, "inplace": true, "time_us": 24.63, "time_us_min": 24.47, "time_us_max": 24.98, "algbw_gbps": 2.661, "busbw_gbps": 4.657, "wrong": 0, "checked_elements": 419430400, "status": "ok"}
+{"arm": "nccl-SYS", "backend": "torch", "size_bytes": 98304, "rows": 8, "cols": 6144, "graph": true, "inplace": true, "time_us": 27.57, "time_us_min": 27.45, "time_us_max": 28.01, "algbw_gbps": 3.565, "busbw_gbps": 6.239, "wrong": 0, "checked_elements": 629145600, "status": "ok"}
+{"arm": "nccl-SYS", "backend": "torch", "size_bytes": 131072, "rows": 1, "cols": 65536, "graph": true, "inplace": true, "time_us": 32.21, "time_us_min": 32.01, "time_us_max": 32.58, "algbw_gbps": 4.07, "busbw_gbps": 7.122, "wrong": 0, "checked_elements": 838860800, "status": "ok"}
+{"arm": "nccl-SYS", "backend": "torch", "size_bytes": 196608, "rows": 16, "cols": 6144, "graph": true, "inplace": true, "time_us": 42.82, "time_us_min": 42.27, "time_us_max": 43.0, "algbw_gbps": 4.592, "busbw_gbps": 8.036, "wrong": 0, "checked_elements": 1258291200, "status": "ok"}
+{"arm": "nccl-SYS", "backend": "torch", "size_bytes": 262144, "rows": 1, "cols": 131072, "graph": true, "inplace": true, "time_us": 53.04, "time_us_min": 52.44, "time_us_max": 53.49, "algbw_gbps": 4.942, "busbw_gbps": 8.649, "wrong": 0, "checked_elements": 1677721600, "status": "ok"}
+{"arm": "nccl-SYS", "backend": "torch", "size_bytes": 393216, "rows": 32, "cols": 6144, "graph": true, "inplace": true, "time_us": 78.4, "time_us_min": 77.11, "time_us_max": 78.8, "algbw_gbps": 5.015, "busbw_gbps": 8.777, "wrong": 0, "checked_elements": 2516582400, "status": "ok"}
+{"arm": "nccl-SYS", "backend": "torch", "size_bytes": 524288, "rows": 1, "cols": 262144, "graph": true, "inplace": true, "time_us": 105.78, "time_us_min": 105.5, "time_us_max": 106.09, "algbw_gbps": 4.956, "busbw_gbps": 8.674, "wrong": 0, "checked_elements": 3355443200, "status": "ok"}
+{"arm": "nccl-SYS", "backend": "torch", "size_bytes": 786432, "rows": 64, "cols": 6144, "graph": true, "inplace": true, "time_us": 96.62, "time_us_min": 96.49, "time_us_max": 96.77, "algbw_gbps": 8.14, "busbw_gbps": 14.245, "wrong": 0, "checked_elements": 5033164800, "status": "ok"}
+{"arm": "nccl-SYS", "backend": "torch", "size_bytes": 1048576, "rows": 1, "cols": 524288, "graph": true, "inplace": true, "time_us": 124.71, "time_us_min": 124.62, "time_us_max": 125.2, "algbw_gbps": 8.408, "busbw_gbps": 14.714, "wrong": 0, "checked_elements": 6710886400, "status": "ok"}
+{"arm": "nccl-SYS", "backend": "torch", "size_bytes": 1572864, "rows": 128, "cols": 6144, "graph": true, "inplace": true, "time_us": 173.95, "time_us_min": 173.65, "time_us_max": 174.69, "algbw_gbps": 9.042, "busbw_gbps": 15.823, "wrong": 0, "checked_elements": 10066329600, "status": "ok"}
+{"arm": "nccl-SYS", "backend": "torch", "size_bytes": 2097152, "rows": 1, "cols": 1048576, "graph": true, "inplace": true, "time_us": 217.87, "time_us_min": 217.53, "time_us_max": 218.08, "algbw_gbps": 9.626, "busbw_gbps": 16.845, "wrong": 0, "checked_elements": 13421772800, "status": "ok"}
+{"arm": "nccl-SYS", "backend": "torch", "size_bytes": 3145728, "rows": 256, "cols": 6144, "graph": true, "inplace": true, "time_us": 317.41, "time_us_min": 317.34, "time_us_max": 318.13, "algbw_gbps": 9.911, "busbw_gbps": 17.343, "wrong": 0, "checked_elements": 20132659200, "status": "ok"}
+{"arm": "nccl-SYS", "backend": "torch", "size_bytes": 4194304, "rows": 1, "cols": 2097152, "graph": true, "inplace": true, "time_us": 409.82, "time_us_min": 408.91, "time_us_max": 410.48, "algbw_gbps": 10.234, "busbw_gbps": 17.91, "wrong": 0, "checked_elements": 26843545600, "status": "ok"}
+W1110 19:43:41.541000 293 torch/distributed/elastic/agent/server/api.py:753] Received 15 death signal, shutting down workers
+W1110 19:43:41.542000 293 torch/distributed/elastic/multiprocessing/api.py:1028] Sending process 362 closing signal SIGTERM
+W1110 19:43:41.543000 293 torch/distributed/elastic/multiprocessing/api.py:1028] Sending process 363 closing signal SIGTERM
+W1110 19:43:41.545000 293 torch/distributed/elastic/multiprocessing/api.py:1028] Sending process 364 closing signal SIGTERM
+W1110 19:43:41.546000 293 torch/distributed/elastic/multiprocessing/api.py:1028] Sending process 365 closing signal SIGTERM
+W1110 19:43:41.547000 293 torch/distributed/elastic/multiprocessing/api.py:1028] Sending process 366 closing signal SIGTERM
+W1110 19:43:41.549000 293 torch/distributed/elastic/multiprocessing/api.py:1028] Sending process 367 closing signal SIGTERM
+W1110 19:43:41.551000 293 torch/distributed/elastic/multiprocessing/api.py:1028] Sending process 368 closing signal SIGTERM
+W1110 19:43:41.553000 293 torch/distributed/elastic/multiprocessing/api.py:1028] Sending process 369 closing signal SIGTERM
+Traceback (most recent call last):
+  File "/usr/local/bin/torchrun", line 10, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 380, in wrapper
+    return f(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/torch/distributed/run.py", line 1138, in main
+    run(args)
+  File "/usr/local/lib/python3.12/dist-packages/torch/distributed/run.py", line 1129, in run
+    elastic_launch(
+  File "/usr/local/lib/python3.12/dist-packages/torch/distributed/launcher/api.py", line 197, in __call__
+    return launch_agent(
+           ^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/torch/distributed/launcher/api.py", line 377, in launch_agent
+    result = agent.run()
+             ^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/torch/distributed/elastic/metrics/api.py", line 134, in wrapper
+    result = f(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/torch/distributed/elastic/agent/server/api.py", line 745, in run
+    result = self._invoke_run(role)
+             ^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/torch/distributed/elastic/agent/server/api.py", line 923, in _invoke_run
+    time.sleep(monitor_interval)
+  File "/usr/local/lib/python3.12/dist-packages/torch/distributed/elastic/multiprocessing/api.py", line 86, in _terminate_process_handler
+    raise SignalException(f"Process {os.getpid()} got signal: {sigval}", sigval=sigval)
+torch.distributed.elastic.multiprocessing.api.SignalException: Process 293 got signal: 15

@@ -1,0 +1,37 @@
+step             exit  seconds   (124 = hit its time limit; rows written before it still count)
+probe               0       16
+nccl-SYS          124      421
+fi-pcie-ipc         0       30
+
+vLLM left alone picks: pynccl (NVLink between all GPUs: False, P2P on every pair: True, FlashInfer PCIe IPC available: True)
+FlashInfer setup: ok, initialized True in 13.9 s, profile pcieswitch-pairs (rank 0 shares a PCIe switch with group member GPU-<redacted>)
+NCCL channels by transport: {'P2P': 32}
+
+Microseconds per all-reduce (slowest GPU's median, CUDA graphs); batch = tokens at hidden size 6144
+      size  batch      NCCL  FlashInfer  FI/NCCL
+     4 KiB      -      20.1           -        -
+     8 KiB      -      20.2           -        -
+    12 KiB      1      21.0         5.8     0.28
+    16 KiB      -      20.5           -        -
+    24 KiB      2      21.4         7.1     0.33
+    32 KiB      -      21.7           -        -
+    48 KiB      4      22.9        12.9     0.56
+    64 KiB      -      24.9           -        -
+    96 KiB      8      27.6        15.5     0.56
+   128 KiB      -      32.5           -        -
+   192 KiB     16      43.1        22.7     0.53
+   256 KiB      -      53.3           -        -
+   384 KiB     32      78.2        39.0     0.50
+   512 KiB      -     105.6           -        -
+   768 KiB     64      97.0        72.6     0.75
+  1024 KiB      -     125.4           -        -
+  1536 KiB    128     174.2       144.3     0.83
+  2048 KiB      -     218.1           -        -
+  3072 KiB    256     318.1       296.0     0.93
+  4096 KiB      -     411.4           -        -
+
+pynccl: 0 wrong of 94,316,789,760 checked values over 20 sizes
+torch: 0 wrong of 93,847,552,000 checked values over 20 sizes
+fi_pcie_ipc: 0 wrong of 40,387,608,576 checked values over 9 sizes
+
+FI/NCCL under 1.00 means FlashInfer is faster. A wrong value, an error, or a step that timed out before its last size means that backend is not safe on this box.
