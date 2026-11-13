@@ -48,11 +48,11 @@ fn every_issue_spec_in_the_repo_parses() {
     }
 }
 
-/// RunPod-only ledgers write back byte for byte; any other reads back as the same ledger.
+/// RunPod-only ledgers write back byte for byte; any other reads back as the same ledger. Ledgers are gitignored, so
+/// this checks the ones on this machine; a fresh clone has none, and the fixture tests below cover both formats.
 #[test]
 fn every_ledger_in_the_repo_reads_and_writes_back() {
     let stores = LedgerStore::all(repo()).unwrap();
-    assert!(!stores.is_empty());
     for store in stores {
         let ledger = store.load().unwrap_or_else(|e| panic!("{}: {e:#}", store.issue()));
         let on_disk = fs::read_to_string(store.path()).unwrap();
