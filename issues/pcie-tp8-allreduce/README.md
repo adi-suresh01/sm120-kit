@@ -226,8 +226,9 @@ docker run --rm --gpus all --ipc=host -v "$PWD":/w -w /w --entrypoint bash vllm/
 
 It prints `table.txt`: microseconds per all-reduce for NCCL and FlashInfer at each size, FlashInfer over NCCL, the
 wrong-value count per backend, the FlashInfer setup profile, and NCCL's transports. FlashInfer picks its profile from
-the topology it finds; the box in the results below has no PCIe switches and got `rootcplx-noswitch` ("no switch-local
-pair observed"), so on a box with two GPUs per switch it may choose a profile these results do not cover.
+the topology it finds: the 2026-11-05 box below has no PCIe switches and got `rootcplx-noswitch` ("no switch-local
+pair observed"), and the 2026-11-10 box, with two GPUs per switch, got `pcieswitch-pairs`. Other topologies may get
+other profiles.
 
 ## Results
 
@@ -277,3 +278,31 @@ Not measured here: a serving run. At batch 1, vllm#59203's trace spends 29.4% of
 `NCCL_P2P_LEVEL=SYS` for the sizes it hands to NCCL) cut most of that, but the end-to-end number needs stage 2. P2P
 across root ports is not safe on every host (a split-NUMA RunPod host hung NCCL with P2P on, issues/sglang-33422), so
 each machine needs a probe before turning it on.
+
+### 2026-11-10, 8x RTX PRO 6000 Server Edition, two GPUs per PCIe switch (contributed)
+
+Run and contributed by James Widner: `run_sweep.sh --hidden 6144` from 09d1e88, unedited, on an owned dual-socket
+EPYC 9965 box with two GPUs per PCIe switch and four per socket (PIX within a pair, NODE within a socket, SYS across).
+Logs, box details and the full table: [`runs/8x-pro6000-server-switch-pairs/`](runs/8x-pro6000-server-switch-pairs/README.md).
+
+FlashInfer picks `pcieswitch-pairs` here. NCCL at `NCCL_P2P_LEVEL=SYS` connected every pair over P2P (32 channels),
+so this is FlashInfer against NCCL over P2P, not over SHM. 0 wrong values on every backend (FlashInfer: 40.4B checked
+over 9 sizes). The NCCL step hung in `destroy_process_group` after its last size, as on the 2026-11-05 box.
+
+vLLM at TP8, CUDA graphs, us per all-reduce, payloads batch x 6144 x 2 B:
+
+| Batch (KiB) | pynccl, `NCCL_P2P_LEVEL=SYS` (P2P) | FlashInfer PCIe IPC | FI/NCCL |
+|---|---|---|---|
+| 1 (12) | 21.0 | **5.8** | 0.28 |
+| 2 (24) | 21.4 | **7.1** | 0.33 |
+| 4 (48) | 22.9 | **12.9** | 0.56 |
+| 8 (96) | 27.6 | **15.5** | 0.56 |
+| 16 (192) | 43.1 | **22.7** | 0.53 |
+| 32 (384) | 78.2 | **39.0** | 0.50 |
+| 64 (768) | 97.0 | **72.6** | 0.75 |
+| 128 (1536) | 174.2 | **144.3** | 0.83 |
+| 256 (3072) | 318.1 | **296.0** | 0.93 |
+
+FlashInfer is ahead of NCCL at every size here, while on the 2026-11-05 box it was level at batch 4, 16 and 32 and
+behind at 8 and 128. The two runs differ in hidden size (6144 vs 5120) and CPU as well as switch layout, so this is
+a comparison of two boxes, not a controlled test of the switch pairs.
