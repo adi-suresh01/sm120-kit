@@ -111,6 +111,14 @@ printf 'boot\0\0\n  File "/x/driver.py", line 3, in launch\nRuntimeError: CUDA e
 check binary "{'fault': 'CUDA error: bad \ufffd\ufffd byte', 'where': 'driver.py\", line 3, in launch'}" ""
 echo "ok: a binary log with bytes that are not UTF-8"
 
+# A worker that died in CUDACHECK leaves no traceback, and the engine's RuntimeError lands after its line.
+mkdir -p "$work/cudacheck"
+printf '%s\n' "Failed: Cuda error /workspace/csrc/custom_all_reduce.cuh:164 'invalid argument'" \
+    '  File "/x/core.py", line 9, in run_engine_core' \
+    'RuntimeError: Engine core initialization failed. See root cause above.' >"$work/cudacheck/server.log"
+check cudacheck "{'fault': \"Cuda error /workspace/csrc/custom_all_reduce.cuh:164 'invalid argument'\"}" ""
+echo "ok: a CUDACHECK abort from vLLM's custom all-reduce"
+
 # No python3 on PATH: the fallback line, built in bash.
 mkdir -p "$work/nopython/bin" "$work/plain"
 for tool in grep head awk sed; do

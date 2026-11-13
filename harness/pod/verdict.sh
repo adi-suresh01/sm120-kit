@@ -17,9 +17,11 @@ export LC_ALL=C
 
 # -a: a crashed process can leave NUL bytes in its log, and grep would then only say "binary file matches".
 # CUDA faults first: a benign early ValueError or RuntimeError line must not mask the real fault. head keeps a
-# line with several matches from adding newlines.
-fault=$(grep -aoE 'illegal memory access|cudaErrorIllegalAddress|CUDA error: [^.]*|Xid [0-9]+' "$log" 2>/dev/null \
-    | head -n 1 || true)
+# line with several matches from adding newlines. vLLM's custom all-reduce CUDACHECK prints "Cuda error <file>:<line>
+# '<reason>'" and exits the worker with no traceback, so the engine's RuntimeError after it would otherwise take the
+# column; its file name holds dots, hence the whole line.
+fault=$(grep -aoE 'illegal memory access|cudaErrorIllegalAddress|CUDA error: [^.]*|Cuda error .*|Xid [0-9]+' "$log" \
+    2>/dev/null | head -n 1 || true)
 if [[ -z $fault ]]; then
     fault=$(grep -aoE 'ValueError: [^.]*|RuntimeError: [^.]*|AssertionError[^.]*|OutOfMemoryError[^.]*' "$log" \
         2>/dev/null | head -n 1 || true)
