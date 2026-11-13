@@ -1,0 +1,36 @@
+# Stage 1 of sglang#49900: the block-FP8 Triton GEMM on one RTX PRO 6000 with synthetic weights, no model download.
+# Everything runs in setup.sh, so `harness up` rents, measures, and pulls, and `harness down` ends the pod; there are
+# no variants. About 5-10 min for the image, 3-5 min of harness gates, and 20-30 min of setup (README.md, "Box and
+# time"). setup.sh starts no step whose limit would end within 8 min of the deadline, so a slow pull costs the last
+# arms, not the pod or the results.
+issue = "sglang-49900"
+planned_hours = 1.0
+
+[pod]
+# The reporter's release: sglang 0.5.23 with torch 2.14.1+cu130, Triton 3.8.0, and FlashInfer 0.7.2 (issue env),
+# pinned by its manifest-list digest (Docker Hub, pushed 2026-10-30). On CUDA its _w8a8_block_fp8_matmul, default
+# config, and SM90-only split-K gate are main's (README.md, "What the code does").
+image = "lmsysorg/sglang:v0.5.23-cu130@sha256:f832b5c39559c9caa900b22ad37c76fcce66470676855c42052102c537812f1f"
+count = 1
+min_cuda = "13.0"
+# The image is 16.1 GB compressed for amd64 and unpacks to roughly three times that; tables, logs, PTX, and the
+# Triton cache need under 1 GB.
+container_disk_gb = 80
+volume_gb = 10
+needs_hf_token = false
+# The reporter's card first. The Workstation Edition has the same sm_120 die and SM count but its own device name, so
+# tune.py names its tables for whichever card ran; env_extra.txt records the clocks and power limit.
+gpus = [
+  { id = "NVIDIA RTX PRO 6000 Blackwell Server Edition", cloud = "SECURE" },
+  { id = "NVIDIA RTX PRO 6000 Blackwell Workstation Edition", cloud = "SECURE" },
+  { id = "NVIDIA RTX PRO 6000 Blackwell Workstation Edition", cloud = "COMMUNITY" },
+]
+
+# No server runs here; [server] only satisfies the schema.
+[server]
+package = "sglang"
+model = "none"
+launch = ["true"]
+port = 30000
+fail_pattern = "never-matches"
+boot_timeout_s = 60
