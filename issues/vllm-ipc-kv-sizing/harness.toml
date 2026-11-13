@@ -1,0 +1,91 @@
+issue = "vllm-ipc-kv-sizing"
+# Does FlashInfer's PCIe IPC all-reduce workspace escape vLLM's KV cache sizing, as vllm#67142 reports? Qwen3-8B at TP4
+# on four PCIe-only RTX PRO 6000s, IPC off against on, in the three sizing setups README.md lays out. Setup is about
+# 8 min (16.4 GB of weights and ws_probe.py), each of the seven arms 3-5 min, about 50 min with up and down. 1.0 h
+# leaves 10 min for a slow image pull; setup.sh stops a download that would cut into the arms.
+planned_hours = 1.0
+
+[pod]
+# The reporter's image (vllm#67142: `vllm/vllm-openai:nightly` sha256:902b49de0568, 0.34.0rc1.dev206+gf5d93296c):
+# vLLM main at f5d93296c (2026-11-11) with FlashInfer 0.7.3. It has the extensible KV cache, which v0.33.0 lacks; the
+# s arms turn it off to get v0.33.0's order of sizing and warmup (README.md, Source).
+image = "vllm/vllm-openai:nightly-f5d93296c8ec82b7e7dabdb308d24d43cb1907bf@sha256:902b49de0568ba5a5c951b0243bc06ef8541f46bc3eb80832961fefb22a19034"
+count = 4
+min_cuda = "13.0"
+# The image (about 28 GB unpacked), 16.4 GB of weights on container disk (setup.sh), and the compile and JIT caches.
+container_disk_gb = 80
+volume_gb = 20
+needs_hf_token = false
+# FlashInfer's IPC workspace maps every peer's slab and aborts the boot without peer access on every pair (vllm#65192
+# is the open fallback), so a box without it cannot run an IPC arm.
+require_p2p = true
+# The image (10.0 GB compressed) and the checkpoint at the pinned revision (16.4 GB).
+expected_download_gb = 30
+# Any edition: all are the same 96 GB GB202, and the slab and KV numbers depend on memory, not clocks. Max-Q first,
+# the reporter's card. RunPod's choices come last, SECURE only because of the data center rule below.
+gpus = [
+  { provider = "vast", id = "RTX PRO 6000 Max-Q", max_usd_hr = 7.5, min_reliability = 0.95, min_inet_down_mbps = 1000, max_download_usd_tb = 10.0 },
+  { provider = "vast", id = "RTX PRO 6000 WS", max_usd_hr = 7.5, min_reliability = 0.95, min_inet_down_mbps = 1000, max_download_usd_tb = 10.0 },
+  { provider = "vast", id = "RTX PRO 6000 S", max_usd_hr = 7.5, min_reliability = 0.95, min_inet_down_mbps = 1000, max_download_usd_tb = 10.0 },
+  { id = "NVIDIA RTX PRO 6000 Blackwell Server Edition", cloud = "SECURE" },
+  { id = "NVIDIA RTX PRO 6000 Blackwell Workstation Edition", cloud = "SECURE" },
+]
+# 153643 (Texas) gave HF 47 MB/s; 137973 (Norway) never accepted the account SSH key (vllm-59203, 11-06).
+avoid_machines = [153643, 137973]
+# Its one 4x host reached HF at 15 MB/s on 10-16 (issues/vllm-56771).
+avoid_data_centers = ["EUR-IS-2"]
+
+[server]
+package = "vllm"
+model = "Qwen/Qwen3-8B"
+launch = ["vllm", "serve", "Qwen/Qwen3-8B"]
+# TP4, the reporter's TP: the slab's layout depends on the world size (20.5x the payload at 4 ranks with the SM120
+# copy-engine region, 9x at 2), so TP4 at 480 x 4096 elements allocates the same bytes as the reporter's DSV4.1 DSpark
+# shape, 384 x 5120 (README.md, Source 3). Everything else is fixed so only the capture sizes, the sizing mode,
+# and the env change between arms. The revision is main on 2026-11-12.
+base_flags = [
+  "--revision", "b968826d9c46dd6066d109eabc6255188de91218",
+  "--tensor-parallel-size", "4",
+  "--max-model-len", "32768",
+  "--max-num-seqs", "128",
+  "--max-num-batched-tokens", "8192",
+]
+port = 8000
+# "peer access is not supported" is the IPC workspace on a pair without P2P; the out-of-memory strings are what H1
+# expects from s1 (cudaMalloc in FlashInfer's create_shared_buffer, or torch in graph capture). Each ends the boot at
+# once instead of at the timeout.
+fail_pattern = "illegal memory access|cudaErrorIllegalAddress|peer access is not supported|out of memory|OutOfMemoryError"
+# A cold boot of an 8B model takes 3-5 min here; the first IPC arm also runs FlashInfer's cold tune, which vllm#65192
+# saw stall past 20 min on 4x RTX PRO 4500. ws_probe.py times the same tune in setup, so a stall shows there first.
+boot_timeout_s = 1200
+
+# e: the extensible KV cache (on by default in this build, config/vllm.py:3257-3259 at f5d93296c), sized after
+# warmup. 480 capture tokens give the reporter's max_numel. e0 also warms the compile caches; e2 repeats it after e1,
+# so the pair bounds run-to-run noise in the post-warmup measurement.
+[variants.e0-off]
+flags = ["--max-cudagraph-capture-size", "480"]
+
+[variants.e1-ipc]
+flags = ["--max-cudagraph-capture-size", "480"]
+env = { VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC = "1" }
+
+[variants.e2-off]
+flags = ["--max-cudagraph-capture-size", "480"]
+
+# m: e with capture sizes up to 8192 tokens, which makes the slab 1.28 GiB per GPU (README.md, Source 3), far
+# above the noise e0 and e2 show. Whatever the IPC arm costs beyond the slab should not grow with it.
+[variants.m0-off]
+flags = ["--cudagraph-capture-sizes", "1", "2", "4", "8", "16", "32", "64", "128", "256", "512", "1024", "2048", "4096", "8192"]
+
+[variants.m1-ipc]
+flags = ["--cudagraph-capture-sizes", "1", "2", "4", "8", "16", "32", "64", "128", "256", "512", "1024", "2048", "4096", "8192"]
+env = { VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC = "1" }
+
+# s: the estimate-based sizing v0.33.0 always uses: the KV cache is allocated at 0.98 of each GPU before warmup, and
+# the 1.28 GiB slab comes after it, into the 1.9 GiB the budget leaves minus what the CUDA context and NCCL hold.
+[variants.s0-off-est]
+flags = ["--no-enable-extensible-kv-cache", "--gpu-memory-utilization", "0.98", "--cudagraph-capture-sizes", "1", "2", "4", "8", "16", "32", "64", "128", "256", "512", "1024", "2048", "4096", "8192"]
+
+[variants.s1-ipc-est]
+flags = ["--no-enable-extensible-kv-cache", "--gpu-memory-utilization", "0.98", "--cudagraph-capture-sizes", "1", "2", "4", "8", "16", "32", "64", "128", "256", "512", "1024", "2048", "4096", "8192"]
+env = { VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC = "1" }
