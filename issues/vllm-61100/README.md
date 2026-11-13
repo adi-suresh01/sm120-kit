@@ -63,13 +63,13 @@ Sequence: `harness up`, `harness exec vllm-61100 a0-stock`. If a0 degenerates, r
 the bug does not reproduce on this host, and the useful answer is the reporter-side toggles (V1 runner, BF16 KV)
 plus the UVA probe for their host.
 
-## Hardware, hours, cost
+## Hardware and hours
 
-1x RTX PRO 6000 Server Edition SECURE, $2.49/hr. Setup about 12 min (8.8 GB image, 72.8 GB weights, about 4.4 GB of
-overlays), about 8 min per variant. Expected 0.4 h if a0 is clean, about 1.6 h with the full matrix;
-`planned_hours = 2.0` caps it at $5.48.
+1x RTX PRO 6000 Server Edition SECURE. Setup about 12 min (8.8 GB image, 72.8 GB weights, about 4.4 GB of overlays),
+about 8 min per variant. Expected 0.4 h if a0 is clean, about 1.6 h with the full matrix; `planned_hours = 2.0` caps
+it.
 
-## Results (2026-10-16, pod sm120-vllm-61100-101f40, US-NC-2, $1.09)
+## Results (2026-10-16, pod sm120-vllm-61100-101f40, US-NC-2)
 
 Host: RTX PRO 6000 Blackwell Server Edition, driver 595.91.07 (CUDA 13.2), the reporter's v0.25.1 image by
 digest. `versions.txt`: vllm 0.25.1, flashinfer-python 0.6.13, flashinfer-jit-cache 0.6.13+cu130,

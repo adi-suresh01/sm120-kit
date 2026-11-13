@@ -119,7 +119,7 @@ Environment additions to the harness's `env.txt` and P2P matrix (`env_extra.sh`)
 generation and width, power and clock limits, `topo -p2p` write, atomics, and NVLink matrices, `lscpu`, `numactl -H`,
 the kernel command line and IOMMU groups, and the NCCL file torch maps.
 
-## Box, time, cost
+## Box and time
 
 - `vllm/vllm-openai:v0.33.0` pinned by its manifest-list digest (Docker Hub, pushed 2026-11-02). At that tag:
   CUDA 13.0.3 with nvcc (`cuda-nvcc-13-0`, which pulls in `build-essential`), torch 2.14.0, NCCL 2.31.2 (the
@@ -127,8 +127,8 @@ the kernel command line and IOMMU groups, and the NCCL file torch maps.
   `build_nccl_tests.sh` installs nvcc, g++, and make only if they are missing, and takes NCCL headers from
   `libnccl-dev` in the CUDA apt repo only if the wheel lacks them.
 - 8x RTX PRO 6000 Max-Q on Vast, falling back to the Server and Workstation Editions (same sm_120, same PCIe
-  question), `max_usd_hr = 17.0`, reliability 0.95 or better. `require_p2p = true` refuses any box where a pair reads
-  other than OK, and the PCIe gate refuses NVLink.
+  question), reliability 0.95 or better. `require_p2p = true` refuses any box where a pair reads other than OK, and
+  the PCIe gate refuses NVLink.
 
 | Step | Estimate |
 |---|---|
@@ -146,9 +146,7 @@ the kernel command line and IOMMU groups, and the NCCL file torch maps.
 
 `planned_hours = 1.25`. `setup.sh` starts no run whose time limit would end within 10 minutes of the deadline, so a
 slow pull or a run of hangs costs the last arms, never the box or the results. `harness quote` on 2026-11-05: no 8x
-Max-Q free; first in stock 8x RTX PRO 6000 S on Vast machine 142634 (Bulgaria) at $13.35/hr, reliability 0.991,
-downloads $13.33/TB; worst case $18.51. A Max-Q at the $17.00 cap reserves $23.38 plus $0.24 of downloads, so a $25
-budget lets `watch` rent any choice. Expected spend at 45 minutes: $10-13.
+Max-Q free; first in stock 8x RTX PRO 6000 S on Vast machine 142634 (Bulgaria), reliability 0.991.
 
 ## Run
 
@@ -158,10 +156,9 @@ harness watch pcie-tp8-allreduce --for 24h; harness down pcie-tp8-allreduce
 harness budget show pcie-tp8-allreduce
 ```
 
-The $25 budget is approved (`harness budget show`). `watch` without a budget would only report the first offer; with
-it, `watch` rents, runs `setup.sh`, and pulls the results;
-`down` pulls again and destroys the box. `;` rather than `&&`, so `down` runs even when `watch` exits non-zero; with
-no box live it does nothing.
+`watch` without a budget would only report the first offer; with one, `watch` rents, runs `setup.sh`, and pulls the
+results; `down` pulls again and destroys the box. `;` rather than `&&`, so `down` runs even when `watch` exits
+non-zero; with no box live it does nothing.
 
 ## Outputs (`results/pcie-tp8-allreduce/`)
 
@@ -235,10 +232,9 @@ other profiles.
 ### 2026-11-05, 8x RTX PRO 6000 Server Edition, Vast machine 142634 (Bulgaria)
 
 Box: dual-socket AMD EPYC 9575F, 2 NUMA nodes, driver 615.71.10, 600 W power limit (default), `topo -p2p r` OK on
-all 28 pairs. vLLM v0.33.0 image, torch NCCL 2.30.7, pynccl 2.31.2. 49 min from rent to `down`, $8.38 (estimate
-until Vast itemizes it). 61 runs ok, 4 timeouts, none of them data loss: the three vLLM NCCL arms finished every
-size and then hung in `destroy_process_group` until their 421 s limit; the forced custom all-reduce arm ran out of
-time at 2 MiB (below).
+all 28 pairs. vLLM v0.33.0 image, torch NCCL 2.30.7, pynccl 2.31.2. 49 min from rent to `down`. 61 runs ok, 4
+timeouts, none of them data loss: the three vLLM NCCL arms finished every size and then hung in
+`destroy_process_group` until their 421 s limit; the forced custom all-reduce arm ran out of time at 2 MiB (below).
 
 Left alone at TP8, vLLM picks pynccl (custom all-reduce off: NVML reports no NVLink; no symmetric-memory entry for
 12.0; FlashInfer PCIe IPC available but opt-in). NCCL then connects every pair through SHM, although P2P works on

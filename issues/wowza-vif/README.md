@@ -98,11 +98,10 @@ a few frames per request and short outputs, once the text result shows a gap wor
 If graphs fails to boot, or its GSM8K replies turn to garbage while shipped's do not, the guide's "needs eager mode"
 is right for this model on this image, and that is the finding to report instead.
 
-## Cost
+## Pod and time
 
-Quoted before the run. `harness quote wowza-vif` on 2026-10-23 21:37Z: 1x RTX PRO 6000 Blackwell Workstation
-Edition, secure, $2.59/hr (EU-CZ-1, EU-RO-1, EUR-IS-1), 0.75 h planned, $2.14 worst case; the Server Edition fallback
-is $2.49/hr ($2.05).
+Checked before the run. `harness quote wowza-vif` on 2026-10-23 21:37Z: 1x RTX PRO 6000 Blackwell Workstation
+Edition, secure (EU-CZ-1, EU-RO-1, EUR-IS-1), 0.75 h planned; the Server Edition is the fallback.
 
 ## Reading the results
 
@@ -122,7 +121,7 @@ is $2.49/hr ($2.05).
 ## Results (2026-10-24)
 
 One pod, 1x RTX PRO 6000 Blackwell Workstation Edition, US-KS-2. `enforce_eager=True` in shipped's engine config and
-`False` in graphs'. Cost $0.74 of the $2.14 budget.
+`False` in graphs'.
 
 | Variant | 1 user | 16 users | 64 users | GSM8K (n=100) | boot |
 |---|---|---|---|---|---|

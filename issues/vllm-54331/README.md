@@ -29,16 +29,15 @@ model, with short benchmarks only. If this crash still exists, that advice needs
 Workload: `vllm bench serve --dataset-name prefix_repetition`, prefix 4096, suffix 1024, 16 prefixes, output 1024
 with `--ignore-eos`, concurrency 70, rounds of 600 prompts for 25 minutes.
 
-## Cost
+## Pod and time
 
-`harness quote` on 2026-10-19: 1x RTX PRO 6000 Server Edition (Workstation out of stock), secure, $2.49/hr, 1.25 h
-planned, $3.42 worst case.
+`harness quote` on 2026-10-19: 1x RTX PRO 6000 Server Edition (Workstation out of stock), secure, 1.25 h planned.
 
 ## Results (2026-10-19)
 
-Pod gizonyehl8edm8: 1x RTX PRO 6000 Blackwell Workstation Edition (the quote had priced the Server Edition, then the
-Workstation Edition came into stock), secure, $2.59/hr, driver 610.57.04.
-Image `nightly-e68efc68`: vLLM 0.32.1rc1.dev36. Cost $1.53 (estimate) of $3.42.
+Pod gizonyehl8edm8: 1x RTX PRO 6000 Blackwell Workstation Edition (the quote had picked the Server Edition, then the
+Workstation Edition came into stock), secure, driver 610.57.04.
+Image `nightly-e68efc68`: vLLM 0.32.1rc1.dev36.
 
 soak-graphs: **survived 25 minutes**, 7 rounds x 592 requests = 4,144 requests at concurrency 70, 0 failed, output
 throughput 2,863-2,908 tok/s every round, mean TPOT 22.6-22.9 ms, no drift. The only error in server.log is the
@@ -47,7 +46,7 @@ soak-eager was not needed and was stopped before it booted.
 
 ### Control on 0.28.0 (issues/vllm-54331-v028)
 
-Pod 4lkd6rwrx2rnu0, same card and driver, `vllm/vllm-openai:v0.28.0`, same model, flags and workload. Cost $1.50.
+Pod 4lkd6rwrx2rnu0, same card and driver, `vllm/vllm-openai:v0.28.0`, same model, flags and workload.
 **Also survived 25 minutes**: 4,144 requests, 0 failed, 2,760-2,790 output tok/s, mean TPOT 23.3-23.6 ms. The only
 `EngineDeadError` is the harness stopping the server at 10:05:55, after round 7 ended at 10:05:49.
 
@@ -94,13 +93,12 @@ that 0.28.0 lacks), to tell the reporter whether upgrading is enough.
 
 ### Results (2026-10-19)
 
-`harness quote`: 1x RTX PRO 6000 Server Edition, secure, $2.49/hr, 1.5 h, $4.11; budget raised to $5.36 after the
-first pod. Spent $3.69.
+`harness quote`: 1x RTX PRO 6000 Server Edition, secure, 1.5 h.
 
-- Pod c8q968e99wzny0 (US-NE-1) was still pulling the image 30 min after create; the harness terminated it ($1.25).
+- Pod c8q968e99wzny0 (US-NE-1) was still pulling the image 30 min after create; the harness terminated it.
   US-NE-1 is now in `avoid_data_centers`.
 - Pod m9jmgtbnf21xgu (EUR-IS-1), driver 595.91.07, vLLM 0.28.0, FlashInfer 0.6.16.post3, torch 2.13.0+cu130, no
-  `flashinfer-cubin` (the report had to uninstall it too). Weights in 60 s. $2.45.
+  `flashinfer-cubin` (the report had to uninstall it too). Weights in 60 s.
 
 Both variants logged the report's attention setup: `Setting attention block size to 2096 tokens`, `decode_backend=xqa,
 kv_cache_dtype=torch.float8_e4m3fn, arch=sm120`. KV pool 59.19 GiB (4,408,785 tokens), `max_num_batched_tokens=8192`,

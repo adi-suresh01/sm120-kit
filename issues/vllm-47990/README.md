@@ -133,7 +133,7 @@ Measurement notes for the write-up:
   Both CUTLASS and Triton rows use the same one, so their ratio holds.
 - The sweep and bench pass `use_ue8m0=False`, as the CUTLASS kernel class does.
 
-## Hours and cost
+## Hours
 
 | Step | Est. |
 |---|---|
@@ -146,8 +146,7 @@ Measurement notes for the write-up:
 | Total | ~60-65 min |
 
 `planned_hours = 2.0` (the deadline). `harness quote vllm-47990` (2026-10-15): 1x RTX PRO 6000 Blackwell Server
-Edition, SECURE, $2.49/hr; worst case $5.48 with the 10% margin. Fallbacks: Workstation Edition SECURE $2.59/hr,
-Workstation Edition COMMUNITY $1.69/hr. Expected spend ~$2.70. Budget ask: $6.
+Edition, SECURE. Fallbacks: Workstation Edition SECURE, Workstation Edition COMMUNITY.
 
 Run: `harness run vllm-47990` (all four variants in file order, then down).
 
@@ -162,8 +161,8 @@ Run: `harness run vllm-47990` (all four variants in file order, then down).
 
 Environment (`results/vllm-47990/env.txt`): 1x RTX PRO 6000 Blackwell Server Edition (cc 12.0, 97887 MiB, driver
 580.173.02), SECURE. vllm 0.31.0, torch 2.13.0+cu130, flashinfer-python 0.7.0.post1, triton 3.7.1.
-Spend: $0.93 (estimate, `harness budget show`), 22.5 min from `run` to terminate. The plan guessed 60-65 min: setup
-took 90 s (model download 27 s) and each eval 2.5-5 min.
+22.5 min from `run` to terminate. The plan guessed 60-65 min: setup took 90 s (model download 27 s) and each eval
+2.5-5 min.
 
 ### Verdicts and routing
 

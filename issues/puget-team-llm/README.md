@@ -37,15 +37,10 @@ they cost?
 The GSM8K bar is "same score as shipped within noise" (n=100, about +/-4 points), not an absolute number. Prefix
 caching's gain needs repeated prompts, which the random benchmark does not have, so these numbers do not show it.
 
-## Cost
-
-`harness quote` on 2026-10-19: 2x Workstation Edition, secure, $5.18/hr, 1.5 h planned, $8.55 worst case.
-
 ## Results (2026-10-19)
 
-Pod 9f0esq6n050mgo: 2x RTX PRO 6000 Blackwell Workstation Edition, secure, $5.18/hr, CUDA peer access 0<->1 true.
-Image `nightly-e68efc68`: vLLM 0.32.1rc1.dev36+ge68efc685, FlashInfer 0.7.2, torch 2.14.0+cu130. Cost $3.18 (estimate)
-of $8.55.
+Pod 9f0esq6n050mgo: 2x RTX PRO 6000 Blackwell Workstation Edition, secure, CUDA peer access 0<->1 true.
+Image `nightly-e68efc68`: vLLM 0.32.1rc1.dev36+ge68efc685, FlashInfer 0.7.2, torch 2.14.0+cu130.
 
 Output tok/s from `vllm bench serve` (random 1024 in / 512 out), mean TTFT / TPOT in ms:
 
@@ -84,7 +79,7 @@ The `installed` and `graphs-installed` variants rerun both with NCCL's defaults.
 Pod sm120-puget-team-llm-ebb837: 2x RTX PRO 6000 Blackwell Workstation Edition, secure, same image. Unlike the
 entry 7 pod run the same hour (PCIe Gen 5, GPUs on different NUMA nodes, `SYS`), this host reports PCIe Gen 4 x16 as
 the link maximum, both GPUs behind one PCIe switch (`PIX`), and cgroup v1. vLLM chose PYNCCL for all-reduce in both
-variants. Cost $3.54 (estimate).
+variants.
 
 | Variant | Boot | c=1 | c=16 | c=64 | TPOT c=1 / 16 / 64 | TTFT c=1 / 16 / 64 | GSM8K, answered replies correct |
 |---|---|---|---|---|---|---|---|
@@ -107,8 +102,7 @@ defaults, P2P allowed, as the pack installs) against shipped and graphs (`NCCL_P
 `.env` asks for). setup.sh first timed an NCCL all-reduce both ways (`allreduce_bw.py`).
 
 Pod sm120-puget-team-llm-99bd70 landed on the same physical host as the recheck (213.173.111.97): PCIe Gen 4 x16
-link maximum, both GPUs behind one switch (`PIX`), CUDA peer access true, cgroup v1. Same image. Cost $6.36
-(estimate).
+link maximum, both GPUs behind one switch (`PIX`), CUDA peer access true, cgroup v1. Same image.
 
 NCCL all-reduce, 2 ranks, bf16:
 
@@ -139,5 +133,3 @@ Serving, output tok/s (random 1024 in / 512 out), mean TPOT in ms; vLLM used PYN
   faster, so the unapplied setting can be dropped rather than wired through. The 10-17 split-NUMA NCCL hang
   (sglang-33422) is the reason to keep it a per-board check rather than a blanket default either way.
 - GSM8K stays a weak check on this thinking model: 42-47 replies per variant ended without a number, as on 10-19.
-
-The whole recheck cost $3.56 + $6.36 on top of the 10-19 run's $3.20.

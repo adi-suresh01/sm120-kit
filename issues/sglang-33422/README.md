@@ -1,8 +1,8 @@
 # sglang#33422: DeepSeek-V4-Flash prefill on 4x PRO 6000, sglang 2-7K tok/s vs vLLM ~12.5K
 
-https://github.com/sgl-project/sglang/issues/33422, reporter hassellof (founder, Ombori), open since 08-03. A paid
+https://github.com/sgl-project/sglang/issues/33422, reporter hassellof (Ombori), open since 08-03. A
 benchmark: the same prompts on sglang (this folder) and on hermia's stock vLLM recipe (`issues/sglang-33422-vllm/`,
-a sibling so it has its own ledger and budget), on the same pod type, so the gap is measured instead of quoted.
+a sibling so it has its own ledger), on the same pod type, so the gap is measured instead of quoted.
 
 ## Reporter setup (copied, ASCII-normalized)
 
@@ -161,10 +161,10 @@ maximum link gen, width, and power limit; a gap between hosts that differ there 
 host memory); the reporter's sglang flags only disable the custom all-reduce, but the US-PA-1 host hung NCCL init
 with P2P on, so every sglang variant sets it too and the two recipes match there.
 
-## Hardware, hours, cost
+## Hardware and hours
 
-4x RTX PRO 6000 Server Edition, SECURE, $9.96/hr. `harness quote` (10-17 01:40Z): stock in EU-CZ-1, EUR-IS-1,
-US-NC-2; `planned_hours = 1.75` caps it at $19.17 worst case.
+4x RTX PRO 6000 Server Edition, SECURE. `harness quote` (10-17 01:40Z): stock in EU-CZ-1, EUR-IS-1, US-NC-2;
+`planned_hours = 1.75`.
 
 The first boot compiles DeepGEMM kernels for every batch size (`deep_gemm_wrapper/compile_utils.py:168-176`, which
 warns "typically 10-20 mins"); later boots on the same pod reuse the cache. Estimates, minutes:
@@ -180,9 +180,8 @@ warns "typically 10-20 mins"); later boots on the same pod reuse the cache. Esti
 | s4-dp-attn | 8 | 1.5 | 4 (1 rep) | 14 | 135 |
 
 The deadline is at 105 min, so on these estimates s1, s3, s2, and s1a fit and s0 and s4 run only if the boots come
-in faster (W1 is about 2.5 min per rep at the reporter's 5.5K tok/s, W2 about 1 min). Expected cost is the whole
-1.75 h, $17.43. The vLLM side (`issues/sglang-33422-vllm/`) is 1.0 h, $10.96 worst case, about $7.50 expected.
-Both: $30.13 worst case, about $25 expected.
+in faster (W1 is about 2.5 min per rep at the reporter's 5.5K tok/s, W2 about 1 min). The expected run is the whole
+1.75 h. The vLLM side (`issues/sglang-33422-vllm/`) is 1.0 h.
 
 ## Stop rules
 
@@ -197,7 +196,7 @@ Both: $30.13 worst case, about $25 expected.
 Sequence (`harness run` ends with `down`, so the matrix goes through `exec` on a pod kept up):
 
 ```
-harness budget set sglang-33422 <usd> --note <approval>
+harness budget set sglang-33422 <usd> --note <note>
 harness up sglang-33422
 harness exec sglang-33422 s1-base s3-ep4 s2-marlin s1a-autotune s0-dspark s4-dp-attn
 harness down sglang-33422
@@ -222,9 +221,9 @@ harness ships only the issue folder to the pod; change both copies together.
 ## Results (2026-10-17)
 
 Three pods. The first (ezpsbqqlivnajk, US-NC-1) came up with a GPU at 90,892 MiB used by a process outside the
-container: setup downloaded the weights, then s1's idle wait failed after 300 s ($1.49). `harness up` now refuses
+container: setup downloaded the weights, then s1's idle wait failed after 300 s. `harness up` now refuses
 any GPU at 2 GiB or more before setup (e649887), and it refused the second pod (z4c5536vfxm5bf, likely the same
-host: GPU 0 at 90,892 MiB, GPU 2 at 70,462) in 47 s ($0.13); US-NC-1 is in `avoid_data_centers` since.
+host: GPU 0 at 90,892 MiB, GPU 2 at 70,462) in 47 s; US-NC-1 is in `avoid_data_centers` since.
 
 The third pod (3l8n2nz2zfqecf, sm120-sglang-33422-7115da) ran the matrix: US-PA-1, 4x RTX PRO 6000 Blackwell Server
 Edition, driver 595.91.07, PCIe Gen5 x16 max, 600 W, container memory limit 754 GB. Topology: GPU0 on NUMA 0, GPUs
@@ -267,8 +266,7 @@ probe correct on every variant, `#cached-token` 0 on every W1/W2 chunk.
   several hundred K (v0.5.16, Max-Q) is beyond what W2 reaches.
 - Host memory peak (s1): 178.3 GiB of 754 GB.
 
-Cost: $16.87 of the $20 budget ($1.49 + $0.13 + $15.25, ledger estimates); with the vLLM side, $21.39 for the
-issue. Posted on sglang#33422 (issuecomment-6231294981).
+Posted on sglang#33422 (issuecomment-6231294981).
 
 ## Decode pair: P2P on vs off (planned 2026-11-05)
 
@@ -299,7 +297,7 @@ flashinfer_mxfp4 --chunked-prefill-size 4096 --disable-flashinfer-autotune --ep-
 |---|---|---|
 | d1-ep4-p2p-on | `NCCL_P2P_DISABLE=0`, which NCCL reads as unset: its defaults | always, first |
 | d2-ep4-p2p-off | `NCCL_P2P_DISABLE=1` | always, second |
-| d3-ep4-p2p-sys | `NCCL_P2P_DISABLE=0 NCCL_P2P_LEVEL=SYS` | only by the rule under Hours and cost |
+| d3-ep4-p2p-sys | `NCCL_P2P_DISABLE=0 NCCL_P2P_LEVEL=SYS` | only by the rule under Hours |
 
 Why d3: the image's NCCL is 2.30.7 (`sglang is using nccl==2.30.7` in the 10-17 logs), and NCCL 2.30.7 uses P2P by
 default only up to PXB, between GPUs behind a common PCIe switch (`src/graph/paths.cc:356`; the AMD exception at
@@ -379,14 +377,13 @@ overhead, which the server's CUDA graphs remove, is common to both transports an
 
 ### Box
 
-Vast only, 4x RTX PRO 6000: Max-Q first (his card), then Server, then Workstation Edition, each capped at $10/hr
-with reliability 0.95, and `require_p2p = true`. RunPod is out of this run: its one 4x host that ran on 10-17 hung
-NCCL with P2P on, and RunPod picks the host. `avoid_data_centers` stays for a RunPod rerun of the 10-17 matrix; the
-harness accepts it beside Vast-only choices (`spec.rs:619-625`) and no Vast choice reads it. `harness quote`
-(11-05 20:34Z): Max-Q on machine 57045 (Lithuania), $5.94/hr, reliability 0.991, 2,885 Mbps down, downloads
-$2.67/TB; fallbacks Server Edition at $6.90-7.60 and Workstation at $6.06-7.97. Stock moves within minutes: the
-21:00Z quote had no free Max-Q, and its first choice was a Server Edition on machine 153928 (Minnesota), $6.05/hr,
-900 Mbps down. The search keeps only hosts whose `cuda_max_good` is at least `min_cuda` 13.0.
+Vast only, 4x RTX PRO 6000: Max-Q first (his card), then Server, then Workstation Edition, each with reliability
+0.95, and `require_p2p = true`. RunPod is out of this run: its one 4x host that ran on 10-17 hung NCCL with P2P on,
+and RunPod picks the host. `avoid_data_centers` stays for a RunPod rerun of the 10-17 matrix; the harness accepts it
+beside Vast-only choices (`spec.rs:619-625`) and no Vast choice reads it. `harness quote` (11-05 20:34Z): Max-Q on
+machine 57045 (Lithuania), reliability 0.991, 2,885 Mbps down; fallbacks Server Edition and Workstation. Stock moves
+within minutes: the 21:00Z quote had no free Max-Q, and its first choice was a Server Edition on machine 153928
+(Minnesota), 900 Mbps down. The search keeps only hosts whose `cuda_max_good` is at least `min_cuda` 13.0.
 
 On Vast the box has one 280 GB disk (`container_disk_gb` + `volume_gb`): the image, the weights (setup.sh keeps them
 in `/root/hf-hub` as before), ShareGPT, the prompts, and logs. `/workspace` is a plain directory there, and nothing
@@ -397,7 +394,7 @@ min, checked every 30 s: 166.9 GB at 60 MB/s takes 46 min, the most that still l
 on a Max-Q, and the harness would otherwise wait on setup until the deadline. `/dev/shm` under 2 GiB (Docker's
 default is 64 MB, and the harness's Vast create asks for no size) ends setup before the probe.
 
-### Hours and cost
+### Hours
 
 Minutes on a Max-Q downloading at ~100 MB/s (800 Mbps), the rate this plan assumes for these hosts; the quoted
 host lists 2,885 Mbps, which would make the download about 10 min. The image is 15.62 GB in 69 layers, so the pull
@@ -417,10 +414,7 @@ about 25 in all; at the 10-17 rates (Server or Workstation Edition) about 18.
 
 `planned_hours = 2.25` (135 min): d1 and d2 with 23 min to spare. d1, d2, and d3 take about 95 min after setup on a
 Max-Q, so d3 fits only when setup ends early: on the quoted host's listed speed setup ends near 27 min, with 108
-left. Worst case at the $10 cap: 2.25 h x $10 x 1.10 + 190 GB at $20/TB = $24.75 + $3.80 = $28.55. On the quoted
-box: $14.71 + $0.51 = $15.22 worst case; expected about $11.60 for d1 and d2 (1.9 h), and $12.60 with d3 after a
-fast setup (122 min). $16.93 of the
-$20 approved on 10-16 is spent, so a $46 total covers the worst case at the cap.
+left. On the quoted box, expected about 1.9 h for d1 and d2, and 122 min with d3 after a fast setup.
 
 The d3 rule: run d3 when d1's probe shows SHM on any GPU pair, d3's probe passed, and setup ends with at least 95 min
 left to the deadline; otherwise d1 and d2 only. Setup's last lines (`results/sglang-33422/jobs/setup.log`) give all
@@ -429,7 +423,7 @@ three and the verdict. d3 then goes in the same exec, last, so a deadline cut lo
 ```
 # The pod's pulls merge file by file and would overwrite the 10-17 env.txt, jobs/setup.log, and verdicts.jsonl.
 cp -R results/sglang-33422 results/sglang-33422-1017
-harness budget set sglang-33422 46 --note <approval>
+harness budget set sglang-33422 <usd> --note <note>
 harness up sglang-33422
 # d3 rule met:
 harness exec sglang-33422 d1-ep4-p2p-on d2-ep4-p2p-off d3-ep4-p2p-sys
@@ -440,7 +434,7 @@ harness down sglang-33422
 
 `harness run sglang-33422 d1-ep4-p2p-on d2-ep4-p2p-off` does up, exec, and down in one, with no room for the d3 call.
 Never leave the names out: `run` and `exec` with none run every variant in file order, d1, d2, d3, then the six
-10-17 variants, until the 2.25 h deadline ends the box, all of it billed.
+10-17 variants, until the 2.25 h deadline ends the box.
 
 ### Stop rules
 
@@ -472,7 +466,7 @@ scheduler behavior holds; image pull and first-boot time on the host's CPU.
 Box: 4x RTX PRO 6000 Server Edition, Vast (New York), all four GPUs on NUMA node 1 and connected `NODE` (separate
 PCIe root ports, one socket), `topo -p2p r` OK on every pair. DeepSeek-V4-Flash-0731 on `lmsysorg/sglang:v0.5.22-cu130`,
 NCCL 2.30.7, TP4 + EP4, flashinfer_mxfp4, DSpark off, `--disable-custom-all-reduce`. Setup 23 min (167 GB at about
-120 MB/s), all three arms OK, GSM8K 19/20 on each. $9.03 billed.
+120 MB/s), all three arms OK, GSM8K 19/20 on each.
 
 Transport, from each arm's `nccl_transport.txt` (8 connections per rank pair, all pairs alike):
 

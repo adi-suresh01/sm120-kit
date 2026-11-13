@@ -4,7 +4,7 @@ AWS's SageMaker hosting examples
 ([aws-samples/sagemaker-genai-hosting-examples](https://github.com/aws-samples/sagemaker-genai-hosting-examples) @
 `63f05821`, 2026-10-21) include `03-features/instances/g7e/g7e_inference_benchmark.ipynb`, added on 2026-04-16 in
 `59c4be3e` ("adding g7e inference notebook for blog") and unchanged since. It deploys Qwen3-32B in BF16 on
-`ml.g7e.2xlarge` (one RTX PRO 6000 Blackwell Server Edition, 96 GB, $4.2039/hr in the notebook) with the AWS vLLM
+`ml.g7e.2xlarge` (one RTX PRO 6000 Blackwell Server Edition, 96 GB) with the AWS vLLM
 container `vllm:0.15.1-gpu-py312-cu129-ubuntu22.04-sagemaker`, and compares it with `ml.g6e.12xlarge` (4x L40S, TP4).
 
 Question: what does that stack cost on its own GPU against the current vLLM release with the same flags and weights,
@@ -90,12 +90,12 @@ the finding, and setup.sh still installs and downloads what current and fp8 need
 | current | 0.32.0 (cu129 venv) | BF16 | serves; GSM8K within noise of shipped; tok/s close to shipped's: BF16 decode at these batch sizes is bound by reading 65 GB of weights per step, so a newer vLLM can gain only on scheduling and kernels |
 | fp8 | 0.32.0 (cu129 venv) | `Qwen3-32B-FP8` | serves; GSM8K within noise of BF16; about 1.6-1.9x BF16's output tok/s at 1 user (half the weight bytes per step), and more than twice the KV room |
 
-## Cost
+## Box and time
 
-Quoted before the run. `harness quote aws-g7e-sample` on 2026-10-23 21:37Z, at 1.25 h: 1x RTX PRO 6000 Blackwell
-Server Edition, secure, $2.49/hr (EU-CZ-1, EU-NL-1, EU-RO-1, EUR-IS-1, US-MO-2, US-NC-2, US-PA-1), $3.42 worst case.
-planned_hours is now 1.5, so $4.11 worst case: setup can take 32 min on a host at the download floor, and three
-variants about 35, which left 1.25 h under 5 min of margin. Expected spend is about an hour, $2.50-2.75.
+`harness quote aws-g7e-sample` on 2026-10-23 21:37Z, at 1.25 h: 1x RTX PRO 6000 Blackwell Server Edition, secure
+(EU-CZ-1, EU-NL-1, EU-RO-1, EUR-IS-1, US-MO-2, US-NC-2, US-PA-1). planned_hours is now 1.5: setup can take 32 min on
+a host at the download floor, and three variants about 35, which left 1.25 h under 5 min of margin. Expected run
+time is about an hour.
 
 ## Reading the results
 

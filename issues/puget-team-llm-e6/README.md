@@ -141,13 +141,7 @@ harness down puget-team-llm-e6
 
 soak-shipped takes about 35 minutes (restore, boot, 25 of soak, one round). planned_hours leaves that when soak-graphs
 dies early, as the report's crashes did. If less than 35 minutes remain before the deadline `up` printed, run `harness
-down` instead, and rerun soak-graphs and soak-shipped together on one new pod under a new budget.
-
-## Cost
-
-Quoted before the run. `harness quote` on 2026-10-23 15:07 PDT: 2x RTX PRO 6000 Blackwell Workstation Edition,
-secure, $5.18/hr, 2.0 h planned, $11.40 worst case (Server Edition fallback at $4.98/hr, $10.96 worst case). The
-two-variant kit was quoted at 1.0 h, $5.70; the soak and the 1-GPU pair add the rest.
+down` instead, and rerun soak-graphs and soak-shipped together on one new pod.
 
 ## Reading the results
 
@@ -194,7 +188,7 @@ One pod, 2x RTX PRO 6000 Blackwell Workstation Edition, EU-CZ-1, driver 595.91.0
 as installed; tp1-* ran with `CUDA_VISIBLE_DEVICES=0`. SM clocks held 2.77-2.82 GHz median under load in every variant.
 All-reduce ran on PYNCCL; graphs' server.log shows `enable_prefix_caching=True` and "Mamba cache mode is set to
 'align' for NemotronHForCausalLM", shipped's does not. The checkpoint's own config code loaded on the image's
-transformers in every variant. Cost $4.44 of the $11.40 budget.
+transformers in every variant.
 
 Output tok/s, random 1024-token prompts, 512 output tokens (mean TPOT in ms in brackets):
 

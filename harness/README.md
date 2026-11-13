@@ -27,7 +27,7 @@ issues/<repo>-<num>/
   setup.sh            optional: installs and downloads; runs once per pod, after env_report.sh
   hooks.sh            optional: defines pre_launch, post_smoke, and post_stop (below)
   patches/<name>.diff patches a variant can apply to an installed Python package
-  harness-ledger.json written by the harness: budget, pods, cost, RunPod organization, Vast machines. Commit it.
+  harness-ledger.json written by the harness: budget, pods, cost, RunPod organization, Vast machines. Gitignored; it stays local.
 ```
 
 `harness.toml`:

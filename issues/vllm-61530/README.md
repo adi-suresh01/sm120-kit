@@ -101,23 +101,21 @@ INFO to a file per rank, GSM8K 50, `mem_snapshot.sh` (GPU, server-log, host, cgr
 issues/vllm-59203 minus c=64. The harness's memory guard records the container's memory every 5 s
 (`<arm>/memory.jsonl`), which gives the boot's peak.
 
-## Box, hours, cost
+## Box and hours
 
-4x RTX PRO 6000 (Server Edition first, then Workstation, then Max-Q) on Vast with at least 280 GiB of host RAM,
-1.5 Gbps down, and downloads at most $10/TB; then RunPod's 4x Server Edition (SECURE), which charges nothing for
-downloads. Setup about 5 min plus the download (25 min at 300 MB/s), a0 about 30 min, every later arm about 25, 6 for
-the last exec and down: about 1.5 h for a0 and a1. `planned_hours = 2.0`.
+4x RTX PRO 6000 (Server Edition first, then Workstation, then Max-Q) on Vast with at least 280 GiB of host RAM and
+1.5 Gbps down; then RunPod's 4x Server Edition (SECURE). Setup about 5 min plus the download (25 min at 300 MB/s), a0
+about 30 min, every later arm about 25, 6 for the last exec and down: about 1.5 h for a0 and a1.
+`planned_hours = 2.0`.
 
-On 2026-11-06 no Vast offer met the floors (the four 4x offers were either $39-41/TB downloads or 569 Mbps), and
-`harness quote` gave RunPod US-NE-1 at $9.96/hr, $21.91 worst case. Budget: $22. RunPod refused every create from
-18:32 to 19:06Z (listed stock, no instance); a Vast 4x Max-Q at $7.15/hr with $4.10/TB downloads and 8.5 Gbps then met the
-floors and rented (Results).
+On 2026-11-06 no Vast offer met the floors, and `harness quote` gave RunPod US-NE-1. RunPod refused every create from
+18:32 to 19:06Z (listed stock, no instance); a Vast 4x Max-Q with 8.5 Gbps then met the floors and rented (Results).
 
 ## Run
 
 ```bash
 harness quote vllm-61530
-harness budget set vllm-61530 <usd> --note <approval>        # nothing rents without it
+harness budget set vllm-61530 <usd> --note <text>        # nothing rents without it
 harness up vllm-61530 && harness exec vllm-61530 a0-fp8idx
 # then the second exec the next: line names, by a0's verdict
 harness exec vllm-61530 <arms>; harness down vllm-61530
@@ -155,7 +153,7 @@ Run 2026-11-06 19:14-19:42Z on Vast machine 150216: 4x RTX PRO 6000 Blackwell **
 (300 W default, 325 W set), driver 595.91.07, 2x AMD EPYC 9255, 755 GiB host RAM (512 GiB container limit). GPUs 0-1
 sit on NUMA 0 and 2-3 on NUMA 1, so this TP4 crosses the socket (SYS between the halves), which a TP4 per NUMA half
 of an 8x box does not. P2P read OK on 12/12 pairs; NCCL ran its ring over SHM/direct. The 429 GB checkpoint
-downloaded in 6 min. 28 min rented, **$4.83** of the $22 budget.
+downloaded in 6 min. 28 min rented.
 
 | Arm | Verdict | Boot | GSM8K 50 | Weights / GPU | CUDA graphs | KV cache | KV tokens (128K requests) |
 |---|---|---:|---:|---:|---:|---:|---:|

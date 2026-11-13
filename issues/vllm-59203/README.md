@@ -144,16 +144,16 @@ last: no DSV4.1 server of ours has prefilled in 8192-token chunks (vllm-56771 ra
 cost the 1K rows. Median ITL is the decode number; mean TPOT at c >= 8 also carries other requests' prefill. Output
 tok/s is the client's.
 
-## Box, hours, cost
+## Box and hours
 
 Vast, 8x RTX PRO 6000: Server Edition first (stage 1's box and the trace's), then Workstation (same 600 W GB202),
 then Max-Q (300 W, the sglang#33422 production card; its rows decode slower and are labeled by card).
-`require_p2p = true` (all 28 pairs OK), the PCIe gate refuses NVLink, `max_usd_hr = 15`, reliability 0.95,
-`min_inet_down_mbps = 800`, downloads at most $10/TB. Image `vllm/vllm-openai:v0.33.0` by digest, the same as stage 1.
+`require_p2p = true` (all 28 pairs OK), the PCIe gate refuses NVLink, reliability 0.95, `min_inet_down_mbps = 800`.
+Image `vllm/vllm-openai:v0.33.0` by digest, the same as stage 1.
 
-The download is the big unknown. Every 8x offer on 11-06 listed 0.86-1.6 Gbps (S x8 Texas at 1.0 and 0.86 Gbps,
-$14.04/hr, $2.73/TB; WS x8 Quebec at 1.6 Gbps, $16.00/hr, reliability 0.906), and sglang-33422's Vast box delivered
-about 120 MB/s from HF on a host listed at 2.9 Gbps. This plan assumes ~110 MB/s:
+The download is the big unknown. Every 8x offer on 11-06 listed 0.86-1.6 Gbps (S x8 Texas at 1.0 and 0.86 Gbps;
+WS x8 Quebec at 1.6 Gbps, reliability 0.906), and sglang-33422's Vast box delivered about 120 MB/s from HF on a host
+listed at 2.9 Gbps. This plan assumes ~110 MB/s:
 
 | Step | Minutes | Running |
 |---|---|---|
@@ -167,15 +167,14 @@ about 120 MB/s from HF on a host listed at 2.9 Gbps. This plan assumes ~110 MB/s
 
 `planned_hours = 3.5` (210 min), 22 min over the expected path for boots slower than estimated. The download stops at
 its 3-minute rate check when it would end less than 75 min before the deadline, or at that point, so a slow host costs
-about 25 min, never b0 and b2. On the expected path the run is about 3.15 h: $44.20 at $14.04/hr plus $1.43 of
-downloads, about $46. On a host that delivers 350 MB/s the download takes 25 min and the run about 2.25 h, about $33.
-The `harness quote` worst case reserves 3.5 h x rate x 1.10 plus the downloads.
+about 25 min, never b0 and b2. On the expected path the run is about 3.15 h. On a host that delivers 350 MB/s the
+download takes 25 min and the run about 2.25 h.
 
 ## Run
 
 ```bash
 harness quote vllm-59203
-harness budget set vllm-59203 <usd> --note <approval>        # nothing rents without it
+harness budget set vllm-59203 <usd> --note <text>        # nothing rents without it
 harness watch vllm-59203 --for 24h && harness exec vllm-59203 b0-default \
   && grep -qE '"verdict": "(OK|POST_FAIL)"' results/vllm-59203/b0-default/verdict.json \
   && harness exec vllm-59203 b2-sys-fi b1-p2p-sys; harness down vllm-59203
@@ -224,9 +223,8 @@ Box: dual-socket AMD EPYC 9554, 2 NUMA nodes, GPUs 0-3 on socket 0 and 4-7 on so
 `SYS` across), driver 580.105.08, `topo -p2p r` OK on all 28 pairs, 1.45 TB RAM. vLLM v0.33.0 plus the #60762
 backport, TP8, CUDA graphs, DSpark off. Weights came down at 246 MB/s; setup took 40 min. Boots: b0 567 s (cold),
 b2 231 s, b1 151 s. Every request in every row completed (0 failed), GSM8K 48/50 in all three arms. One rep per arm,
-paired on this box only; c=1 rows are 8 requests, the 32K row 6. 1.24 h on this box, $17.51 (estimate); the issue
-spent $23.67 including three boxes that failed before setup (one slow HF download, two SSH key-mode refusals that
-harness ad3cf4c now repairs).
+paired on this box only; c=1 rows are 8 requests, the 32K row 6. 1.24 h on this box; three boxes failed before
+setup (one slow HF download, two SSH key-mode refusals that harness ad3cf4c now repairs).
 
 | Arm | Row | Median ITL (ms) | vs b0 | Output tok/s | vs b0 | Median TTFT (ms) | vs b0 |
 |---|---|---|---|---|---|---|---|
@@ -267,7 +265,7 @@ SHM vs 6,288 us over P2P.
 
 The watch rented machine 57498 again, so these rows share a host with the run above. Weights came down at 305 MB/s;
 setup took 35 min. Boots: b0 572 s (cold), b3 236 s, b2 150 s. Every request completed, GSM8K 49/50 (b0, b3) and 48/50
-(b2). One rep per arm. 1.14 h, $16.01 (estimate); the issue has spent $39.68.
+(b2). One rep per arm. 1.14 h.
 
 | Arm | Row | Median ITL (ms) | vs b0 | Output tok/s | vs b0 | Median TTFT (ms) | vs b0 |
 |---|---|---|---|---|---|---|---|

@@ -138,13 +138,7 @@ harness down puget-team-llm-e1
 
 soak-shipped takes about 35 minutes (restore, boot, 25 of soak, one round). planned_hours leaves that when soak-graphs
 dies early, as the report's crashes did. If less than 35 minutes remain before the deadline `up` printed, run `harness
-down` instead, and rerun soak-graphs and soak-shipped together on one new pod under a new budget.
-
-## Cost
-
-Quoted before the run. `harness quote` on 2026-10-23 15:07 PDT: 2x RTX PRO 6000 Blackwell Workstation Edition,
-secure, $5.18/hr, 2.0 h planned, $11.40 worst case (Server Edition fallback at $4.98/hr, $10.96 worst case). The
-two-variant kit was quoted at 1.0 h, $5.70; the soak and the 1-GPU pair add the rest.
+down` instead, and rerun soak-graphs and soak-shipped together on one new pod.
 
 ## Reading the results
 
@@ -187,7 +181,7 @@ two-variant kit was quoted at 1.0 h, $5.70; the soak and the 1-GPU pair add the 
 One pod, 2x RTX PRO 6000 Blackwell Workstation Edition, EU-CZ-1, driver 595.91.07, GPUs on different NUMA nodes
 (`SYS`), CUDA peer access both ways. `NCCL_P2P_DISABLE` absent from every server process, as installed. SM clocks held
 2.80-2.85 GHz median under load in every variant. All-reduce ran on PYNCCL; `enable_prefix_caching=True` appears in
-graphs' server.log and not in shipped's. Cost $4.94 of the $11.40 budget.
+graphs' server.log and not in shipped's.
 
 Output tok/s, random 1024-token prompts, 512 output tokens (mean TPOT in ms in brackets):
 
@@ -219,7 +213,7 @@ Output tok/s, random 1024-token prompts, 512 output tokens (mean TPOT in ms in b
 
 shipped and graphs again, on a new pod with the fixed `gsm8k_chat.py`: 2x RTX PRO 6000 Blackwell Workstation Edition,
 EU-CZ-1, both GPUs on one NUMA node (`NODE`, `SYS` in the first run), PCIe Gen5 x16 under load, CUDA peer access both
-ways, SM clocks 2.84-2.85 GHz median under load. Cost $1.71; the entry's total is $6.65 of the $9.21 budget.
+ways, SM clocks 2.84-2.85 GHz median under load.
 
 | Variant | 1 user | 16 users | 64 users | boot |
 |---|---|---|---|---|

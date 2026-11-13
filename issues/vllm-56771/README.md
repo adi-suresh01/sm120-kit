@@ -1,8 +1,7 @@
 # vllm#56771: DeepSeek-V4.1-Flash + DSpark, illegal memory access in sm_120 sparse-MLA prefill
 
-https://github.com/vllm-project/vllm/issues/56771, reporter moshemalawach (LibertAI, which sells DeepSeek V4.1
-Flash on its public API). Same reporter as vllm#55757. Covers vllm#58910 (TP4, no spec, 35K prompt) in the same
-pod.
+https://github.com/vllm-project/vllm/issues/56771, reporter moshemalawach (LibertAI). Same reporter as vllm#55757.
+Covers vllm#58910 (TP4, no spec, 35K prompt) in the same pod.
 
 ## Reporter setup (09-16 and 09-17, copied)
 
@@ -79,12 +78,12 @@ then a 512-token generation at concurrency 1 for decode speed.
 Sequence: `harness up`, `harness exec vllm-56771 g0-boot-stock a1-dspark-graphs a0-nospec-graphs`, then a2 a3 a4
 or a5 by the a1 result, then `harness down`. Stop rule: nothing boots within 60 minutes of setup done -> down.
 
-## Hardware, hours, cost
+## Hardware and hours
 
-4x RTX PRO 6000 Server Edition, SECURE, about $9.96/hr (2.49/GPU-hr). Stock was LOW on 2026-10-16 (EUR-IS-1,
-US-NE-1, host CUDA 13.2). Setup: image about 3 min, 510.3 GB of weights about 10 min at our measured 0.83 GB/s,
-prompts under a minute. Variants: g0 about 5 min, a1 cold boot plus prompts about 25 min, a0 about 15 min, two
-follow-ups about 30 min. Expected 2-2.6 h, about $20-26; `planned_hours = 3.5` caps it at $38.35 worst case.
+4x RTX PRO 6000 Server Edition, SECURE. Stock was LOW on 2026-10-16 (EUR-IS-1, US-NE-1, host CUDA 13.2). Setup:
+image about 3 min, 510.3 GB of weights about 10 min at our measured 0.83 GB/s, prompts under a minute. Variants: g0
+about 5 min, a1 cold boot plus prompts about 25 min, a0 about 15 min, two follow-ups about 30 min. Expected 2-2.6 h;
+`planned_hours = 3.5` caps it.
 The container's memory limit (the cgroup's, not the host RAM `free` shows) must be at least 256 GiB for the pinned
 Engram tables; `setup.sh` stops before the download otherwise, and also after it when a cold read of the largest
 shard runs under 500 MB/s (then `harness down`). The weights live on container disk (`container_disk_gb = 600`), not
@@ -92,21 +91,21 @@ the FUSE volume.
 
 ## Results
 
-### Attempts 1-5 (2026-10-16, no run, $25.43)
+### Attempts 1-5 (2026-10-16, no run)
 
 - Pods 1 and 2 ended as "proxy-only" while the uncached 9.6 GB nightly image pulled (a harness bug, fixed in
-  2f34e1b), $0.52 and $0.53.
+  2f34e1b).
 - Pod 3 (sm120-vllm-56771-4f142b, EUR-IS-2, host 81.27.69.177) waited 25 min for the image, then sat in
-  `setup.sh` for 1h52m: the weights came down at 6-9 MB/s, 60 of 510 GB. Terminated by hand at 15:55Z, $22.78.
+  `setup.sh` for 1h52m: the weights came down at 6-9 MB/s, 60 of 510 GB. Terminated by hand at 15:55Z.
 - Pod 4 landed on the same host. `setup.sh` now times the first 3 min of the download and stops under 400 MB/s;
-  it stopped there, $0.85.
-- Pod 5 (no setup, $0.51) measured the host: container disk writes 1.2 GB/s, /workspace (a MooseFS fuse mount)
+  it stopped there.
+- Pod 5 (no setup) measured the host: container disk writes 1.2 GB/s, /workspace (a MooseFS fuse mount)
   130 MB/s, and one HF shard downloads at 15 MB/s. The host's network is the limit, not the disk: 510 GB would
   take over 9 h. The host has 728 GB of RAM.
 - The live catalog (count 4, CUDA >= 13.0) lists 4x Server Edition stock only in EUR-IS-2, SECURE; community has
   none. Waiting for stock elsewhere, with the harness told to avoid EUR-IS-2.
 
-### Attempt 6 (2026-10-16, EU-CZ-1, a1 never finished booting, $7.70)
+### Attempt 6 (2026-10-16, EU-CZ-1, a1 never finished booting)
 
 The harness now takes `avoid_data_centers` (0ba8c45); 4x stock showed up in EU-CZ-1 at 17:23Z.
 
@@ -142,10 +141,9 @@ released, then every touched file after the load; `PYTORCH_ALLOC_CONF=pinned_max
 `AllocatorConfig.cpp:245-252`) pins exact sizes. Estimated peak with both: about 318 GiB (413 if a rank lags a whole
 Engram shard). Every patched variant now carries both; memory.jsonl will show whether the estimate holds.
 
-Total for this issue: $33.13 of $40 by the ledger ($32.61 billed), not enough for another 4x boot. Attempt 7 quote:
-4x Server Edition SECURE, $9.96/hr, planned 1.75 h (setup, a1, a0), worst case $17.43.
+Attempt 7 quote: 4x Server Edition SECURE, planned 1.75 h (setup, a1, a0).
 
-### Attempt 7 (2026-10-16, US-NC-2, a1 and a0 serve, $10.76 estimated)
+### Attempt 7 (2026-10-16, US-NC-2, a1 and a0 serve)
 
 Pod sm120-vllm-56771-cbff77 (l1hiiy61vbv4ki), 4x RTX PRO 6000 Blackwell Server Edition, driver 595.91.07, PCIe only
 (PIX/NODE). Image nightly `49cb2bbf` (vllm 0.32.0rc1.dev281+g49cb2bbf7, flashinfer-python 0.7.2, torch
@@ -177,7 +175,6 @@ Verdict: H1 holds on this stack. With FlashInfer 0.7.2 and #60762's 64-token blo
 serves the >= 4K prompts that crashed 100% on flashinfer 0.6.18.post1, and DSpark decodes 1.47x faster than no
 spec (101.5 vs 68.9 tok/s). The reporter's private SM120 patch set was not used. a2-a4 were not needed; the
 adaptive-verification path is refused at startup for DSV4.1, so #60945's fix cannot be reached on this model.
-Total for this issue: $43.89 of $52 by the ledger.
 
 ### Upstream (2026-10-16)
 

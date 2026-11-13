@@ -77,8 +77,7 @@ Run order: A0, A1, A2, A4, A3, A5, B0, B1, B3, B2, C. A0 first so that an H3 fai
 Branches:
 - A0 crashes (H3): one `compute-sanitizer --tool memcheck` run on the smallest case (`--max-running-requests 1`,
   short prompt), capped at 30 min, then stop.
-- A4 serves eager but dies in capture (H2): keep the log, stop the pod, find the cause offline. A second
-  session needs a new approval.
+- A4 serves eager but dies in capture (H2): keep the log, stop the pod, find the cause offline.
 - Load faults (H4): record `ulimit -l`, `free -g`, `numactl -H` next to the error and stop.
 
 ## Quality and speed (every NEXTN run that serves: A4, A5, B2, B3; A3 gets accept length only)
@@ -100,9 +99,8 @@ Branches:
 
 ## Pod
 
-- 2x RTX PRO 6000, PCIe, secure tier (stage 1: $4.98/hr at EUR-IS-2, no community stock). Re-read live stock
-  and price before asking for approval. Host RAM >= 128 GB: the pinned PLE table is 47.7 GiB (23.8 per rank)
-  plus page cache for the checkpoint load.
+- 2x RTX PRO 6000, PCIe, secure tier (stage 1: EUR-IS-2, no community stock). Host RAM >= 128 GB: the pinned
+  PLE table is 47.7 GiB (23.8 per rank) plus page cache for the checkpoint load.
 - 320 GB volume disk at `/workspace`, `HF_HOME=/workspace/hf`: the 133 GB checkpoint plus the three RadixArk MTP
   shards, with room to fetch the full 135 GB RadixArk export if the draft does not load from the partial
   directory. No network volume; a second session re-downloads.
@@ -117,7 +115,7 @@ Branches:
   `ulimit -l`, `free -g`, `numactl -H`. The cookbook says the pinned table needs `--ulimit memlock=-1` under
   Docker; if memlock is limited, record it and try, since the first pinned load shows whether it matters.
 
-## Local prep before any spend
+## Local prep before any pod
 
 - Fetch the four PR diffs at the heads above into `patches/`, dry-run each set (#40172, #43330, #42566, #44448)
   against the image's sglang commit, and note which combinations conflict.
@@ -125,14 +123,14 @@ Branches:
   cookbook's two-node cell.
 - Write the scripts below; reuse `harness/pod/serve_and_smoke.sh`, `harness/pod/wait_gpu_idle.sh`, `harness/pod/patch_pkg.sh`.
 
-## Time, cost, stop rules
+## Time and stop rules
 
 Setup and download ~25 min, eleven boots at ~6-8 min each ~80 min, quality and speed in the same boots on up to
-four configs ~60 min: ~3 h, ~$15 at $4.98/hr. Hard cap 4 h (~$20).
+four configs ~60 min: ~3 h. Hard cap 4 h.
 
 - Neither A1 nor A2 reproduces within the first hour: stop; the fallback is the reporter's exact images
-  (`dev-cu13` 10-02 digest, `dev-qwen38-next-local` 4ccff141), which needs a new approval.
-- Terminate the moment the matrix is done. Code is written locally between sessions, never on paid time.
+  (`dev-cu13` 10-02 digest, `dev-qwen38-next-local` 4ccff141).
+- Terminate the moment the matrix is done. Code is written locally between sessions, never on the pod.
 
 ## Deliverables
 
@@ -161,9 +159,9 @@ four configs ~60 min: ~3 h, ~$15 at $4.98/hr. Hard cap 4 h (~$20).
 
 ### Pod log
 
-| Date | Pod id | GPU | Start | Stop | Cost |
-|---|---|---|---|---|---|
-| 2026-10-15 | kfyqcddi6nefdp | 2x RTX PRO 6000 Server, secure, US-PA-1, host CUDA 13.2, 377 GB RAM, 96 vCPU, $4.98/hr (no community or WK stock) | 09:45:22Z | ~12:37Z (terminated) | ~$14.3 (2.87 h x $4.98/hr); billing read at teardown $9.34, lagging |
+| Date | Pod id | GPU | Start | Stop |
+|---|---|---|---|---|
+| 2026-10-15 | kfyqcddi6nefdp | 2x RTX PRO 6000 Server, secure, US-PA-1, host CUDA 13.2, 377 GB RAM, 96 vCPU (no community or WK stock) | 09:45:22Z | ~12:37Z (terminated) |
 
 ### Environment (pod kfyqcddi6nefdp)
 

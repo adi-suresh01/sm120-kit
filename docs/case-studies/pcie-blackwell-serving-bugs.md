@@ -1,4 +1,4 @@
-# Five LLM serving bugs on PCIe RTX PRO 6000, for $18 of rented GPU time
+# Five LLM serving bugs on PCIe RTX PRO 6000
 
 I'm Aditya, an ML engineer who most recently served models on PCIe RTX PRO 6000 clusters at Kos AI, now founder of
 Provedex. The RTX PRO 6000 and the RTX 5090 are sm_120 Blackwell, and a lot of vLLM and SGLang is tuned for H100 and
@@ -8,7 +8,6 @@ was still blocked on these GPUs, reproduced them on rented RunPod GPUs, and foun
 - Issues: [vLLM #49476](https://github.com/vllm-project/vllm/issues/49476) and [SGLang #44291](https://github.com/sgl-project/sglang/issues/44291)
 - Bugs root-caused: 5
 - PRs I opened: 2 on SGLang ([#44448](https://github.com/sgl-project/sglang/pull/44448), [#44480](https://github.com/sgl-project/sglang/pull/44480)), not merged yet
-- Pod time: 3.8 hours across 3 pods, about $18
 
 ## 1. vLLM #49476: Qwen3.6-35B-A3B NVFP4 on one RTX 5090
 
@@ -30,8 +29,6 @@ What serves today under the 5090 ceiling with CUDA graphs: #60069 plus any one o
 reporter's config with padded concurrent batches; with #57946, 13 of 13 concurrent requests came back coherent with
 550k tokens of KV cache. Full table in
 [the issue comment](https://github.com/vllm-project/vllm/issues/49476#issuecomment-6186410252).
-
-26 minutes on 1 GPU, $1.09.
 
 ## 2. SGLang #44291: Qwen3.8-Flash-Next NVFP4 on 2x PCIe RTX PRO 6000
 
@@ -105,8 +102,6 @@ The second pod's GPUs failed SGLang's own P2P check (`gpu_p2p_access_check`, fal
 `nvidia-smi` and PyTorch said P2P was fine, and custom all-reduce hung there for every model, including Qwen3-0.6B.
 So #44448 still has no result on the real checkpoint. If you rent these cards, check P2P with the engine's own test,
 not with `nvidia-smi`.
-
-Stage 1 took 27 minutes on 2 GPUs ($2.23), stage 2 took 2.9 hours ($14.30).
 
 ## Takeaways
 

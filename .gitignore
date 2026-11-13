@@ -7,3 +7,4 @@ __pycache__/
 harness/target/
 issues/*/.harness-ledger.lock
 issues/*/harness-ledger.json.tmp
+issues/*/harness-ledger.json

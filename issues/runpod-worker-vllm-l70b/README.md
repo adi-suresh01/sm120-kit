@@ -72,11 +72,11 @@ variants to have run first on the same pod.
 The no-KV-room case (`Cannot auto-fit`, which the worker does not recognise) is in the r1d8b kit only: it does not
 depend on the card.
 
-## Cost
+## Pod and time
 
-Quoted before the run (`harness quote runpod-worker-vllm-l70b`, 2026-10-23): 1x NVIDIA RTX PRO 6000 Blackwell
-Server Edition, secure, $2.49/hr (EU-RO-1 and US-NC-2 at 18:15Z; Workstation Edition $2.59/hr in EU-CZ-1 as
-fallback), 1.25 h planned, $3.42 worst case. Setup 8-17 min, then about 40 min of variants.
+Checked before the run (`harness quote runpod-worker-vllm-l70b`, 2026-10-23): 1x NVIDIA RTX PRO 6000 Blackwell
+Server Edition, secure (EU-RO-1 and US-NC-2 at 18:15Z; Workstation Edition in EU-CZ-1 as fallback), 1.25 h
+planned. Setup 8-17 min, then about 40 min of variants.
 
 ## Reading the results
 
@@ -98,7 +98,7 @@ fallback), 1.25 h planned, $3.42 worst case. Setup 8-17 min, then about 40 min o
 
 ## Results (2026-10-24)
 
-One pod, 1x RTX PRO 6000 Blackwell Server Edition, EUR-NO-1. Cost $1.69 of the $3.42 budget.
+One pod, 1x RTX PRO 6000 Blackwell Server Edition, EUR-NO-1.
 
 | Variant | 1 | 8 | 30 concurrent | GSM8K (n=50) | boot |
 |---|---|---|---|---|---|

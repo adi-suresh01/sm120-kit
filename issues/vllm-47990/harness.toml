@@ -1,5 +1,5 @@
 issue = "vllm-47990"
-# Setup about 12 min, then 4 variants about 50 min together (README.md, "Hours and cost"). Each pre_launch step has
+# Setup about 12 min, then 4 variants about 50 min together (README.md, "Hours"). Each pre_launch step has
 # its own timeout, so the deadline leaves room for one cold compile or slow download without losing the last variant.
 planned_hours = 2.0
 

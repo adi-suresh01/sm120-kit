@@ -25,11 +25,10 @@ hardware.
 The "before" is stage 2's A1 on main without #44480: BOOT_FAIL, `CUDA error: an illegal memory access` in draft
 prefill graph capture.
 
-## Cost
+## Box and time
 
-`harness quote` on 2026-10-23: 2x RTX PRO 6000 Server Edition, secure, $4.98/hr, 1.0 h planned, $5.48 worst case.
-Actual $2.06 (estimate): $0.42 for a first pod that landed on a proxy-only host and was ended before setup, $1.64
-for the run.
+`harness quote` on 2026-10-23: 2x RTX PRO 6000 Server Edition, secure, 1.0 h planned. A first pod landed on a
+proxy-only host and was ended before setup.
 
 ## Results (2026-10-23)
 

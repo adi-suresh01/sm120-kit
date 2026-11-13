@@ -2,7 +2,7 @@
 
 - Issue: https://github.com/vllm-project/vllm/issues/49476
 - Draft fix: https://github.com/vllm-project/vllm/pull/60069 (head 5a80ca1d, vendored in `patches/`)
-- Reporter: jhsmith409 (Jim Smith, Joshua8.AI). Company reporter, still blocked as of 2026-10-05.
+- Reporter: jhsmith409 (Jim Smith, Joshua8.AI). Still blocked as of 2026-10-05.
 - Related: FlashInfer #6434, #4317, PR #4827 (b12x MoE workspace/memory cluster).
 - Re-checked 2026-10-14: issue open, no comments since 10-05. PR #60069 still draft at 5a80ca1d, no reviews.
   Nobody has answered the PRO 6000 question yet.
@@ -102,14 +102,14 @@ Debug, only if a graphs variant crashes:
 
 RunPod catalog reads, 2026-10-14 (1 GPU, host CUDA >= 13.0):
 
-| GPU | Cloud | $/hr | Stock |
-|---|---|---|---|
-| RTX PRO 6000 WK | community | 1.69 | LOW |
-| RTX PRO 6000 WK | secure | 2.59 | not probed |
-| RTX PRO 6000 Server | community | 1.69 | none |
-| RTX PRO 6000 Server | secure | 2.49 | HIGH, 12 data centers |
-| RTX 5090 | community | 0.69 | none |
-| RTX 5090 | secure | 1.19 | not probed |
+| GPU | Cloud | Stock |
+|---|---|---|
+| RTX PRO 6000 WK | community | LOW |
+| RTX PRO 6000 WK | secure | not probed |
+| RTX PRO 6000 Server | community | none |
+| RTX PRO 6000 Server | secure | HIGH, 12 data centers |
+| RTX 5090 | community | none |
+| RTX 5090 | secure | not probed |
 
 Spec:
 - GPU: 1x `NVIDIA RTX PRO 6000 Blackwell Workstation Edition`, community. Fallback: Server Edition, secure.
@@ -151,22 +151,16 @@ bash issues/vllm-49476/run.sh patched-min
 
 Pull back: `scp -P <port> -r root@<ip>:/workspace/sm120-kit/results/ ./results/`, then terminate the pod.
 
-## Cost estimate
+## Time estimate
 
 Setup ~0.5 h (image pull, sshd, model download). Matrix 8 boots at ~8-10 min each, ~1.5 h. Debug ~1 h if a
 graphs variant crashes. Expected 3-4 h, hard cap 6 h.
 
-- PRO 6000 WK community at $1.69/hr: ~$5-7, cap ~$10.
-- PRO 6000 Server secure at $2.49/hr: ~$7.50-10, cap ~$15.
-
-Volume disk is billed on top (not in the catalog read); terminating the pod ends it. The earlier ~$1.10/hr
-figure was stale.
-
 ## Pod log
 
-| Date | Pod id | GPU | Start | Stop | Cost |
-|---|---|---|---|---|---|
-| 2026-10-15 | qkt9wl9ihcqstz | 1x RTX PRO 6000 Server, secure, US-NC-1, host CUDA 13.2, $2.49/hr (WK community had no stock) | 06:24:43Z | 06:51Z (terminated) | ~$1.09 (26.3 min x $2.49/hr; billing read had no records yet at 06:51Z) |
+| Date | Pod id | GPU | Start | Stop |
+|---|---|---|---|---|
+| 2026-10-15 | qkt9wl9ihcqstz | 1x RTX PRO 6000 Server, secure, US-NC-1, host CUDA 13.2 (WK community had no stock) | 06:24:43Z | 06:51Z (terminated) |
 
 ## Environment (pod qkt9wl9ihcqstz, `harness/pod/env_report.sh`)
 
@@ -243,5 +237,5 @@ No new PR from us is needed for this issue; the contribution is the A/B and the 
 Next: draft comments for #49476 (answers the reporter's PRO 6000 question, full table, workarounds), #57946
 (SM120 numbers its author asked for), and the workspace PRs (they duplicate each other; evidence #60069 works).
 
-Cost: ~$1.09 of the ~$7.50-10 estimate. The FlashInfer 0.7.1 wheels for SM120 live on
-`https://flashinfer.ai/whl` (cubin) and `https://flashinfer.ai/whl/cu130` (jit-cache), not PyPI.
+The FlashInfer 0.7.1 wheels for SM120 live on `https://flashinfer.ai/whl` (cubin) and
+`https://flashinfer.ai/whl/cu130` (jit-cache), not PyPI.

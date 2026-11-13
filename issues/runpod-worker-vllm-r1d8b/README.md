@@ -120,13 +120,12 @@ the real model's may sit just above zero; both end in the same branch as long as
 `auto` the auto-fit raises before the capacity check (above). A full card with room for a few blocks would instead
 boot at a tiny context.
 
-## Cost
+## Pod and time
 
-Quoted before the run (`harness quote runpod-worker-vllm-r1d8b`, 2026-10-23 18:17Z): 1x NVIDIA GeForce RTX 5090,
-secure, $1.19/hr, 1.0 h planned, $1.31 worst case. Secure stock moved through the day: EU-RO-1 and EUR-NO-1 at
-10:20Z, EUR-NO-1 only at 18:15Z, none at 18:16Z (community then quoted $0.69/hr, $0.76 worst case), back at 18:17Z.
-Community is the second choice in `harness.toml`, which is why the kit has no `avoid_data_centers`. Setup about 8 min,
-then about 30 min of variants.
+Checked before the run (`harness quote runpod-worker-vllm-r1d8b`, 2026-10-23 18:17Z): 1x NVIDIA GeForce RTX 5090,
+secure, 1.0 h planned. Secure stock moved through the day: EU-RO-1 and EUR-NO-1 at 10:20Z, EUR-NO-1 only at
+18:15Z, none at 18:16Z, back at 18:17Z. Community is the second choice in `harness.toml`, which is why the kit has
+no `avoid_data_centers`. Setup about 8 min, then about 30 min of variants.
 
 ## Reading the results
 
@@ -155,7 +154,7 @@ then about 30 min of variants.
 
 ## Results (2026-10-24)
 
-One pod, 1x RTX 5090 (secure), EU-CZ-1. Cost $0.73 of the $1.31 budget.
+One pod, 1x RTX 5090 (secure), EU-CZ-1.
 
 | Variant | 1 | 8 | 30 concurrent | GSM8K (n=50) | boot |
 |---|---|---|---|---|---|

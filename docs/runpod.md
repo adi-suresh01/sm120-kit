@@ -75,10 +75,10 @@ center and layout, so on a split-NUMA 4x host set `NCCL_P2P_DISABLE=1` unless th
 
 ## Rules
 
-- Each issue's GPU budget needs Aditya's explicit approval (GPU, count, $/hr, hours, total), recorded with
-  `harness budget set <issue> <usd> --note <text>`. The harness sizes every pod's deadline to fit it.
+- Each issue needs a GPU budget, set with `harness budget set <issue> <usd>`. The harness sizes every pod's deadline
+  to fit it.
 - `harness down` (or `harness run`, which ends with it) terminates the pod when a run ends. The volume goes
   with the pod.
 - Never store the API key or HF token in the repo or pass them to a pod as plain values.
-- The ledger (`issues/<x>/harness-ledger.json`) records pod id, start, deadline, end, and cost; copy the totals
-  into the issue README.
+- The ledger (`issues/<x>/harness-ledger.json`) records pod id, start, deadline, end, and cost. It stays local
+  (gitignored).

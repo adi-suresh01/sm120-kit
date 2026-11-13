@@ -104,8 +104,7 @@ approves the PR body and the #44291 comment before anything is opened or posted.
 
 ## Pod
 
-- 2x RTX PRO 6000 (Server or Workstation Edition), PCIe. Catalog read 2026-10-14: $1.69/GPU-hr community,
-  $2.49 secure, so $3.38 or $4.98/hr for two. Re-read stock and price before asking for approval.
+- 2x RTX PRO 6000 (Server or Workstation Edition), PCIe.
   Not 2x RTX 5090: GeForce drivers disable P2P, so sglang's P2P check would turn v1 off before the bug.
 - Before anything else: `nvidia-smi topo -m` must show PHB/NODE/SYS between the GPUs, not NV#. Record
   `nvidia-smi topo -p2p r` and the host driver (reporter: 580.178.04).
@@ -122,11 +121,11 @@ approves the PR body and the #44291 comment before anything is opened or posted.
 | `ar_repro.py` | Minimal `CustomAllreduce` + graph-capture repro and latency table; becomes the PR's regression test |
 | `ar_matrix.sh` | Runs `ar_repro.py` over modes x allocators x repeats with timeouts, keeping the full log |
 
-## Cost estimate and stop rules
+## Time estimate and stop rules
 
 Expected 1.5-2 h: setup 0.25 h, matrix S1-S4 at ~5 min each, `ar_repro.py` iterations, one fix check.
-Hard cap 3 h: ~$10 community, ~$15 secure. Stop if not reproduced in the first hour. Terminate the pod the moment
-the matrix and fix check are done; write code locally between runs, not on paid time.
+Hard cap 3 h. Stop if not reproduced in the first hour. Terminate the pod the moment
+the matrix and fix check are done; write code locally between runs, not on the pod.
 
 ## Stage 2 handoff (EP2 crash and TP2), not in scope here
 
@@ -138,13 +137,13 @@ Stage 2 spec and results: `stage2.md`. The notes below are the original handoff.
 - EP2 illegal memory access candidates: the 47.7 GiB FP8 N-gram table in pinned host memory under NUMA pressure
   (#36787 hit Xid 31 MMU faults from that and fixed it with NUMA-interleaved pinning), or invalid expert ids
   reaching an EP kernel (same class as vllm#49476's `-1` sentinel).
-- Needs the 133 GB checkpoint and 2x PRO 6000 for several hours; separate design and approval.
+- Needs the 133 GB checkpoint and 2x PRO 6000 for several hours; separate design.
 
 ## Pod log
 
-| Date | Pod id | GPU | Start | Stop | Cost |
-|---|---|---|---|---|---|
-| 2026-10-15 | wrbkikt79p44es | 2x RTX PRO 6000 Server, secure, EUR-IS-2, host CUDA 13.2, $4.98/hr (no community or WK stock) | 08:15:43Z | 08:42:38Z (terminated) | ~$2.23 (26.9 min x $4.98/hr) |
+| Date | Pod id | GPU | Start | Stop |
+|---|---|---|---|---|
+| 2026-10-15 | wrbkikt79p44es | 2x RTX PRO 6000 Server, secure, EUR-IS-2, host CUDA 13.2 (no community or WK stock) | 08:15:43Z | 08:42:38Z (terminated) |
 
 ## Environment (pod wrbkikt79p44es)
 
@@ -221,5 +220,5 @@ buffer. It is verified red/green on the pod, leaves default users unchanged, and
 Workarounds today: drop `expandable_segments`, or `--disable-custom-all-reduce`. `SGLANG_ENABLE_PCIE_IPC_ALLREDUCE=1`
 does not help (s3).
 
-Cost: ~$2.23 of the ~$10-15 estimate. Next: PR from the fork and a comment on #44291.
+Next: PR from the fork and a comment on #44291.
 Stage 2 (EP2 crash, TP2 alignment) stays open per the handoff above.

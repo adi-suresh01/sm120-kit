@@ -2,8 +2,8 @@
 
 The comparison half of the sglang#33422 benchmark (`issues/sglang-33422/README.md` has the issue, the hypotheses,
 and the workloads). The reporter quotes ~12.5K tok/s prefill from hermia-ai/deepseek-v4-flash-sm120-stock-vllm; this
-folder reruns that recipe with the exact prompts the sglang pod sends. Its own folder so it has its own ledger and
-budget (the harness takes one package and one image per issue).
+folder reruns that recipe with the exact prompts the sglang pod sends. Its own folder so it has its own ledger
+(the harness takes one package and one image per issue).
 
 ## hermia's setup (copied, commit 9fa3a628, 07-18)
 
@@ -75,24 +75,24 @@ setup logs' maximum link gen, width, and power limit before calling any differen
 also differ by design: hermia disables NCCL P2P (all-reduce through host memory), the reporter's sglang config only
 disables the custom all-reduce (NCCL may still use P2P). Both run as published; say so next to any gap quoted.
 
-## Hardware, hours, cost
+## Hardware and hours
 
-4x RTX PRO 6000 Server Edition, SECURE, $9.96/hr, the same GPU type as the sglang pod. `harness quote` (10-17
-01:40Z): stock in EU-CZ-1, EUR-IS-1, US-NC-2; `planned_hours = 1.0` caps it at $10.96 worst case. Expected: setup
-about 10 min, boot about 10-15 min (load, DeepGEMM and TileLang JIT, graph capture), GSM8K 2 min, workloads about
-8 min: about 45 min, $7.50. The plan's 0.75 h left no room for a slow first JIT.
+4x RTX PRO 6000 Server Edition, SECURE, the same GPU type as the sglang pod. `harness quote` (10-17 01:40Z): stock
+in EU-CZ-1, EUR-IS-1, US-NC-2; `planned_hours = 1.0`. Expected: setup about 10 min, boot about 10-15 min (load,
+DeepGEMM and TileLang JIT, graph capture), GSM8K 2 min, workloads about 8 min: about 45 min. The plan's 0.75 h left
+no room for a slow first JIT.
 
 ## Stop rules
 
 - `setup.sh` fails (version asserts, nvcc, download under 400 MB/s after 3 min, cold read under 500 MB/s) ->
   `harness down`, no run.
 - v0 BOOT_FAIL -> record the fault, stop; the recipe is published as working on stock 0.25.1, so a failure here is a
-  finding about the recipe or the pod, not something to tune around on paid time.
+  finding about the recipe or the pod, not something to tune around mid-run.
 
 Sequence, the same shape as the sglang pod's:
 
 ```
-harness budget set sglang-33422-vllm <usd> --note <approval>
+harness budget set sglang-33422-vllm <usd> --note <note>
 harness up sglang-33422-vllm
 harness exec sglang-33422-vllm v0-hermia
 harness down sglang-33422-vllm
@@ -116,7 +116,7 @@ None yet.
 Pod sm120-sglang-33422-vllm-a0a58d (04poq8d9hsj1b1), US-NE-1, 4x RTX PRO 6000 Blackwell Server Edition, driver
 595.91.07, PCIe Gen5 x16 max, 600 W limit, container memory limit 1006 GB. Topology: GPU0 on NUMA 0, GPUs 1-3 on
 NUMA 1 (GPU0 to the others SYS, GPU2-GPU3 PIX, GPU1 to GPU2/3 NODE). The first pod (yc0iqe0sndslbg, same host) was
-ended by the download gate at 162 MB/s under the old 400 MB/s floor ($0.97); the gate is now 140 MB/s (fc54f28).
+ended by the download gate at 162 MB/s under the old 400 MB/s floor; the gate is now 140 MB/s (fc54f28).
 
 Setup 11 min (166 GB at about 167 MB/s, cold read 6932 MB/s). Weights loaded in 25.8 s, boot 261 s, chunked prefill
 with max_num_batched_tokens=8192, GSM8K-50 50/50, 17x23 probe correct, host memory peak 177.7 GiB.
@@ -133,4 +133,4 @@ hermia's ~12.5K tok/s for a single ~256K prompt did not reproduce with hermia's 
 0.6.14 on this host: 7.1-7.2K, reps within 0.3%. Differences left: the 0731 weights instead of -DSpark (same
 architecture), this host's split-NUMA topology, and whatever hermia's card and host were. The reporter's sglang v0.5.16
 number on the same 9 x 90K shape was 5,540 tok/s on 300 W Max-Q cards, so it is not comparable to this until the
-sglang pod runs on Server Edition. Cost: $4.52 ($0.97 + $3.55, ledger estimates).
+sglang pod runs on Server Edition.

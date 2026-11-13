@@ -32,11 +32,6 @@ eager flags only where they are not needed.
 
 Custom all-reduce is left out: the PR keeps the pack's all-reduce settings.
 
-## Cost
-
-`harness quote` on 2026-10-23: 2x Workstation Edition, secure, $5.18/hr, 1.0 h planned, $5.70 worst case. Actual
-$2.54 (estimate).
-
 ## Results (2026-10-23)
 
 Pod sm120-puget-team-llm-e7-3a6e58: 2x RTX PRO 6000 Blackwell Workstation Edition, secure, CUDA peer access 0<->1
