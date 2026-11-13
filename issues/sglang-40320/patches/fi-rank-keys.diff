@@ -1,0 +1,25 @@
+diff --git a/flashinfer/fused_moe/core.py b/flashinfer/fused_moe/core.py
+--- a/flashinfer/fused_moe/core.py
++++ b/flashinfer/fused_moe/core.py
+@@ -1018,18 +1018,21 @@
+             # valid tactics; they can shift timings (bias only on TP rank 0, each
+             # EP rank profiles its own routing slice), which that reduce averages.
+             return (
+                 self.x_dtype,
+                 self.weight_dtype,
+                 self.output_dtype,
+                 self.top_k,
+                 self.tp_size,
++                self.tp_rank,
+                 self.ep_size,
++                self.ep_rank,
+                 self.cluster_size,
++                self.cluster_rank,
+                 self.enable_alltoall,
+                 self.use_deepseek_fp8_block_scale,
+                 self.use_w4_group_scaling,
+                 self.use_mxfp8_act_scaling,
+                 self.use_wfp4afp8_humming,
+                 self.min_latency_mode,
+                 self.enable_pdl,
+                 int(self.activation_type),

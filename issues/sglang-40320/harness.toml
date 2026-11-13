@@ -1,0 +1,125 @@
+issue = "sglang-40320"
+# Boots one small NVFP4 MoE cold and then warm per arm on 2x PCIe RTX PRO 6000 (sm_120) and reads, from the log and
+# the per-rank cache files, whether the warm boot reused the FlashInfer autotune cache. Setup is the image pull plus
+# 18.1 GB of weights; each of the 14 boots should take 2-3 min cold and less warm. Variants run in order of value, so
+# the deadline cuts the controls at the end first; the skew arm, which may hang, goes after them.
+planned_hours = 1.25
+
+[pod]
+# Built from main at 7e31007a (2026-11-12 23:44Z), FlashInfer 0.7.4. Its flashinfer_autotune.py is byte-identical to
+# main's at c2578f28 (2026-11-13).
+image = "lmsysorg/sglang:nightly-dev-cu13-20261113-7e31007a@sha256:7d2f322fbe8eda16ee65f969f8c9c2be602ecb0a29bf3c8b219945432f3992b2"
+count = 2
+min_cuda = "13.0"
+# The image plus 18.1 GB of weights, which setup.sh keeps on container disk: /workspace is a FUSE mount on secure
+# pods, and 14 boots read the weights.
+container_disk_gb = 100
+# HF_HOME's small files, the logs, and pkg_snapshot.sh's pristine copies of sglang and flashinfer.
+volume_gb = 20
+needs_hf_token = false
+# EUR-IS-2 reached HF at 15 MB/s on 10-16; US-NC-1 handed out GPUs another process held on 10-17; US-NE-1 took 30 min
+# to pull an image on 10-19.
+avoid_data_centers = ["EUR-IS-2", "US-NC-1", "US-NE-1"]
+gpus = [
+  { id = "NVIDIA RTX PRO 6000 Blackwell Server Edition", cloud = "SECURE" },
+  { id = "NVIDIA RTX PRO 6000 Blackwell Workstation Edition", cloud = "SECURE" },
+]
+
+[server]
+package = "sglang"
+model = "nvidia/Qwen3-30B-A3B-NVFP4"
+launch = ["python3", "-m", "sglang.launch_server", "--model-path", "nvidia/Qwen3-30B-A3B-NVFP4"]
+# flashinfer_cutlass is the MoE runner both sm_120 reports on the issue used, and the one that autotunes there. The
+# batch caps only shorten tuning and graph capture; the gate reads neither.
+base_flags = [
+  "--revision", "2538ded2a4edb247b4d2b4a8ba24e44bd4c017c3",
+  "--moe-runner-backend", "flashinfer_cutlass",
+  "--disable-custom-all-reduce",
+  "--max-running-requests", "32",
+  "--cuda-graph-max-bs-decode", "32",
+]
+port = 30000
+# A rank that profiles alone while its peer skips raises FlashInfer's group mismatch, or hangs until the timeout.
+fail_pattern = "illegal memory access|cudaErrorIllegalAddress|CUDA error: |Scheduler hit an exception|Received sigquit|SIGQUIT received|Autotune group"
+boot_timeout_s = 900
+# sglang is an editable install under /sgl-workspace/sglang/python, so its a/python/sglang/... paths drop two parts.
+patch_strip = 2
+
+# Every variant: HF offline (setup.sh cached the pinned revision), NCCL_P2P_DISABLE=1 (a split-NUMA host hung at NCCL
+# init on 10-17; the gate and FlashInfer's tuning collectives run over gloo, so the transport does not touch them), and
+# AUTOTUNE_START for hooks.sh. A warm or partial variant reuses the cache key directory of the variant before it, so
+# the order below is load-bearing.
+
+# Stock main, EP2: the reported config on the image as shipped.
+[variants.ep2-cold]
+flags = ["--tp-size", "2", "--ep-size", "2"]
+env = { HF_HUB_OFFLINE = "1", NCCL_P2P_DISABLE = "1", AUTOTUNE_START = "cold" }
+
+[variants.ep2-warm]
+flags = ["--tp-size", "2", "--ep-size", "2"]
+env = { HF_HUB_OFFLINE = "1", NCCL_P2P_DISABLE = "1", AUTOTUNE_START = "warm" }
+
+# #40420 on the files ep2-warm left.
+[variants.ep2-pr40420-warm]
+flags = ["--tp-size", "2", "--ep-size", "2"]
+patches = ["pr40420"]
+env = { HF_HUB_OFFLINE = "1", NCCL_P2P_DISABLE = "1", AUTOTUNE_START = "warm" }
+
+# FlashInfer's CUTLASS MoE key with tp_rank, ep_rank, and cluster_rank put back, as FlashInfer main had it until
+# flashinfer#6006 (the f64b4ba build the 10-27 sm_120 comment ran): per-rank files that can never match.
+[variants.ep2-rankkey-cold]
+flags = ["--tp-size", "2", "--ep-size", "2"]
+patches = [{ name = "fi-rank-keys", package = "flashinfer", strip = 1 }]
+env = { HF_HUB_OFFLINE = "1", NCCL_P2P_DISABLE = "1", AUTOTUNE_START = "cold" }
+
+[variants.ep2-rankkey-warm]
+flags = ["--tp-size", "2", "--ep-size", "2"]
+patches = [{ name = "fi-rank-keys", package = "flashinfer", strip = 1 }]
+env = { HF_HUB_OFFLINE = "1", NCCL_P2P_DISABLE = "1", AUTOTUNE_START = "warm" }
+
+[variants.ep2-rankkey-pr40420-warm]
+flags = ["--tp-size", "2", "--ep-size", "2"]
+patches = ["pr40420", { name = "fi-rank-keys", package = "flashinfer", strip = 1 }]
+env = { HF_HUB_OFFLINE = "1", NCCL_P2P_DISABLE = "1", AUTOTUNE_START = "warm" }
+
+# Rank 1's file removed: #40420 must still send both ranks into tuning together.
+[variants.ep2-rankkey-pr40420-partial]
+flags = ["--tp-size", "2", "--ep-size", "2"]
+patches = ["pr40420", { name = "fi-rank-keys", package = "flashinfer", strip = 1 }]
+env = { HF_HUB_OFFLINE = "1", NCCL_P2P_DISABLE = "1", AUTOTUNE_START = "partial" }
+
+# TP2 without EP under the rank-keyed FlashInfer: the gate is a TP-group check, so EP should not be needed to trip it.
+[variants.tp2ep1-rankkey-cold]
+flags = ["--tp-size", "2"]
+patches = [{ name = "fi-rank-keys", package = "flashinfer", strip = 1 }]
+env = { HF_HUB_OFFLINE = "1", NCCL_P2P_DISABLE = "1", AUTOTUNE_START = "cold" }
+
+[variants.tp2ep1-rankkey-warm]
+flags = ["--tp-size", "2"]
+patches = [{ name = "fi-rank-keys", package = "flashinfer", strip = 1 }]
+env = { HF_HUB_OFFLINE = "1", NCCL_P2P_DISABLE = "1", AUTOTUNE_START = "warm" }
+
+# Controls: stock TP2 without EP, then TP1, where the gate never runs.
+[variants.tp2ep1-cold]
+flags = ["--tp-size", "2"]
+env = { HF_HUB_OFFLINE = "1", NCCL_P2P_DISABLE = "1", AUTOTUNE_START = "cold" }
+
+[variants.tp2ep1-warm]
+flags = ["--tp-size", "2"]
+env = { HF_HUB_OFFLINE = "1", NCCL_P2P_DISABLE = "1", AUTOTUNE_START = "warm" }
+
+[variants.tp1-cold]
+flags = ["--tp-size", "1"]
+env = { HF_HUB_OFFLINE = "1", NCCL_P2P_DISABLE = "1", AUTOTUNE_START = "cold" }
+
+[variants.tp1-warm]
+flags = ["--tp-size", "1"]
+env = { HF_HUB_OFFLINE = "1", NCCL_P2P_DISABLE = "1", AUTOTUNE_START = "warm" }
+
+# Last, since a hang here holds the pod for the whole boot timeout. It starts from the cache the partial arm's boot
+# left, with one entry gone from rank 1's file, which stays loadable: #40420's gate keeps both files, so rank 0 hits
+# a profile rank 1 misses. FlashInfer 0.7.4 should send both into that one profile.
+[variants.ep2-rankkey-pr40420-skew]
+flags = ["--tp-size", "2", "--ep-size", "2"]
+patches = ["pr40420", { name = "fi-rank-keys", package = "flashinfer", strip = 1 }]
+env = { HF_HUB_OFFLINE = "1", NCCL_P2P_DISABLE = "1", AUTOTUNE_START = "skew", AUTOTUNE_FROM = "ep2-rankkey-pr40420-partial" }
