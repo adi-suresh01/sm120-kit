@@ -1,0 +1,74 @@
+host:363:363 [1] NCCL INFO ENV/Plugin: Could not find: libnccl-env.so
+host:363:363 [1] NCCL INFO cudaDriverVersion 13040
+host:363:363 [1] NCCL INFO NCCL_SOCKET_IFNAME set by environment to lo
+host:363:363 [1] NCCL INFO NCCL version 2.31.2+cuda13.3
+host:363:363 [1] NCCL INFO NCCL git version unknown unknown
+host:363:363 [1] NCCL INFO Comm config Blocking set to 1
+host:363:363 [1] NCCL INFO Comm config Comm name set to undefined:2
+host:363:363 [1] NCCL INFO NET/Plugin: Could not find: libnccl-net.so
+host:363:363 [1] NCCL INFO NCCL_SOCKET_IFNAME set by environment to lo
+host:363:363 [1] NCCL INFO NET/IB : No device found.
+host:363:363 [1] NCCL INFO NET/IB : Using [RO]; OOB lo:127.0.0.1<0>
+host:363:363 [1] NCCL INFO Failed to initialize NET plugin IB
+host:363:363 [1] NCCL INFO NCCL_SOCKET_IFNAME set by environment to lo
+host:363:363 [1] NCCL INFO NET/Socket : Using [0]lo:127.0.0.1<0>
+host:363:363 [1] NCCL INFO Initialized NET plugin Socket
+host:363:363 [1] NCCL INFO Assigned NET plugin Socket to comm
+host:363:363 [1] NCCL INFO RMA/Plugin: Could not find: libnccl-rma.so
+host:363:363 [1] NCCL INFO RMA/Plugin: Failed to initialize any plugin
+host:363:363 [1] NCCL INFO GIN/Plugin: Could not find: libnccl-gin.so
+host:363:363 [1] NCCL INFO GIN/Plugin: Failed to initialize any GIN plugin
+host:363:363 [1] NCCL INFO Using network Socket
+host:363:363 [1] NCCL INFO Loaded NVML from libnvidia-ml.so.1
+host:363:363 [1] NCCL INFO [Rank 1] ncclCommInitRankConfig comm 0x426dc9d0 rank 1 nranks 8 cudaDev 1 nvmlDev 1 busId 7000 commId 0xf733432fdc7e683d - Init START
+host:363:363 [1] NCCL INFO Socket handshake magic 0x564ab9f2fc4b9d6c (built-in default)
+host:363:363 [1] NCCL INFO RAS client listening socket at ::1<28028>
+host:363:363 [1] NCCL INFO NCCL_P2P_LEVEL set by environment to SYS
+host:363:363 [1] NCCL INFO ncclTopoGetCpuAffinity: Affinity for GPU 1 is 0-191,384-575. (GPU affinity = 0-191,384-575 ; CPU affinity = 0-767).
+host:363:363 [1] NCCL INFO NVLS multicast support is not available on dev 1
+host:363:363 [1] NCCL INFO Rank 1: 1 Net devices
+host:363:363 [1] NCCL INFO Rank 1: 0 CollNet devices
+host:363:363 [1] NCCL INFO comm 0x426dc9d0 rank 1 nRanks 8 nNodes 1 localRanks 8 localRank 1 MNNVL 0
+host:363:363 [1] NCCL INFO Trees [0] 2/-1/-1->1->0 [1] 2/-1/-1->1->0
+host:363:363 [1] NCCL INFO P2P Chunksize set to 131072
+host:363:363 [1] NCCL INFO PROFILER/Plugin: Could not find: libnccl-profiler.so
+host:363:363 [1] NCCL INFO Check P2P Type isAllDirectP2p 1 directMode 0 isAllCudaP2p 1
+host:363:495 [0] NCCL INFO [Proxy Service UDS] Device 1 CPU core 50
+host:363:490 [0] NCCL INFO [Proxy Service] Device 1 CPU core 122
+host:363:490 [1] NCCL INFO proxy listening socket at 127.0.0.1<44751>
+host:363:363 [1] NCCL INFO TUNER/Plugin: Could not find: libnccl-tuner.so
+host:363:363 [1] NCCL INFO threadThresholds 8/8/64 | 64/8/64 | 512 | 512
+host:363:363 [1] NCCL INFO 2 coll channels, 2 collnet channels, 0 nvls channels, 2 p2p channels, 2 p2p channels per peer
+host:363:363 [1] NCCL INFO symmetricSupport 1, cuMemEnable 1, globalGinSupport 0, cuMemGdrSupport 1, contiguousRanksPerHost 8, crossNicSupport 1
+host:363:363 [1] NCCL INFO ncclCommInitRankConfig comm 0x426dc9d0 rank 1 nranks 8 cudaDev 1 nvmlDev 1 busId 7000 commId 0xf733432fdc7e683d - Init COMPLETE
+host:363:363 [1] NCCL INFO Init timings - ncclCommInitRankConfig: rank 1 nranks 8 total 0.80 (kernels 0.65, alloc 0.08, bootstrap 0.01, allgathers 0.00, topo 0.04, graphs 0.01, connections 0.01, rest 0.00)
+host:363:363 [1] NCCL INFO Symmetric VA size=96GB
+host:363:363 [1] NCCL INFO Channel 00/0 : 1[1] -> 2[2] via P2P/CUMEM
+host:363:363 [1] NCCL INFO Channel 01/0 : 1[1] -> 2[2] via P2P/CUMEM
+host:363:363 [1] NCCL INFO Connected all rings, use ring PXN 0 GDR 1
+host:363:363 [1] NCCL INFO Initialized NET plugin Socket
+host:363:363 [1] NCCL INFO Assigned NET plugin Socket to comm
+host:363:363 [1] NCCL INFO RMA/Plugin: Failed to initialize any plugin
+host:363:363 [1] NCCL INFO GIN/Plugin: Failed to initialize any GIN plugin
+host:363:363 [1] NCCL INFO Using network Socket
+host:363:363 [1] NCCL INFO [Rank 1] ncclCommInitRank comm 0x523c5fa0 rank 1 nranks 8 cudaDev 1 nvmlDev 1 busId 7000 commId 0xa02e684206d3cb3d - Init START
+host:363:363 [1] NCCL INFO ncclTopoGetCpuAffinity: Affinity for GPU 1 is 0-191,384-575. (GPU affinity = 0-191,384-575 ; CPU affinity = 0-767).
+host:363:363 [1] NCCL INFO NVLS multicast support is not available on dev 1
+host:363:363 [1] NCCL INFO Rank 1: 1 Net devices
+host:363:363 [1] NCCL INFO Rank 1: 0 CollNet devices
+host:363:363 [1] NCCL INFO comm 0x523c5fa0 rank 1 nRanks 8 nNodes 1 localRanks 8 localRank 1 MNNVL 0
+host:363:363 [1] NCCL INFO Trees [0] 2/-1/-1->1->0 [1] 2/-1/-1->1->0
+host:363:363 [1] NCCL INFO P2P Chunksize set to 131072
+host:363:363 [1] NCCL INFO Check P2P Type isAllDirectP2p 1 directMode 0 isAllCudaP2p 1
+host:363:509 [0] NCCL INFO [Proxy Service] Device 1 CPU core 433
+host:363:509 [1] NCCL INFO proxy listening socket at 127.0.0.1<39151>
+host:363:518 [0] NCCL INFO [Proxy Service UDS] Device 1 CPU core 95
+host:363:363 [1] NCCL INFO threadThresholds 8/8/64 | 64/8/64 | 512 | 512
+host:363:363 [1] NCCL INFO 2 coll channels, 2 collnet channels, 0 nvls channels, 2 p2p channels, 2 p2p channels per peer
+host:363:363 [1] NCCL INFO symmetricSupport 1, cuMemEnable 1, globalGinSupport 0, cuMemGdrSupport 1, contiguousRanksPerHost 8, crossNicSupport 1
+host:363:363 [1] NCCL INFO ncclCommInitRank comm 0x523c5fa0 rank 1 nranks 8 cudaDev 1 nvmlDev 1 busId 7000 commId 0xa02e684206d3cb3d - Init COMPLETE
+host:363:363 [1] NCCL INFO Init timings - ncclCommInitRank: rank 1 nranks 8 total 0.04 (kernels 0.00, alloc 0.00, bootstrap 0.00, allgathers 0.00, topo 0.02, graphs 0.00, connections 0.01, rest 0.00)
+host:363:363 [1] NCCL INFO Symmetric VA size=96GB
+host:363:363 [1] NCCL INFO Channel 00/0 : 1[1] -> 2[2] via P2P/CUMEM
+host:363:363 [1] NCCL INFO Channel 01/0 : 1[1] -> 2[2] via P2P/CUMEM
+host:363:363 [1] NCCL INFO Connected all rings, use ring PXN 0 GDR 1

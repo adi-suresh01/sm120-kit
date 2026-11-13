@@ -1,0 +1,138 @@
+{
+  "_metadata": {
+    "flashinfer_version": "0.7.2.post1",
+    "cuda_version": "13.0",
+    "cublas_version": "13.1.1",
+    "cudnn_version": "92400",
+    "cudnn_frontend_version": "1.32.1",
+    "cutlass_dsl_version": "nvidia-cutlass-dsl-libs-base==4.8.0;nvidia-cutlass-dsl-libs-core==4.8.0;nvidia-cutlass-dsl-libs-cu12==4.8.0;nvidia-cutlass-dsl-libs-cu13==4.8.0;nvidia-cutlass-dsl==4.8.0",
+    "gpu": "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+  },
+  "('flashinfer::pcie_ipc_all_reduce', 'PcieIpcAllReduceRunner', ((1, 6144),), (4, 8, 'pcieswitch-pairs', 128, 1572864, True, 'torch.bfloat16'))": [
+    "PcieIpcAllReduceRunner",
+    [
+      0,
+      12,
+      256
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "hot"
+    ]
+  ],
+  "('flashinfer::pcie_ipc_all_reduce', 'PcieIpcAllReduceRunner', ((128, 6144),), (4, 8, 'pcieswitch-pairs', 128, 1572864, True, 'torch.bfloat16'))": [
+    "PcieIpcAllReduceRunner",
+    [
+      1,
+      4,
+      512
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "hot"
+    ]
+  ],
+  "('flashinfer::pcie_ipc_all_reduce', 'PcieIpcAllReduceRunner', ((16, 6144),), (4, 8, 'pcieswitch-pairs', 128, 1572864, True, 'torch.bfloat16'))": [
+    "PcieIpcAllReduceRunner",
+    [
+      1,
+      16,
+      256
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "hot"
+    ]
+  ],
+  "('flashinfer::pcie_ipc_all_reduce', 'PcieIpcAllReduceRunner', ((2, 6144),), (4, 8, 'pcieswitch-pairs', 128, 1572864, True, 'torch.bfloat16'))": [
+    "PcieIpcAllReduceRunner",
+    [
+      0,
+      8,
+      512
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "hot"
+    ]
+  ],
+  "('flashinfer::pcie_ipc_all_reduce', 'PcieIpcAllReduceRunner', ((256, 6144),), (4, 8, 'pcieswitch-pairs', 128, 1572864, True, 'torch.bfloat16'))": [
+    "PcieIpcAllReduceRunner",
+    [
+      2,
+      4,
+      512
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "hot"
+    ]
+  ],
+  "('flashinfer::pcie_ipc_all_reduce', 'PcieIpcAllReduceRunner', ((32, 6144),), (4, 8, 'pcieswitch-pairs', 128, 1572864, True, 'torch.bfloat16'))": [
+    "PcieIpcAllReduceRunner",
+    [
+      1,
+      16,
+      1024
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "hot"
+    ]
+  ],
+  "('flashinfer::pcie_ipc_all_reduce', 'PcieIpcAllReduceRunner', ((4, 6144),), (4, 8, 'pcieswitch-pairs', 128, 1572864, True, 'torch.bfloat16'))": [
+    "PcieIpcAllReduceRunner",
+    [
+      0,
+      8,
+      512
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "hot"
+    ]
+  ],
+  "('flashinfer::pcie_ipc_all_reduce', 'PcieIpcAllReduceRunner', ((64, 6144),), (4, 8, 'pcieswitch-pairs', 128, 1572864, True, 'torch.bfloat16'))": [
+    "PcieIpcAllReduceRunner",
+    [
+      1,
+      8,
+      512
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "hot"
+    ]
+  ],
+  "('flashinfer::pcie_ipc_all_reduce', 'PcieIpcAllReduceRunner', ((8, 6144),), (4, 8, 'pcieswitch-pairs', 128, 1572864, True, 'torch.bfloat16'))": [
+    "PcieIpcAllReduceRunner",
+    [
+      1,
+      32,
+      128
+    ],
+    [
+      "cuda_graph_profile_replays",
+      1,
+      "l2_cache_policy",
+      "hot"
+    ]
+  ],
+  "_generation": "94cc1f2cb53066ef7522b88defcad322539d0ac2f5f1b63c6a0d2414708e3691"
+}

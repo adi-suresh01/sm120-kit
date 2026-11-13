@@ -1,0 +1,53 @@
+W1110 19:36:21.450000 23 torch/distributed/run.py:982] 
+W1110 19:36:21.450000 23 torch/distributed/run.py:982] *****************************************
+W1110 19:36:21.450000 23 torch/distributed/run.py:982] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+W1110 19:36:21.450000 23 torch/distributed/run.py:982] *****************************************
+[rank6]:W1110 19:36:28.075000 98 torch/_opaque_base.py:6] torch._opaque_base is deprecated, use torch._custom_class_base instead
+[rank6]:W1110 19:36:28.075000 98 torch/_library/opaque_object.py:288] register_opaque_type is deprecated, use register_custom_class instead
+[rank6]:W1110 19:36:28.076000 98 torch/_library/opaque_object.py:211] typ='value' is deprecated, use typ='constant' instead
+[rank5]:W1110 19:36:28.088000 97 torch/_opaque_base.py:6] torch._opaque_base is deprecated, use torch._custom_class_base instead
+[rank5]:W1110 19:36:28.089000 97 torch/_library/opaque_object.py:288] register_opaque_type is deprecated, use register_custom_class instead
+[rank5]:W1110 19:36:28.089000 97 torch/_library/opaque_object.py:211] typ='value' is deprecated, use typ='constant' instead
+[rank1]:W1110 19:36:28.114000 93 torch/_opaque_base.py:6] torch._opaque_base is deprecated, use torch._custom_class_base instead
+[rank1]:W1110 19:36:28.115000 93 torch/_library/opaque_object.py:288] register_opaque_type is deprecated, use register_custom_class instead
+[rank1]:W1110 19:36:28.115000 93 torch/_library/opaque_object.py:211] typ='value' is deprecated, use typ='constant' instead
+[rank2]:W1110 19:36:28.122000 94 torch/_opaque_base.py:6] torch._opaque_base is deprecated, use torch._custom_class_base instead
+[rank2]:W1110 19:36:28.123000 94 torch/_library/opaque_object.py:288] register_opaque_type is deprecated, use register_custom_class instead
+[rank2]:W1110 19:36:28.123000 94 torch/_library/opaque_object.py:211] typ='value' is deprecated, use typ='constant' instead
+[rank7]:W1110 19:36:28.203000 99 torch/_opaque_base.py:6] torch._opaque_base is deprecated, use torch._custom_class_base instead
+[rank7]:W1110 19:36:28.204000 99 torch/_library/opaque_object.py:288] register_opaque_type is deprecated, use register_custom_class instead
+[rank7]:W1110 19:36:28.204000 99 torch/_library/opaque_object.py:211] typ='value' is deprecated, use typ='constant' instead
+[rank0]:W1110 19:36:28.204000 92 torch/_opaque_base.py:6] torch._opaque_base is deprecated, use torch._custom_class_base instead
+[rank0]:W1110 19:36:28.204000 92 torch/_library/opaque_object.py:288] register_opaque_type is deprecated, use register_custom_class instead
+[rank0]:W1110 19:36:28.205000 92 torch/_library/opaque_object.py:211] typ='value' is deprecated, use typ='constant' instead
+[rank3]:W1110 19:36:28.211000 95 torch/_opaque_base.py:6] torch._opaque_base is deprecated, use torch._custom_class_base instead
+[rank3]:W1110 19:36:28.212000 95 torch/_library/opaque_object.py:288] register_opaque_type is deprecated, use register_custom_class instead
+[rank3]:W1110 19:36:28.212000 95 torch/_library/opaque_object.py:211] typ='value' is deprecated, use typ='constant' instead
+[rank4]:W1110 19:36:28.237000 96 torch/_opaque_base.py:6] torch._opaque_base is deprecated, use torch._custom_class_base instead
+[rank4]:W1110 19:36:28.237000 96 torch/_library/opaque_object.py:288] register_opaque_type is deprecated, use register_custom_class instead
+[rank4]:W1110 19:36:28.238000 96 torch/_library/opaque_object.py:211] typ='value' is deprecated, use typ='constant' instead
+FlashInfer All Reduce is disabled because it is not supported for world_size=8.
+FlashInfer All Reduce is disabled because it is not supported for world_size=8.
+FlashInfer All Reduce is disabled because it is not supported for world_size=8.
+FlashInfer All Reduce is disabled because it is not supported for world_size=8.
+FlashInfer All Reduce is disabled because it is not supported for world_size=8.
+FlashInfer All Reduce is disabled because it is not supported for world_size=8.
+FlashInfer All Reduce is disabled because it is not supported for world_size=8.
+FlashInfer All Reduce is disabled because it is not supported for world_size=8.
+Custom allreduce is disabled because it's not supported on more than two PCIe-only GPUs. To silence this warning, specify disable_custom_all_reduce=True explicitly.
+Custom allreduce is disabled because it's not supported on more than two PCIe-only GPUs. To silence this warning, specify disable_custom_all_reduce=True explicitly.
+Custom allreduce is disabled because it's not supported on more than two PCIe-only GPUs. To silence this warning, specify disable_custom_all_reduce=True explicitly.
+Custom allreduce is disabled because it's not supported on more than two PCIe-only GPUs. To silence this warning, specify disable_custom_all_reduce=True explicitly.
+Custom allreduce is disabled because it's not supported on more than two PCIe-only GPUs. To silence this warning, specify disable_custom_all_reduce=True explicitly.
+Custom allreduce is disabled because it's not supported on more than two PCIe-only GPUs. To silence this warning, specify disable_custom_all_reduce=True explicitly.
+Custom allreduce is disabled because it's not supported on more than two PCIe-only GPUs. To silence this warning, specify disable_custom_all_reduce=True explicitly.
+Custom allreduce is disabled because it's not supported on more than two PCIe-only GPUs. To silence this warning, specify disable_custom_all_reduce=True explicitly.
+SymmMemCommunicator: Device capability 12.0 not supported, communicator is not available.
+SymmMemCommunicator: Device capability 12.0 not supported, communicator is not available.
+SymmMemCommunicator: Device capability 12.0 not supported, communicator is not available.
+SymmMemCommunicator: Device capability 12.0 not supported, communicator is not available.
+SymmMemCommunicator: Device capability 12.0 not supported, communicator is not available.
+SymmMemCommunicator: Device capability 12.0 not supported, communicator is not available.
+SymmMemCommunicator: Device capability 12.0 not supported, communicator is not available.
+SymmMemCommunicator: Device capability 12.0 not supported, communicator is not available.
+{"arm": "probe", "event": "probe", "capability": "12.0", "physical_ids": [0, 1, 2, 3, 4, 5, 6, 7], "nvml_nvlink_fully_connected": false, "peer_access": [[true, true, true, true, true, true, true, true], [true, true, true, true, true, true, true, true], [true, true, true, true, true, true, true, true], [true, true, true, true, true, true, true, true], [true, true, true, true, true, true, true, true], [true, true, true, true, true, true, true, true], [true, true, true, true, true, true, true, true], [true, true, true, true, true, true, true, true]], "multicast": false, "symm_mem_table_has_capability": false, "flashinfer_has_pcie_ipc": true, "enabled": {"flashinfer_ar": false, "custom_ar": false, "symm_mem": false, "pynccl": true}, "vllm_default_pick": "pynccl", "torch_nccl": "2.30.7", "pynccl_nccl": "2.31.2", "libnccl": ["/usr/local/lib/python3.12/dist-packages/nvidia/nccl/lib/libnccl.so.2"], "env": {"CUDA_DEVICE_ORDER": "PCI_BUS_ID", "CUDA_HOME": "/usr/local/cuda", "CUDA_VERSION": "13.0.2", "NCCL_SOCKET_IFNAME": "lo", "VLLM_BUILD_COMMIT": "4ba787ec9959e566d3b587a796dff07673324da5", "VLLM_BUILD_PIPELINE": "019d130e-464e-4ff7-b84b-492992c0c06b", "VLLM_BUILD_URL": "https://buildkite.com/vllm/release-v2/builds/9673", "VLLM_ENABLE_CUDA_COMPATIBILITY": "0", "VLLM_IMAGE_TAG": "vllm/vllm-openai:v0.33.0", "VLLM_USAGE_SOURCE": "production-docker-image"}}

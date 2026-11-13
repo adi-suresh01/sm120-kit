@@ -1,0 +1,74 @@
+host:366:366 [4] NCCL INFO ENV/Plugin: Could not find: libnccl-env.so
+host:366:366 [4] NCCL INFO cudaDriverVersion 13040
+host:366:366 [4] NCCL INFO NCCL_SOCKET_IFNAME set by environment to lo
+host:366:366 [4] NCCL INFO NCCL version 2.31.2+cuda13.3
+host:366:366 [4] NCCL INFO NCCL git version unknown unknown
+host:366:366 [4] NCCL INFO Comm config Blocking set to 1
+host:366:366 [4] NCCL INFO Comm config Comm name set to undefined:2
+host:366:366 [4] NCCL INFO NET/Plugin: Could not find: libnccl-net.so
+host:366:366 [4] NCCL INFO NCCL_SOCKET_IFNAME set by environment to lo
+host:366:366 [4] NCCL INFO NET/IB : No device found.
+host:366:366 [4] NCCL INFO NET/IB : Using [RO]; OOB lo:127.0.0.1<0>
+host:366:366 [4] NCCL INFO Failed to initialize NET plugin IB
+host:366:366 [4] NCCL INFO NCCL_SOCKET_IFNAME set by environment to lo
+host:366:366 [4] NCCL INFO NET/Socket : Using [0]lo:127.0.0.1<0>
+host:366:366 [4] NCCL INFO Initialized NET plugin Socket
+host:366:366 [4] NCCL INFO Assigned NET plugin Socket to comm
+host:366:366 [4] NCCL INFO RMA/Plugin: Could not find: libnccl-rma.so
+host:366:366 [4] NCCL INFO RMA/Plugin: Failed to initialize any plugin
+host:366:366 [4] NCCL INFO GIN/Plugin: Could not find: libnccl-gin.so
+host:366:366 [4] NCCL INFO GIN/Plugin: Failed to initialize any GIN plugin
+host:366:366 [4] NCCL INFO Using network Socket
+host:366:366 [4] NCCL INFO Loaded NVML from libnvidia-ml.so.1
+host:366:366 [4] NCCL INFO [Rank 4] ncclCommInitRankConfig comm 0xc0a1ee0 rank 4 nranks 8 cudaDev 4 nvmlDev 4 busId 84000 commId 0xf733432fdc7e683d - Init START
+host:366:366 [4] NCCL INFO Socket handshake magic 0x564ab9f2fc4b9d6c (built-in default)
+host:366:366 [4] NCCL INFO RAS client listening socket at ::1<28028>
+host:366:366 [4] NCCL INFO NCCL_P2P_LEVEL set by environment to SYS
+host:366:366 [4] NCCL INFO ncclTopoGetCpuAffinity: Affinity for GPU 4 is 192-383,576-767. (GPU affinity = 192-383,576-767 ; CPU affinity = 0-767).
+host:366:366 [4] NCCL INFO NVLS multicast support is not available on dev 4
+host:366:366 [4] NCCL INFO Rank 4: 1 Net devices
+host:366:366 [4] NCCL INFO Rank 4: 0 CollNet devices
+host:366:366 [4] NCCL INFO comm 0xc0a1ee0 rank 4 nRanks 8 nNodes 1 localRanks 8 localRank 4 MNNVL 0
+host:366:366 [4] NCCL INFO Trees [0] 5/-1/-1->4->3 [1] 5/-1/-1->4->3
+host:366:366 [4] NCCL INFO P2P Chunksize set to 131072
+host:366:366 [4] NCCL INFO PROFILER/Plugin: Could not find: libnccl-profiler.so
+host:366:366 [4] NCCL INFO Check P2P Type isAllDirectP2p 1 directMode 0 isAllCudaP2p 1
+host:366:496 [0] NCCL INFO [Proxy Service UDS] Device 4 CPU core 764
+host:366:489 [0] NCCL INFO [Proxy Service] Device 4 CPU core 307
+host:366:489 [4] NCCL INFO proxy listening socket at 127.0.0.1<53165>
+host:366:366 [4] NCCL INFO TUNER/Plugin: Could not find: libnccl-tuner.so
+host:366:366 [4] NCCL INFO threadThresholds 8/8/64 | 64/8/64 | 512 | 512
+host:366:366 [4] NCCL INFO 2 coll channels, 2 collnet channels, 0 nvls channels, 2 p2p channels, 2 p2p channels per peer
+host:366:366 [4] NCCL INFO symmetricSupport 1, cuMemEnable 1, globalGinSupport 0, cuMemGdrSupport 1, contiguousRanksPerHost 8, crossNicSupport 1
+host:366:366 [4] NCCL INFO ncclCommInitRankConfig comm 0xc0a1ee0 rank 4 nranks 8 cudaDev 4 nvmlDev 4 busId 84000 commId 0xf733432fdc7e683d - Init COMPLETE
+host:366:366 [4] NCCL INFO Init timings - ncclCommInitRankConfig: rank 4 nranks 8 total 0.80 (kernels 0.66, alloc 0.08, bootstrap 0.00, allgathers 0.01, topo 0.04, graphs 0.00, connections 0.01, rest 0.00)
+host:366:366 [4] NCCL INFO Symmetric VA size=96GB
+host:366:366 [4] NCCL INFO Channel 00/0 : 4[4] -> 5[5] via P2P/CUMEM
+host:366:366 [4] NCCL INFO Channel 01/0 : 4[4] -> 5[5] via P2P/CUMEM
+host:366:366 [4] NCCL INFO Connected all rings, use ring PXN 0 GDR 1
+host:366:366 [4] NCCL INFO Initialized NET plugin Socket
+host:366:366 [4] NCCL INFO Assigned NET plugin Socket to comm
+host:366:366 [4] NCCL INFO RMA/Plugin: Failed to initialize any plugin
+host:366:366 [4] NCCL INFO GIN/Plugin: Failed to initialize any GIN plugin
+host:366:366 [4] NCCL INFO Using network Socket
+host:366:366 [4] NCCL INFO [Rank 4] ncclCommInitRank comm 0x1bd6ccd0 rank 4 nranks 8 cudaDev 4 nvmlDev 4 busId 84000 commId 0xa02e684206d3cb3d - Init START
+host:366:366 [4] NCCL INFO ncclTopoGetCpuAffinity: Affinity for GPU 4 is 192-383,576-767. (GPU affinity = 192-383,576-767 ; CPU affinity = 0-767).
+host:366:366 [4] NCCL INFO NVLS multicast support is not available on dev 4
+host:366:366 [4] NCCL INFO Rank 4: 1 Net devices
+host:366:366 [4] NCCL INFO Rank 4: 0 CollNet devices
+host:366:366 [4] NCCL INFO comm 0x1bd6ccd0 rank 4 nRanks 8 nNodes 1 localRanks 8 localRank 4 MNNVL 0
+host:366:366 [4] NCCL INFO Trees [0] 5/-1/-1->4->3 [1] 5/-1/-1->4->3
+host:366:366 [4] NCCL INFO P2P Chunksize set to 131072
+host:366:366 [4] NCCL INFO Check P2P Type isAllDirectP2p 1 directMode 0 isAllCudaP2p 1
+host:366:521 [0] NCCL INFO [Proxy Service UDS] Device 4 CPU core 678
+host:366:513 [0] NCCL INFO [Proxy Service] Device 4 CPU core 359
+host:366:513 [4] NCCL INFO proxy listening socket at 127.0.0.1<60411>
+host:366:366 [4] NCCL INFO threadThresholds 8/8/64 | 64/8/64 | 512 | 512
+host:366:366 [4] NCCL INFO 2 coll channels, 2 collnet channels, 0 nvls channels, 2 p2p channels, 2 p2p channels per peer
+host:366:366 [4] NCCL INFO symmetricSupport 1, cuMemEnable 1, globalGinSupport 0, cuMemGdrSupport 1, contiguousRanksPerHost 8, crossNicSupport 1
+host:366:366 [4] NCCL INFO ncclCommInitRank comm 0x1bd6ccd0 rank 4 nranks 8 cudaDev 4 nvmlDev 4 busId 84000 commId 0xa02e684206d3cb3d - Init COMPLETE
+host:366:366 [4] NCCL INFO Init timings - ncclCommInitRank: rank 4 nranks 8 total 0.05 (kernels 0.00, alloc 0.00, bootstrap 0.01, allgathers 0.00, topo 0.02, graphs 0.00, connections 0.01, rest 0.00)
+host:366:366 [4] NCCL INFO Symmetric VA size=96GB
+host:366:366 [4] NCCL INFO Channel 00/0 : 4[4] -> 5[5] via P2P/CUMEM
+host:366:366 [4] NCCL INFO Channel 01/0 : 4[4] -> 5[5] via P2P/CUMEM
+host:366:366 [4] NCCL INFO Connected all rings, use ring PXN 0 GDR 1
