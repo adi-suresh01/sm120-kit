@@ -1,0 +1,78 @@
+issue = "dell-deskside-car-lightning"
+# Stage 2 of issues/dell-deskside-car: the recipe's own model and flags. Up and setup about 15 min (the 9.6 GB image,
+# 21.6 GB of weights); `default` fails at the end of its first graph capture in about 4 min with the cold compile;
+# car-off and es-off boot in about 3 min each, then run GSM8K 100 and three benchmark points in about 4.
+planned_hours = 0.75
+
+[pod]
+# Same pin and reasons as stage 1 (issues/dell-deskside-car/harness.toml).
+image = "vllm/vllm-openai@sha256:cb9bc64f0f038c2c2ebf13b31248fb87aca40c356c3d20f363be087cfcff1fcd"
+count = 2
+min_cuda = "13.0"
+# The image unpacked, 21.6 GB of weights (setup.sh keeps them on container disk), and the compile cache.
+container_disk_gb = 80
+volume_gb = 20
+needs_hf_token = false
+require_p2p = true
+# The image (9.5 GB compressed) and the weights.
+expected_download_gb = 32
+avoid_data_centers = ["EUR-IS-2", "US-NC-1", "US-NE-1"]
+gpus = [
+  { provider = "vast", id = "RTX PRO 6000 Max-Q", max_usd_hr = 4.0, min_reliability = 0.95, min_inet_down_mbps = 1000, max_download_usd_tb = 40.0, max_upload_usd_tb = 40.0 },
+  { provider = "vast", id = "RTX PRO 6000 WS", max_usd_hr = 4.0, min_reliability = 0.95, min_inet_down_mbps = 1000, max_download_usd_tb = 10.0 },
+  { provider = "vast", id = "RTX PRO 6000 S", max_usd_hr = 4.0, min_reliability = 0.95, min_inet_down_mbps = 1000, max_download_usd_tb = 10.0 },
+  { id = "NVIDIA RTX PRO 6000 Blackwell Workstation Edition", cloud = "SECURE" },
+  { id = "NVIDIA RTX PRO 6000 Blackwell Server Edition", cloud = "SECURE" },
+]
+
+[server]
+package = "vllm"
+model = "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4"
+launch = ["vllm", "serve", "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4"]
+# recipes/precision/vllm/docker-nemotron-3.5-lightning-nvfp4.sh:127-141 at b4e09e6c on a 2-GPU host, where TP snaps to
+# 2 (:68-76). --served-model-name is left out, since the smoke test and the benchmark name the model by its checkpoint
+# id, and the harness adds --host and --port. --revision is ours, so every variant loads the same weights.
+base_flags = [
+  "--revision", "bee7596271d1495f6992ae224aefde4410e816b8",
+  "--trust-remote-code",
+  "--tensor-parallel-size", "2",
+  "--moe-backend", "marlin",
+  "--kv-cache-dtype", "fp8",
+  "--enable-expert-parallel",
+  "--enable-auto-tool-choice",
+  "--tool-call-parser", "qwen3_coder",
+  "--reasoning-parser", "nemotron_v3",
+  "--gpu-memory-utilization", "0.9",
+  "--max-model-len", "200000",
+  "--max-num-seqs", "512",
+  "--max-cudagraph-capture-size", "512",
+]
+port = 8000
+fail_pattern = 'custom_all_reduce\.cuh:[0-9]+|illegal memory access|cudaErrorIllegalAddress|EngineCore failed|Engine core initialization failed'
+# Loading 21.6 GB, the cold compile, and capture at 512 sizes for a hybrid Mamba model.
+boot_timeout_s = 1200
+
+# The recipe's container env (:117-119) in every variant; only the allocator setting moves. File order is run order:
+# es-off before car-off, so a deadline that cuts the run costs the arm the recipe already ships.
+[variants.default]
+flags = []
+env = { PYTORCH_CUDA_ALLOC_CONF = "expandable_segments:True", VLLM_NVFP4_GEMM_BACKEND = "marlin", VLLM_WSL2_ENABLE_PIN_MEMORY = "1" }
+[variants.default.quality]
+gsm8k = 100
+bench = [[1, 8], [16, 64], [64, 256]]
+
+# The proposed change: expandable_segments off, custom all-reduce on.
+[variants.es-off]
+flags = []
+env = { PYTORCH_CUDA_ALLOC_CONF = "expandable_segments:False", VLLM_NVFP4_GEMM_BACKEND = "marlin", VLLM_WSL2_ENABLE_PIN_MEMORY = "1" }
+[variants.es-off.quality]
+gsm8k = 100
+bench = [[1, 8], [16, 64], [64, 256]]
+
+# NEMOTRON_LIGHTNING_DISABLE_CUSTOM_AR=1, the recipe's advice for TP>1 and the config its TP=2 runs used.
+[variants.car-off]
+flags = ["--disable-custom-all-reduce"]
+env = { PYTORCH_CUDA_ALLOC_CONF = "expandable_segments:True", VLLM_NVFP4_GEMM_BACKEND = "marlin", VLLM_WSL2_ENABLE_PIN_MEMORY = "1" }
+[variants.car-off.quality]
+gsm8k = 100
+bench = [[1, 8], [16, 64], [64, 256]]

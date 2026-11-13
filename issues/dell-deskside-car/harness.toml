@@ -1,0 +1,97 @@
+issue = "dell-deskside-car"
+# Stage 1 (README.md): the recipe's image, allocator setting, and all-reduce flag on a small dense model at TP=2. Up
+# and setup about 10 min (the 9.6 GB image, two probes, 1.5 GB of weights); `default` fails at the end of its first
+# graph capture in about 2 min, and each of the other three boots in about 1.5 min, then runs GSM8K 50 and two
+# benchmark points in about 1.5.
+planned_hours = 0.65
+
+[pod]
+# The recipe's own pin for Lightning (recipes/versions.lock:9 at b4e09e6c), a multi-arch index; its amd64 image is
+# vLLM 3f1bcfd8 (build label), torch 2.14.0, CUDA 13.0.2, NCCL 2.30.7. The tag it was pushed as,
+# nightly-3f1bcfd82bb2e93fcd364fc7a5491718453a77e2, no longer resolves on Docker Hub; the digest does.
+image = "vllm/vllm-openai@sha256:cb9bc64f0f038c2c2ebf13b31248fb87aca40c356c3d20f363be087cfcff1fcd"
+count = 2
+min_cuda = "13.0"
+# The image unpacked, the weights, and the compile cache.
+container_disk_gb = 50
+volume_gb = 20
+needs_hf_token = false
+# The recipe blames a missing P2P fabric, so the pair must have one: `topo -p2p r` reading anything but OK is refused,
+# and the matrix is kept in results/dell-deskside-car/p2p-<pod>.txt. Without P2P, vLLM turns custom all-reduce off at
+# init and the crash under test cannot happen (README.md).
+require_p2p = true
+# The image (9.5 GB compressed) and the weights.
+expected_download_gb = 12
+# EUR-IS-2 reached HF at 15 MB/s on 10-16; US-NC-1 handed out GPUs another process held on 10-17; US-NE-1 took 30 min
+# to pull an image on 10-19.
+avoid_data_centers = ["EUR-IS-2", "US-NC-1", "US-NE-1"]
+# Max-Q first: the card in the recipe's 2-GPU and 5-GPU towers (300 W). Then the 600 W editions; not RTX 5090, whose
+# driver reports no P2P, so vLLM would disable custom all-reduce before the bug. Every 2x Max-Q host listed on 11-12
+# billed traffic above the other choices' caps, hence its higher ones; the kit downloads about 12 GB and uploads only
+# logs.
+gpus = [
+  { provider = "vast", id = "RTX PRO 6000 Max-Q", max_usd_hr = 4.0, min_reliability = 0.95, min_inet_down_mbps = 1000, max_download_usd_tb = 40.0, max_upload_usd_tb = 40.0 },
+  { provider = "vast", id = "RTX PRO 6000 WS", max_usd_hr = 4.0, min_reliability = 0.95, min_inet_down_mbps = 1000, max_download_usd_tb = 10.0 },
+  { provider = "vast", id = "RTX PRO 6000 S", max_usd_hr = 4.0, min_reliability = 0.95, min_inet_down_mbps = 1000, max_download_usd_tb = 10.0 },
+  { id = "NVIDIA RTX PRO 6000 Blackwell Workstation Edition", cloud = "SECURE" },
+  { id = "NVIDIA RTX PRO 6000 Blackwell Server Edition", cloud = "SECURE" },
+]
+
+[server]
+package = "vllm"
+model = "Qwen/Qwen3-0.6B"
+launch = ["vllm", "serve", "Qwen/Qwen3-0.6B"]
+# The recipe's flags that do not depend on the model (docker-nemotron-3.5-lightning-nvfp4.sh:130-141, TP snapped to 2
+# on a 2-GPU host). The capture size sets how many graphs, and so how many registered buffers, the boot makes. The
+# MoE, parser, and fp8 KV flags belong to Lightning (stage 2); the context is cut to what the benchmark needs.
+base_flags = [
+  "--revision", "c1899de289a04d12100db370d81485cdf75e47ca",
+  "--trust-remote-code",
+  "--tensor-parallel-size", "2",
+  "--gpu-memory-utilization", "0.9",
+  "--max-model-len", "8192",
+  "--max-num-seqs", "512",
+  "--max-cudagraph-capture-size", "512",
+]
+port = 8000
+# The first pattern is the crash under test: CUDACHECK's "Failed: Cuda error .../custom_all_reduce.cuh:164 'invalid
+# argument'". It also ends the boot early if a P2P fault surfaces in the .cuh's cudaIpcOpenMemHandle instead.
+fail_pattern = 'custom_all_reduce\.cuh:[0-9]+|illegal memory access|cudaErrorIllegalAddress|EngineCore failed|Engine core initialization failed'
+boot_timeout_s = 600
+
+# The recipe's container env (:117-119) in every variant; only the allocator setting moves. At 3f1bcfd8 vLLM knows no
+# VLLM_NVFP4_GEMM_BACKEND (it logs it as unknown) and reads VLLM_WSL2_ENABLE_PIN_MEMORY on WSL only, so the two do
+# nothing here. File order is run order: H1's two arms first, so a deadline that cuts the run costs car-off, the
+# config the recipe's own TP=2 runs already cover.
+
+# The recipe as shipped on a 2-GPU tower: TP=2, NEMOTRON_LIGHTNING_DISABLE_CUSTOM_AR unset, expandable_segments on.
+[variants.default]
+flags = []
+env = { PYTORCH_CUDA_ALLOC_CONF = "expandable_segments:True", VLLM_NVFP4_GEMM_BACKEND = "marlin", VLLM_WSL2_ENABLE_PIN_MEMORY = "1" }
+[variants.default.quality]
+gsm8k = 50
+bench = [[1, 8], [16, 64]]
+
+# The proposed change: one env value flipped, custom all-reduce left on.
+[variants.es-off]
+flags = []
+env = { PYTORCH_CUDA_ALLOC_CONF = "expandable_segments:False", VLLM_NVFP4_GEMM_BACKEND = "marlin", VLLM_WSL2_ENABLE_PIN_MEMORY = "1" }
+[variants.es-off.quality]
+gsm8k = 50
+bench = [[1, 8], [16, 64]]
+
+# The allocator held at es-off's setting, so es-off against this one is custom all-reduce against NCCL alone.
+[variants.es-off-car-off]
+flags = ["--disable-custom-all-reduce"]
+env = { PYTORCH_CUDA_ALLOC_CONF = "expandable_segments:False", VLLM_NVFP4_GEMM_BACKEND = "marlin", VLLM_WSL2_ENABLE_PIN_MEMORY = "1" }
+[variants.es-off-car-off.quality]
+gsm8k = 50
+bench = [[1, 8], [16, 64]]
+
+# The recipe's advice for TP>1: NEMOTRON_LIGHTNING_DISABLE_CUSTOM_AR=1.
+[variants.car-off]
+flags = ["--disable-custom-all-reduce"]
+env = { PYTORCH_CUDA_ALLOC_CONF = "expandable_segments:True", VLLM_NVFP4_GEMM_BACKEND = "marlin", VLLM_WSL2_ENABLE_PIN_MEMORY = "1" }
+[variants.car-off.quality]
+gsm8k = 50
+bench = [[1, 8], [16, 64]]
