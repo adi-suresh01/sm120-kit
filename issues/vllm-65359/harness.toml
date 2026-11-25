@@ -1,0 +1,41 @@
+# vllm#65359: FlashInfer 0.7.3 PCIe IPC all-gather at TP8, Lei-010's bench (issuecomment-6997879140) on a host whose
+# 8 GPUs split into two 4-GPU NUMA islands, so the copy-engine variant is admitted there and can be compared with
+# recursive doubling on the same box. A microbenchmark with no model weights: everything runs in setup.sh, so
+# `harness watch` rents, measures, and leaves the box for `harness down` to pull and end. There are no variants.
+# About 10 min for the image and gates, 2-5 min for the FlashInfer JIT build, and 20-30 min of arms (README.md);
+# each 900 s arm needs 25 min left before the deadline to start, hence the slack.
+issue = "vllm-65359"
+planned_hours = 1.25
+
+[pod]
+# v0.34.0 pins flashinfer-python 0.7.3 and torch 2.14.0 (requirements/cuda.txt at the tag), the FlashInfer release
+# the thread's numbers come from; env_extra.txt records what the box actually loads.
+image = "vllm/vllm-openai:v0.34.0@sha256:20fdb089454afbb324efa4110a2c025ff7b27cc1a086e07aa580b18df8ad1ce1"
+count = 8
+min_cuda = "13.0"
+# The image unpacks to roughly 30 GB; the JIT build and the logs need under 2 GB.
+container_disk_gb = 50
+volume_gb = 10
+needs_hf_token = false
+# Every all-gather variant reads or writes peer memory, so a box where any pair lacks P2P cannot answer the question.
+require_p2p = true
+# The amd64 image is 10.0 GB compressed.
+expected_download_gb = 11
+# Machine 142634 (Bulgaria) is the box issues/pcie-tp8-allreduce measured on 2026-11-05: dual EPYC 9575F, 2 NUMA
+# nodes, NODE inside GPUs 0-3 and 4-7, SYS across, P2P on all 28 pairs. That is the placement FlashInfer calls
+# ordered 4+4. The other 8x Server Edition machines listed on 2026-11-24 have an unknown or single-socket layout, so
+# they are avoided; setup.sh still checks the layout and exits non-zero on a box without a 4+4 split, which makes
+# `harness watch` destroy it and look again.
+avoid_machines = [10116, 150541, 153928, 56366, 157617, 157618]
+gpus = [
+  { provider = "vast", id = "RTX PRO 6000 S", max_usd_hr = 14.0, min_reliability = 0.95 },
+]
+
+# No server runs here; [server] only satisfies the schema.
+[server]
+package = "vllm"
+model = "none"
+launch = ["true"]
+port = 8000
+fail_pattern = "never-matches"
+boot_timeout_s = 60
